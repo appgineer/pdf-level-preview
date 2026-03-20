@@ -20,10 +20,10 @@ class PDFLevelPreviewApp:
         self.saved_levels = []
         self.thumbnail_cache = {}
         self.preview_cache = {}
-        self.thumb_items = []           # list of (photo, frame_widget)
+        self.thumb_items = []
         self.thumbnail_photo_refs = []
         self.preview_photo = None
-        self.current_img = None         # current PIL image shown in preview
+        self.current_img = None
         self.zoom_idx = ZOOM_DEFAULT_IDX
         self.has_dnd = has_dnd
 
@@ -49,7 +49,7 @@ class PDFLevelPreviewApp:
         tk.Button(toolbar, text="-", width=2, command=self.zoom_out).pack(side=tk.RIGHT, padx=2)
         tk.Button(toolbar, text="+", width=2, command=self.zoom_in).pack(side=tk.RIGHT, padx=2)
 
-        # Resizable left/right split
+        # Resizable split
         paned = tk.PanedWindow(self.root, orient=tk.HORIZONTAL, sashwidth=5, sashrelief=tk.RAISED)
         paned.pack(fill=tk.BOTH, expand=True)
 
@@ -72,6 +72,12 @@ class PDFLevelPreviewApp:
         ))
         self.thumb_canvas.bind("<Configure>", self._on_thumb_canvas_resize)
 
+        # Mouse wheel scrolling on left panel
+        for widget in (self.thumb_canvas, self.thumb_frame):
+            widget.bind("<MouseWheel>", self._on_thumb_scroll)   # Windows
+            widget.bind("<Button-4>",   self._on_thumb_scroll)   # Linux/macOS up
+            widget.bind("<Button-5>",   self._on_thumb_scroll)   # Linux/macOS down
+
         # ── Right: preview + controls ──────────────────────────────────
         right = tk.Frame(paned)
         paned.add(right, minsize=400)
@@ -92,37 +98,39 @@ class PDFLevelPreviewApp:
         prev_hscroll.pack(side=tk.BOTTOM, fill=tk.X)
         self.preview_canvas.pack(fill=tk.BOTH, expand=True)
 
-        self.preview_canvas.bind("<Control-MouseWheel>", self._on_ctrl_wheel)   # Windows
-        self.preview_canvas.bind("<Control-Button-4>", self._on_ctrl_wheel)     # Linux up
-        self.preview_canvas.bind("<Control-Button-5>", self._on_ctrl_wheel)     # Linux down
+        self.preview_canvas.bind("<Control-MouseWheel>", self._on_ctrl_wheel)
+        self.preview_canvas.bind("<Control-Button-4>",   self._on_ctrl_wheel)
+        self.preview_canvas.bind("<Control-Button-5>",   self._on_ctrl_wheel)
         self.preview_canvas.bind("<Configure>", self._on_preview_resize)
 
-        # Controls
-        controls = tk.Frame(right, bd=1, relief=tk.RAISED, pady=6, padx=8)
+        # ── Controls bar (single compact row) ─────────────────────────
+        controls = tk.Frame(right, bd=1, relief=tk.RAISED, pady=4, padx=6)
         controls.pack(side=tk.BOTTOM, fill=tk.X)
 
-        slider_row = tk.Frame(controls)
-        slider_row.pack(fill=tk.X, pady=2)
+        row = tk.Frame(controls)
+        row.pack(fill=tk.X, pady=2)
 
-        tk.Label(slider_row, text="검은색:").pack(side=tk.LEFT)
-        self.black_var = tk.DoubleVar(value=0.0)
-        self.black_entry = tk.Entry(slider_row, textvariable=self.black_var, width=6)
+        tk.Label(row, text="검은색:").pack(side=tk.LEFT)
+        self.black_var = tk.IntVar(value=0)
+        self.black_entry = tk.Entry(row, textvariable=self.black_var, width=4)
         self.black_entry.pack(side=tk.LEFT, padx=2)
         self.black_slider = ttk.Scale(
-            slider_row, from_=0, to=255, orient=tk.HORIZONTAL,
-            variable=self.black_var, command=self._on_slider_change
+            row, from_=0, to=255, orient=tk.HORIZONTAL,
+            variable=self.black_var, command=self._on_slider_change, length=160
         )
-        self.black_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+        self.black_slider.pack(side=tk.LEFT, padx=4)
 
-        tk.Label(slider_row, text="흰색:").pack(side=tk.LEFT)
-        self.white_var = tk.DoubleVar(value=255.0)
-        self.white_entry = tk.Entry(slider_row, textvariable=self.white_var, width=6)
+        tk.Label(row, text="흰색:").pack(side=tk.LEFT, padx=(8, 0))
+        self.white_var = tk.IntVar(value=255)
+        self.white_entry = tk.Entry(row, textvariable=self.white_var, width=4)
         self.white_entry.pack(side=tk.LEFT, padx=2)
         self.white_slider = ttk.Scale(
-            slider_row, from_=0, to=255, orient=tk.HORIZONTAL,
-            variable=self.white_var, command=self._on_slider_change
+            row, from_=0, to=255, orient=tk.HORIZONTAL,
+            variable=self.white_var, command=self._on_slider_change, length=160
         )
-        self.white_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+        self.white_slider.pack(side=tk.LEFT, padx=4)
+
+        tk.Button(row, text="저장", command=self.add_level, padx=10).pack(side=tk.LEFT, padx=8)
 
         self.black_entry.bind("<Up>",   lambda e: self._nudge(self.black_var, +1))
         self.black_entry.bind("<Down>", lambda e: self._nudge(self.black_var, -1))
@@ -131,14 +139,17 @@ class PDFLevelPreviewApp:
         self.black_var.trace_add("write", self._on_var_change)
         self.white_var.trace_add("write", self._on_var_change)
 
-        tk.Button(controls, text="저장", command=self.add_level).pack(anchor=tk.W, pady=2)
-        ttk.Separator(controls, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=4)
+        # Enter key = save level (anywhere in the window)
+        self.root.bind("<Return>", lambda e: self.add_level())
 
-        saved_outer = tk.Frame(controls, height=80)
+        ttk.Separator(controls, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=2)
+
+        # Saved levels scrollable row
+        saved_outer = tk.Frame(controls, height=60)
         saved_outer.pack(fill=tk.X)
         saved_outer.pack_propagate(False)
 
-        saved_canvas = tk.Canvas(saved_outer, height=80)
+        saved_canvas = tk.Canvas(saved_outer, height=60)
         saved_scroll = ttk.Scrollbar(saved_outer, orient=tk.VERTICAL, command=saved_canvas.yview)
         saved_canvas.configure(yscrollcommand=saved_scroll.set)
         saved_scroll.pack(side=tk.RIGHT, fill=tk.Y)
@@ -191,7 +202,7 @@ class PDFLevelPreviewApp:
         self.update_preview()
 
     # ------------------------------------------------------------------ #
-    # Thumbnails (multi-column, responsive)
+    # Thumbnails (multi-column, centered)
     # ------------------------------------------------------------------ #
     def _build_thumbnails(self):
         for w in self.thumb_frame.winfo_children():
@@ -219,8 +230,26 @@ class PDFLevelPreviewApp:
 
         self._layout_thumbnails()
 
+        # Bind mouse wheel to all children in thumbnail area
+        self._bind_thumb_scroll_recursive(self.thumb_frame)
+
+    def _bind_thumb_scroll_recursive(self, widget):
+        widget.bind("<MouseWheel>", self._on_thumb_scroll)
+        widget.bind("<Button-4>",   self._on_thumb_scroll)
+        widget.bind("<Button-5>",   self._on_thumb_scroll)
+        for child in widget.winfo_children():
+            self._bind_thumb_scroll_recursive(child)
+
+    def _on_thumb_scroll(self, event):
+        if event.num == 4:
+            self.thumb_canvas.yview_scroll(-1, "units")
+        elif event.num == 5:
+            self.thumb_canvas.yview_scroll(1, "units")
+        else:
+            self.thumb_canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+        return "break"
+
     def _on_thumb_canvas_resize(self, event):
-        self.thumb_canvas.itemconfig(self._thumb_win_id, width=event.width)
         self._layout_thumbnails()
 
     def _layout_thumbnails(self, event=None):
@@ -232,12 +261,19 @@ class PDFLevelPreviewApp:
 
         col_w = THUMB_W + THUMB_MARGIN * 2
         cols = max(1, canvas_w // col_w)
+        total_w = cols * col_w
+        offset_x = max(0, (canvas_w - total_w) // 2)
+
+        for _, frame in self.thumb_items:
+            frame.grid_forget()
 
         for i, (photo, frame) in enumerate(self.thumb_items):
-            row = i // cols
-            col = i % cols
-            frame.grid(row=row, column=col, padx=THUMB_MARGIN, pady=THUMB_MARGIN)
+            r = i // cols
+            c = i % cols
+            frame.grid(row=r, column=c, padx=THUMB_MARGIN, pady=THUMB_MARGIN)
 
+        # Center the frame within the canvas
+        self.thumb_canvas.coords(self._thumb_win_id, offset_x, 0)
         self.thumb_canvas.configure(scrollregion=self.thumb_canvas.bbox("all"))
 
     # ------------------------------------------------------------------ #
@@ -257,12 +293,12 @@ class PDFLevelPreviewApp:
         self.update_preview()
 
     # ------------------------------------------------------------------ #
-    # Level adjustment (float precision)
+    # Level adjustment
     # ------------------------------------------------------------------ #
     def apply_levels(self, image, black, white):
-        black = max(0.0, min(255.0, float(black)))
-        white = max(0.0, min(255.0, float(white)))
-        span = max(0.1, white - black)
+        black = max(0, min(255, int(black)))
+        white = max(0, min(255, int(white)))
+        span = max(1, white - black)
         lut = [
             0 if i <= black else
             255 if i >= white else
@@ -314,13 +350,13 @@ class PDFLevelPreviewApp:
         if self.pdf_doc is None:
             return
         try:
-            black = round(float(self.black_var.get()), 1)
-            white = round(float(self.white_var.get()), 1)
+            black = int(self.black_var.get())
+            white = int(self.white_var.get())
         except (tk.TclError, ValueError):
             return
 
-        black = max(0.0, min(255.0, black))
-        white = max(0.0, min(255.0, white))
+        black = max(0, min(255, black))
+        white = max(0, min(255, white))
         zoom = self._current_zoom()
 
         key = (self.current_page, black, white, zoom)
@@ -336,20 +372,17 @@ class PDFLevelPreviewApp:
             return
         img = self.current_img
         photo = ImageTk.PhotoImage(img)
-        self.preview_photo = photo  # keep reference
+        self.preview_photo = photo
 
         cw = max(1, self.preview_canvas.winfo_width())
         ch = max(1, self.preview_canvas.winfo_height())
         iw, ih = img.width, img.height
 
-        # Center image: if canvas is larger, place image in middle; else allow scrolling from 0
         x = max(cw // 2, iw // 2)
         y = max(ch // 2, ih // 2)
-        sr_w = max(cw, iw)
-        sr_h = max(ch, ih)
 
         self.preview_canvas.delete("all")
-        self.preview_canvas.config(scrollregion=(0, 0, sr_w, sr_h))
+        self.preview_canvas.config(scrollregion=(0, 0, max(cw, iw), max(ch, ih)))
         self.preview_canvas.create_image(x, y, anchor=tk.CENTER, image=photo)
 
     def _on_preview_resize(self, event):
@@ -360,8 +393,8 @@ class PDFLevelPreviewApp:
     # ------------------------------------------------------------------ #
     def add_level(self):
         try:
-            black = round(float(self.black_var.get()), 1)
-            white = round(float(self.white_var.get()), 1)
+            black = int(self.black_var.get())
+            white = int(self.white_var.get())
         except (tk.TclError, ValueError):
             return
         pair = (black, white)
@@ -371,11 +404,9 @@ class PDFLevelPreviewApp:
         self._add_level_button(black, white)
 
     def _add_level_button(self, black, white):
-        def fmt(v):
-            return str(int(v)) if v == int(v) else f"{v:.1f}"
         btn = tk.Button(
             self.saved_frame,
-            text=f"검:{fmt(black)} 흰:{fmt(white)}",
+            text=f"검:{black} 흰:{white}",
             command=lambda b=black, w=white: self.apply_saved_level(b, w),
             relief=tk.RAISED, padx=4
         )
@@ -400,10 +431,10 @@ class PDFLevelPreviewApp:
 
     def _nudge(self, var, delta):
         try:
-            val = round(float(var.get()), 1)
+            val = int(var.get())
         except (tk.TclError, ValueError):
-            val = 0.0
-        var.set(round(max(0.0, min(255.0, val + delta * 0.1)), 1))
+            val = 0
+        var.set(max(0, min(255, val + delta)))
         self.update_preview()
         return "break"
 
