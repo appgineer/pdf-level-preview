@@ -137,9 +137,9 @@ class PDFLevelPreviewApp:
         row = tk.Frame(controls)
         row.pack(fill=tk.X, pady=4)
 
-        tk.Label(row, text="검은색:", font=("", 11)).pack(side=tk.LEFT)
+        tk.Label(row, text="검은색:", font=("", 12)).pack(side=tk.LEFT)
         self.black_var = tk.IntVar(value=0)
-        self.black_entry = tk.Entry(row, textvariable=self.black_var, width=4, font=("", 11))
+        self.black_entry = tk.Entry(row, textvariable=self.black_var, width=4, font=("", 12))
         self.black_entry.pack(side=tk.LEFT, padx=2)
         self.black_slider = ttk.Scale(
             row, from_=0, to=255, orient=tk.HORIZONTAL,
@@ -147,9 +147,9 @@ class PDFLevelPreviewApp:
         )
         self.black_slider.pack(side=tk.LEFT, padx=4)
 
-        tk.Label(row, text="흰색:", font=("", 11)).pack(side=tk.LEFT, padx=(12, 0))
+        tk.Label(row, text="흰색:", font=("", 12)).pack(side=tk.LEFT, padx=(12, 0))
         self.white_var = tk.IntVar(value=255)
-        self.white_entry = tk.Entry(row, textvariable=self.white_var, width=4, font=("", 11))
+        self.white_entry = tk.Entry(row, textvariable=self.white_var, width=4, font=("", 12))
         self.white_entry.pack(side=tk.LEFT, padx=2)
         self.white_slider = ttk.Scale(
             row, from_=0, to=255, orient=tk.HORIZONTAL,
@@ -158,7 +158,7 @@ class PDFLevelPreviewApp:
         self.white_slider.pack(side=tk.LEFT, padx=4)
 
         tk.Button(row, text="저장", command=self.add_level, padx=10, cursor="hand2",
-                  font=("", 11)).pack(side=tk.LEFT, padx=10)
+                  font=("", 12)).pack(side=tk.LEFT, padx=10)
 
         self.black_entry.bind("<Up>",   lambda e: self._nudge(self.black_var, +1))
         self.black_entry.bind("<Down>", lambda e: self._nudge(self.black_var, -1))
@@ -497,7 +497,7 @@ class PDFLevelPreviewApp:
         self._add_level_button(black, white)
 
     def _add_level_button(self, black, white):
-        FNT = ("", 11)
+        FNT = ("", 12)
         idx = len(self.saved_levels) - 1
         row = tk.Frame(self.saved_frame)
         row.pack(side=tk.TOP, fill=tk.X, padx=2, pady=2)
@@ -541,7 +541,7 @@ class PDFLevelPreviewApp:
     # Config panel
     # ------------------------------------------------------------------ #
     def _build_config_panel(self, parent):
-        FNT = ("", 11)
+        FNT = ("", 12)
 
         # 가운데 정렬용 컨테이너
         center = tk.Frame(parent)
@@ -609,7 +609,7 @@ class PDFLevelPreviewApp:
             w.destroy()
         if not self.is_split_var.get():
             return
-        FNT = ("", 11)
+        FNT = ("", 12)
         method = self.split_method_var.get()
         if method == "page":
             tk.Label(self.split_detail_frame, text="범위:", font=FNT).pack(side=tk.LEFT)
@@ -651,6 +651,21 @@ class PDFLevelPreviewApp:
         config_path = os.path.join(pdf_dir, "config.json")
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(config, f, ensure_ascii=False, indent=2)
+
+        # 안내창 (0.5초 후 자동 닫힘)
+        popup = tk.Toplevel(self.root)
+        popup.overrideredirect(True)
+        popup.attributes("-topmost", True)
+        tk.Label(popup, text="설정이 생성되었습니다.", font=("", 13),
+                 padx=20, pady=12, bg="#333", fg="#fff").pack()
+        # 부모 창 중앙에 배치
+        popup.update_idletasks()
+        pw = popup.winfo_width()
+        ph = popup.winfo_height()
+        rx = self.root.winfo_rootx() + (self.root.winfo_width() - pw) // 2
+        ry = self.root.winfo_rooty() + (self.root.winfo_height() - ph) // 2
+        popup.geometry(f"+{rx}+{ry}")
+        self.root.after(500, popup.destroy)
 
     def _load_config(self, pdf_path):
         config_path = os.path.join(os.path.dirname(pdf_path), "config.json")
