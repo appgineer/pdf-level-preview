@@ -103,6 +103,13 @@ class PDFLevelPreviewApp:
         self.preview_canvas.bind("<Control-Button-5>",   self._on_ctrl_wheel)
         self.preview_canvas.bind("<Configure>", self._on_preview_resize)
 
+        # Drag to pan
+        self.preview_canvas.bind("<ButtonPress-1>", self._on_drag_start)
+        self.preview_canvas.bind("<B1-Motion>", self._on_drag_move)
+        self.preview_canvas.bind("<MouseWheel>", self._on_preview_scroll)
+        self.preview_canvas.bind("<Button-4>", self._on_preview_scroll)
+        self.preview_canvas.bind("<Button-5>", self._on_preview_scroll)
+
         # ── Controls bar (single compact row) ─────────────────────────
         controls = tk.Frame(right, bd=1, relief=tk.RAISED, pady=4, padx=6)
         controls.pack(side=tk.BOTTOM, fill=tk.X)
@@ -389,6 +396,21 @@ class PDFLevelPreviewApp:
 
     def _on_preview_resize(self, event):
         self._draw_preview()
+
+    def _on_drag_start(self, event):
+        self.preview_canvas.scan_mark(event.x, event.y)
+
+    def _on_drag_move(self, event):
+        self.preview_canvas.scan_dragto(event.x, event.y, gain=1)
+
+    def _on_preview_scroll(self, event):
+        if event.num == 4:
+            self.preview_canvas.yview_scroll(-3, "units")
+        elif event.num == 5:
+            self.preview_canvas.yview_scroll(3, "units")
+        else:
+            self.preview_canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+        return "break"
 
     # ------------------------------------------------------------------ #
     # Saved levels
