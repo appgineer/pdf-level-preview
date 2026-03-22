@@ -7,6 +7,8 @@ ZOOM_STEPS = [0.25, 0.33, 0.5, 0.67, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0]
 ZOOM_DEFAULT_IDX = 5  # 1.0
 THUMB_W = 140
 THUMB_MARGIN = 6
+BASE_DPI = 600
+BASE_SCALE = BASE_DPI / 72  # ~8.33
 
 
 class PDFLevelPreviewApp:
@@ -20,6 +22,8 @@ class PDFLevelPreviewApp:
         self.saved_levels = []
         self.thumbnail_cache = {}
         self.preview_cache = {}
+        self.base_render_cache = {}  # page_idx -> high-res PIL Image
+        self.levels_cache = {}  # (page_idx, black, white) -> levels-applied PIL Image
         self.thumb_items = []
         self.thumbnail_photo_refs = []
         self.preview_photo = None
@@ -201,6 +205,8 @@ class PDFLevelPreviewApp:
         self.pdf_doc = fitz.open(path)
         self.thumbnail_cache.clear()
         self.preview_cache.clear()
+        self.base_render_cache.clear()
+        self.levels_cache.clear()
         self.current_page = 0
         self.zoom_idx = ZOOM_DEFAULT_IDX
         self._update_zoom_label()
@@ -292,6 +298,23 @@ class PDFLevelPreviewApp:
         pix = page.get_pixmap(matrix=mat)
         return Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
+    def _get_base_render(self, page_idx):
+        """600 DPI 고해상도 렌더링 (캐시)"""
+        if page_idx not in self.base_render_cache:
+            self.base_render_cache[page_idx] = self._render_page(page_idx, zoom=BASE_SCALE)
+        return self.base_render_cache[page_idx]
+
+    def _get_levels_applied(self, page_idx, black, white):
+        """고해상도 이미지에 레벨 적용 (캐시)"""
+        key = (page_idx, black, white)
+        if key not in self.levels_cache:
+            base = self._get_base_render(page_idx)
+            if black == 0 and white == 255:
+                self.levels_cache[key] = base
+            else:
+                self.levels_cache[key] = self.apply_levels(base, black, white)
+        return self.levels_cache[key]
+
     # ------------------------------------------------------------------ #
     # Page selection
     # ------------------------------------------------------------------ #
@@ -370,8 +393,18 @@ class PDFLevelPreviewApp:
 
         key = (self.current_page, black, white, zoom)
         if key not in self.preview_cache:
-            raw = self._render_page(self.current_page, zoom=zoom)
-            self.preview_cache[key] = self.apply_levels(raw, black, white)
+            # 600 DPI로 렌더링 후 레벨 적용, 그 다음 화면 줌에 맞게 리사이즈
+            hires = self._get_levels_applied(self.current_page, black, white)
+            # 화면 표시 크기 계산: zoom 1.0 = 72 DPI 크기
+            display_w = int(hires.width * zoom / BASE_SCALE)
+            display_h = int(hires.height * zoom / BASE_SCALE)
+            if display_w >= hires.width:
+                # 확대해야 하면 고해상도 그대로 (더 확대할 필요 없음)
+                self.preview_cache[key] = hires
+            else:
+                self.preview_cache[key] = hires.resize(
+                    (display_w, display_h), Image.LANCZOS
+                )
 
         self.current_img = self.preview_cache[key]
         self._draw_preview()
