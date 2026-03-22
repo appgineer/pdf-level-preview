@@ -99,16 +99,16 @@ class PDFLevelPreviewApp:
             widget.bind("<Button-5>",   self._on_thumb_scroll)   # Linux/macOS down
 
         # ── Right: preview + controls (vertical resizable) ─────────────
-        right_paned = tk.PanedWindow(
+        self.right_paned = tk.PanedWindow(
             paned, orient=tk.VERTICAL,
-            sashwidth=10, sashrelief=tk.RAISED, sashpad=4,
+            sashwidth=6, sashrelief=tk.RAISED,
             sashcursor="sb_v_double_arrow"
         )
-        paned.add(right_paned, minsize=400)
+        paned.add(self.right_paned, minsize=400)
 
         # ── Top: preview ──
-        preview_frame = tk.Frame(right_paned)
-        right_paned.add(preview_frame, minsize=200)
+        preview_frame = tk.Frame(self.right_paned)
+        self.right_paned.add(preview_frame, minsize=200)
 
         prev_vscroll = ttk.Scrollbar(preview_frame, orient=tk.VERTICAL)
         prev_hscroll = ttk.Scrollbar(preview_frame, orient=tk.HORIZONTAL)
@@ -136,8 +136,11 @@ class PDFLevelPreviewApp:
         self.preview_canvas.bind("<Button-5>", self._on_preview_scroll)
 
         # ── Bottom: controls (3-column) ──
-        controls = tk.Frame(right_paned, bd=1, relief=tk.RAISED)
-        right_paned.add(controls, minsize=120)
+        controls = tk.Frame(self.right_paned, bd=1, relief=tk.RAISED)
+        self.right_paned.add(controls, minsize=120)
+
+        # 초기 비율: 미리보기 80%, 설정 20%
+        self.root.after(50, self._set_initial_sash)
 
         FNT = ("", 12)
 
@@ -213,6 +216,12 @@ class PDFLevelPreviewApp:
         col3 = tk.Frame(controls, padx=8, pady=6)
         col3.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self._build_config_panel(col3)
+
+    def _set_initial_sash(self):
+        self.right_paned.update_idletasks()
+        total_h = self.right_paned.winfo_height()
+        if total_h > 1:
+            self.right_paned.sash_place(0, 0, int(total_h * 0.8))
 
     # ------------------------------------------------------------------ #
     # Drag & Drop
