@@ -35,10 +35,10 @@ class PDFLevelPreviewApp:
 
         # Config variables
         self.selected_level_idx = tk.IntVar(value=-1)
-        self.process_level_var = tk.StringVar(value="고급")
-        self.use_ocr_var = tk.BooleanVar(value=True)
+        self.process_level_var = tk.StringVar(value="일반")
+        self.use_ocr_var = tk.BooleanVar(value=False)
         self.ocr_language_var = tk.StringVar(value="Korean")
-        self.is_split_var = tk.BooleanVar(value=True)
+        self.is_split_var = tk.BooleanVar(value=False)
         self.split_method_var = tk.StringVar(value="page")
         self.split_page_ranges_var = tk.StringVar(value="")
         self.split_size_mb_var = tk.IntVar(value=0)
@@ -497,14 +497,15 @@ class PDFLevelPreviewApp:
         self._add_level_button(black, white)
 
     def _add_level_button(self, black, white):
+        FNT = ("", 11)
         idx = len(self.saved_levels) - 1
         row = tk.Frame(self.saved_frame)
-        row.pack(side=tk.TOP, fill=tk.X, padx=2, pady=1)
+        row.pack(side=tk.TOP, fill=tk.X, padx=2, pady=2)
 
         rb = tk.Radiobutton(
             row, variable=self.selected_level_idx, value=idx,
             command=lambda b=black, w=white: self.apply_saved_level(b, w),
-            cursor="hand2"
+            cursor="hand2", font=FNT
         )
         rb.pack(side=tk.LEFT)
 
@@ -512,7 +513,7 @@ class PDFLevelPreviewApp:
         btn = tk.Button(
             row, text=label,
             command=lambda b=black, w=white: self.apply_saved_level(b, w),
-            relief=tk.RAISED, padx=4, cursor="hand2"
+            relief=tk.RAISED, padx=6, pady=2, cursor="hand2", font=FNT
         )
         btn.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
@@ -542,9 +543,13 @@ class PDFLevelPreviewApp:
     def _build_config_panel(self, parent):
         FNT = ("", 11)
 
+        # 가운데 정렬용 컨테이너
+        center = tk.Frame(parent)
+        center.pack(expand=True)
+
         # Row 0: 처리수준
-        r0 = tk.Frame(parent)
-        r0.pack(fill=tk.X, pady=3)
+        r0 = tk.Frame(center)
+        r0.pack(pady=3)
         tk.Label(r0, text="처리수준:", font=FNT).pack(side=tk.LEFT)
         tk.Radiobutton(r0, text="일반", variable=self.process_level_var, value="일반",
                        cursor="hand2", font=FNT).pack(side=tk.LEFT, padx=2)
@@ -552,16 +557,17 @@ class PDFLevelPreviewApp:
                        cursor="hand2", font=FNT).pack(side=tk.LEFT, padx=2)
 
         # Row 1: OCR
-        r1 = tk.Frame(parent)
-        r1.pack(fill=tk.X, pady=3)
+        r1 = tk.Frame(center)
+        r1.pack(pady=3)
         tk.Checkbutton(r1, text="OCR 사용", variable=self.use_ocr_var,
                        command=self._toggle_ocr, cursor="hand2", font=FNT).pack(side=tk.LEFT)
         self.ocr_language_entry = tk.Entry(r1, textvariable=self.ocr_language_var, width=12, font=FNT)
         self.ocr_language_entry.pack(side=tk.LEFT, padx=6)
+        self.ocr_language_entry.config(state=tk.DISABLED)
 
         # Row 2: 분할
-        r2 = tk.Frame(parent)
-        r2.pack(fill=tk.X, pady=3)
+        r2 = tk.Frame(center)
+        r2.pack(pady=3)
         tk.Checkbutton(r2, text="분할", variable=self.is_split_var,
                        command=self._toggle_split, cursor="hand2", font=FNT).pack(side=tk.LEFT)
         self.split_radio_frame = tk.Frame(r2)
@@ -570,15 +576,18 @@ class PDFLevelPreviewApp:
                        value="page", command=self._toggle_split_detail, cursor="hand2", font=FNT).pack(side=tk.LEFT)
         tk.Radiobutton(self.split_radio_frame, text="size", variable=self.split_method_var,
                        value="size", command=self._toggle_split_detail, cursor="hand2", font=FNT).pack(side=tk.LEFT)
+        # 기본 분할 해제 → 라디오 비활성화
+        for w in self.split_radio_frame.winfo_children():
+            w.config(state=tk.DISABLED)
 
         # Row 3: 분할 상세 (동적)
-        self.split_detail_frame = tk.Frame(parent)
-        self.split_detail_frame.pack(fill=tk.X, pady=3)
+        self.split_detail_frame = tk.Frame(center)
+        self.split_detail_frame.pack(pady=3)
         self._toggle_split_detail()
 
         # Row 4: 설정 저장 버튼
-        tk.Button(parent, text="설정 저장", command=self._save_config,
-                  padx=12, pady=4, cursor="hand2", font=FNT).pack(fill=tk.X, padx=6, pady=6)
+        tk.Button(center, text="설정 저장", command=self._save_config,
+                  padx=12, pady=4, cursor="hand2", font=FNT).pack(pady=6)
 
     def _toggle_ocr(self):
         if self.use_ocr_var.get():
