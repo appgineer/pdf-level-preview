@@ -2,6 +2,8 @@ import tkinter as tk
 from tkinter import ttk, filedialog
 from PIL import Image, ImageTk
 import fitz  # PyMuPDF
+import json
+import os
 
 ZOOM_STEPS = [0.25, 0.33, 0.5, 0.67, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0]
 ZOOM_DEFAULT_IDX = 5  # 1.0
@@ -30,6 +32,16 @@ class PDFLevelPreviewApp:
         self.current_img = None
         self.zoom_idx = ZOOM_DEFAULT_IDX
         self.has_dnd = has_dnd
+
+        # Config variables
+        self.selected_level_idx = tk.IntVar(value=-1)
+        self.process_level_var = tk.StringVar(value="고급")
+        self.use_ocr_var = tk.BooleanVar(value=True)
+        self.ocr_language_var = tk.StringVar(value="Korean")
+        self.is_split_var = tk.BooleanVar(value=True)
+        self.split_method_var = tk.StringVar(value="page")
+        self.split_page_ranges_var = tk.StringVar(value="")
+        self.split_size_mb_var = tk.IntVar(value=0)
 
         self._build_ui()
         if has_dnd:
@@ -159,13 +171,18 @@ class PDFLevelPreviewApp:
 
         ttk.Separator(controls, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=2)
 
-        # Saved levels scrollable list (vertical)
-        saved_outer = tk.Frame(controls, height=120)
+        # Saved levels + Config panel (horizontal split)
+        saved_outer = tk.Frame(controls, height=180)
         saved_outer.pack(fill=tk.X)
         saved_outer.pack_propagate(False)
 
-        saved_canvas = tk.Canvas(saved_outer, height=120)
-        saved_scroll = ttk.Scrollbar(saved_outer, orient=tk.VERTICAL, command=saved_canvas.yview)
+        # ── Left: saved levels with radio buttons ──
+        saved_left = tk.Frame(saved_outer, width=200)
+        saved_left.pack(side=tk.LEFT, fill=tk.Y)
+        saved_left.pack_propagate(False)
+
+        saved_canvas = tk.Canvas(saved_left)
+        saved_scroll = ttk.Scrollbar(saved_left, orient=tk.VERTICAL, command=saved_canvas.yview)
         saved_canvas.configure(yscrollcommand=saved_scroll.set)
         saved_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         saved_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -177,11 +194,18 @@ class PDFLevelPreviewApp:
         ))
         self.saved_canvas = saved_canvas
 
-        # 저장 레벨 영역 마우스 휠 스크롤
         for w in (saved_canvas, self.saved_frame):
             w.bind("<MouseWheel>", self._on_saved_scroll)
             w.bind("<Button-4>",   self._on_saved_scroll)
             w.bind("<Button-5>",   self._on_saved_scroll)
+
+        # ── Vertical separator ──
+        ttk.Separator(saved_outer, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4)
+
+        # ── Right: config panel ──
+        config_frame = tk.Frame(saved_outer)
+        config_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._build_config_panel(config_frame)
 
     # ------------------------------------------------------------------ #
     # Drag & Drop
@@ -222,6 +246,7 @@ class PDFLevelPreviewApp:
         self._update_zoom_label()
         self.filename_label.config(text=path.replace("\\", "/").split("/")[-1])
         self._build_thumbnails()
+        self._load_config(path)
         self.update_preview()
 
     # ------------------------------------------------------------------ #
@@ -471,17 +496,28 @@ class PDFLevelPreviewApp:
         self._add_level_button(black, white)
 
     def _add_level_button(self, black, white):
+        idx = len(self.saved_levels) - 1
+        row = tk.Frame(self.saved_frame)
+        row.pack(side=tk.TOP, fill=tk.X, padx=2, pady=1)
+
+        rb = tk.Radiobutton(
+            row, variable=self.selected_level_idx, value=idx,
+            command=lambda b=black, w=white: self.apply_saved_level(b, w)
+        )
+        rb.pack(side=tk.LEFT)
+
         label = f"검:{black} 흰:{white}"
         btn = tk.Button(
-            self.saved_frame,
-            text=label,
+            row, text=label,
             command=lambda b=black, w=white: self.apply_saved_level(b, w),
             relief=tk.RAISED, padx=4
         )
-        btn.pack(side=tk.TOP, fill=tk.X, padx=2, pady=1)
-        btn.bind("<MouseWheel>", self._on_saved_scroll)
-        btn.bind("<Button-4>",   self._on_saved_scroll)
-        btn.bind("<Button-5>",   self._on_saved_scroll)
+        btn.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        for w in (row, rb, btn):
+            w.bind("<MouseWheel>", self._on_saved_scroll)
+            w.bind("<Button-4>",   self._on_saved_scroll)
+            w.bind("<Button-5>",   self._on_saved_scroll)
         self.saved_canvas.configure(scrollregion=self.saved_canvas.bbox("all"))
 
     def _on_saved_scroll(self, event):
@@ -497,6 +533,138 @@ class PDFLevelPreviewApp:
         self.black_var.set(black)
         self.white_var.set(white)
         self.update_preview()
+
+    # ------------------------------------------------------------------ #
+    # Config panel
+    # ------------------------------------------------------------------ #
+    def _build_config_panel(self, parent):
+        # Row 0: 처리수준
+        r0 = tk.Frame(parent)
+        r0.pack(fill=tk.X, pady=1)
+        tk.Label(r0, text="처리수준:").pack(side=tk.LEFT)
+        tk.Radiobutton(r0, text="고급", variable=self.process_level_var, value="고급").pack(side=tk.LEFT)
+        tk.Radiobutton(r0, text="일반", variable=self.process_level_var, value="일반").pack(side=tk.LEFT)
+
+        # Row 1: OCR
+        r1 = tk.Frame(parent)
+        r1.pack(fill=tk.X, pady=1)
+        tk.Checkbutton(r1, text="OCR 사용", variable=self.use_ocr_var,
+                       command=self._toggle_ocr).pack(side=tk.LEFT)
+        self.ocr_language_entry = tk.Entry(r1, textvariable=self.ocr_language_var, width=12)
+        self.ocr_language_entry.pack(side=tk.LEFT, padx=4)
+
+        # Row 2: 분할
+        r2 = tk.Frame(parent)
+        r2.pack(fill=tk.X, pady=1)
+        tk.Checkbutton(r2, text="분할", variable=self.is_split_var,
+                       command=self._toggle_split).pack(side=tk.LEFT)
+        self.split_radio_frame = tk.Frame(r2)
+        self.split_radio_frame.pack(side=tk.LEFT)
+        tk.Radiobutton(self.split_radio_frame, text="page", variable=self.split_method_var,
+                       value="page", command=self._toggle_split_detail).pack(side=tk.LEFT)
+        tk.Radiobutton(self.split_radio_frame, text="size", variable=self.split_method_var,
+                       value="size", command=self._toggle_split_detail).pack(side=tk.LEFT)
+        tk.Radiobutton(self.split_radio_frame, text="none", variable=self.split_method_var,
+                       value="none", command=self._toggle_split_detail).pack(side=tk.LEFT)
+
+        # Row 3: 분할 상세 (동적)
+        self.split_detail_frame = tk.Frame(parent)
+        self.split_detail_frame.pack(fill=tk.X, pady=1)
+        self._toggle_split_detail()
+
+        # Row 4: 설정 저장 버튼
+        tk.Button(parent, text="설정 저장", command=self._save_config,
+                  padx=10, pady=2).pack(fill=tk.X, padx=4, pady=4)
+
+    def _toggle_ocr(self):
+        if self.use_ocr_var.get():
+            self.ocr_language_entry.config(state=tk.NORMAL)
+        else:
+            self.ocr_language_entry.config(state=tk.DISABLED)
+
+    def _toggle_split(self):
+        if self.is_split_var.get():
+            for w in self.split_radio_frame.winfo_children():
+                w.config(state=tk.NORMAL)
+        else:
+            for w in self.split_radio_frame.winfo_children():
+                w.config(state=tk.DISABLED)
+        self._toggle_split_detail()
+
+    def _toggle_split_detail(self):
+        for w in self.split_detail_frame.winfo_children():
+            w.destroy()
+        if not self.is_split_var.get():
+            return
+        method = self.split_method_var.get()
+        if method == "page":
+            tk.Label(self.split_detail_frame, text="범위:").pack(side=tk.LEFT)
+            tk.Entry(self.split_detail_frame, textvariable=self.split_page_ranges_var,
+                     width=24).pack(side=tk.LEFT, padx=4)
+        elif method == "size":
+            tk.Label(self.split_detail_frame, text="크기(MB):").pack(side=tk.LEFT)
+            tk.Entry(self.split_detail_frame, textvariable=self.split_size_mb_var,
+                     width=8).pack(side=tk.LEFT, padx=4)
+
+    def _save_config(self):
+        if not self.pdf_doc:
+            return
+        pdf_dir = os.path.dirname(self.pdf_doc.name)
+
+        # 선택된 레벨 프리셋 사용, 없으면 현재 슬라이더 값
+        idx = self.selected_level_idx.get()
+        if 0 <= idx < len(self.saved_levels):
+            black, white = self.saved_levels[idx]
+        else:
+            try:
+                black = int(self.black_var.get())
+                white = int(self.white_var.get())
+            except (tk.TclError, ValueError):
+                black, white = 0, 255
+
+        config = {
+            "process_level": self.process_level_var.get(),
+            "black_point": black,
+            "white_point": white,
+            "use_ocr": self.use_ocr_var.get(),
+            "ocr_language": self.ocr_language_var.get() if self.use_ocr_var.get() else "",
+            "is_split": self.is_split_var.get(),
+            "split_method": self.split_method_var.get() if self.is_split_var.get() else "none",
+            "split_page_ranges": self.split_page_ranges_var.get() if self.is_split_var.get() and self.split_method_var.get() == "page" else "",
+            "split_size_mb": int(self.split_size_mb_var.get()) if self.is_split_var.get() and self.split_method_var.get() == "size" else 0,
+        }
+
+        config_path = os.path.join(pdf_dir, "config.json")
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, ensure_ascii=False, indent=2)
+
+    def _load_config(self, pdf_path):
+        config_path = os.path.join(os.path.dirname(pdf_path), "config.json")
+        if not os.path.exists(config_path):
+            return
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return
+
+        self.process_level_var.set(cfg.get("process_level", "고급"))
+        self.use_ocr_var.set(cfg.get("use_ocr", True))
+        self.ocr_language_var.set(cfg.get("ocr_language", "Korean"))
+        self.is_split_var.set(cfg.get("is_split", True))
+        self.split_method_var.set(cfg.get("split_method", "page"))
+        self.split_page_ranges_var.set(cfg.get("split_page_ranges", ""))
+        self.split_size_mb_var.set(cfg.get("split_size_mb", 0))
+
+        # 레벨 값을 슬라이더에 반영
+        black = cfg.get("black_point", 0)
+        white = cfg.get("white_point", 255)
+        self.black_var.set(black)
+        self.white_var.set(white)
+
+        # UI 상태 갱신
+        self._toggle_ocr()
+        self._toggle_split()
 
     # ------------------------------------------------------------------ #
     # Slider / entry callbacks
