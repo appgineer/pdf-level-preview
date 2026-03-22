@@ -54,7 +54,7 @@ class PDFLevelPreviewApp:
         tk.Button(toolbar, text="+", width=2, command=self.zoom_in).pack(side=tk.RIGHT, padx=2)
 
         # Resizable split
-        paned = tk.PanedWindow(self.root, orient=tk.HORIZONTAL, sashwidth=5, sashrelief=tk.RAISED)
+        paned = tk.PanedWindow(self.root, orient=tk.HORIZONTAL, sashwidth=12, sashrelief=tk.RAISED)
         paned.pack(fill=tk.BOTH, expand=True)
 
         # ── Left: thumbnail panel ──────────────────────────────────────
@@ -127,7 +127,7 @@ class PDFLevelPreviewApp:
         self.black_entry.pack(side=tk.LEFT, padx=2)
         self.black_slider = ttk.Scale(
             row, from_=0, to=255, orient=tk.HORIZONTAL,
-            variable=self.black_var, command=self._on_slider_change, length=160
+            variable=self.black_var, command=self._on_black_slider, length=160
         )
         self.black_slider.pack(side=tk.LEFT, padx=4)
 
@@ -137,7 +137,7 @@ class PDFLevelPreviewApp:
         self.white_entry.pack(side=tk.LEFT, padx=2)
         self.white_slider = ttk.Scale(
             row, from_=0, to=255, orient=tk.HORIZONTAL,
-            variable=self.white_var, command=self._on_slider_change, length=160
+            variable=self.white_var, command=self._on_white_slider, length=160
         )
         self.white_slider.pack(side=tk.LEFT, padx=4)
 
@@ -155,12 +155,12 @@ class PDFLevelPreviewApp:
 
         ttk.Separator(controls, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=2)
 
-        # Saved levels scrollable row
-        saved_outer = tk.Frame(controls, height=60)
+        # Saved levels scrollable list (vertical)
+        saved_outer = tk.Frame(controls, height=120)
         saved_outer.pack(fill=tk.X)
         saved_outer.pack_propagate(False)
 
-        saved_canvas = tk.Canvas(saved_outer, height=60)
+        saved_canvas = tk.Canvas(saved_outer, height=120)
         saved_scroll = ttk.Scrollbar(saved_outer, orient=tk.VERTICAL, command=saved_canvas.yview)
         saved_canvas.configure(yscrollcommand=saved_scroll.set)
         saved_scroll.pack(side=tk.RIGHT, fill=tk.Y)
@@ -468,7 +468,7 @@ class PDFLevelPreviewApp:
             command=lambda b=black, w=white: self.apply_saved_level(b, w),
             relief=tk.RAISED, padx=4
         )
-        btn.pack(side=tk.LEFT, padx=2, pady=2)
+        btn.pack(side=tk.TOP, fill=tk.X, padx=2, pady=1)
         self.saved_canvas.configure(scrollregion=self.saved_canvas.bbox("all"))
 
     def apply_saved_level(self, black, white):
@@ -479,7 +479,12 @@ class PDFLevelPreviewApp:
     # ------------------------------------------------------------------ #
     # Slider / entry callbacks
     # ------------------------------------------------------------------ #
-    def _on_slider_change(self, _=None):
+    def _on_black_slider(self, val):
+        self.black_var.set(int(float(val)))
+        self.update_preview()
+
+    def _on_white_slider(self, val):
+        self.white_var.set(int(float(val)))
         self.update_preview()
 
     def _on_var_change(self, *_):
