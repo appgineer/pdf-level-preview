@@ -9,3 +9,4 @@ pip install pymupdf
 # 이미지 미리보기
 
 pip install Pillow
+ㅈ
