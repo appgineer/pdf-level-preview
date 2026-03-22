@@ -135,27 +135,18 @@ class PDFLevelPreviewApp:
         self.preview_canvas.bind("<Button-4>", self._on_preview_scroll)
         self.preview_canvas.bind("<Button-5>", self._on_preview_scroll)
 
-        # ── Bottom: controls ──
-        controls = tk.Frame(right_paned, bd=1, relief=tk.RAISED, padx=10, pady=6)
-        right_paned.add(controls, minsize=150)
-
-        # Saved levels + Config panel (horizontal split)
-        saved_outer = tk.Frame(controls)
-        saved_outer.pack(fill=tk.BOTH, expand=True)
-
-        # ── Left: level inputs + saved list ──
-        saved_left = tk.Frame(saved_outer, width=250)
-        saved_left.pack(side=tk.LEFT, fill=tk.Y)
-        saved_left.pack_propagate(False)
+        # ── Bottom: controls (3-column) ──
+        controls = tk.Frame(right_paned, bd=1, relief=tk.RAISED)
+        right_paned.add(controls, minsize=120)
 
         FNT = ("", 12)
 
-        # 검은색 / 흰색 입력 + 슬라이더
-        input_frame = tk.Frame(saved_left)
-        input_frame.pack(fill=tk.X, padx=4, pady=(2, 4))
+        # ── Column 1: 레벨 조정 ──
+        col1 = tk.Frame(controls, padx=8, pady=6)
+        col1.pack(side=tk.LEFT, fill=tk.Y)
 
-        r_black = tk.Frame(input_frame)
-        r_black.pack(fill=tk.X, pady=1)
+        r_black = tk.Frame(col1)
+        r_black.pack(fill=tk.X, pady=2)
         tk.Label(r_black, text="검은색:", font=FNT).pack(side=tk.LEFT)
         self.black_var = tk.IntVar(value=0)
         self.black_entry = tk.Entry(r_black, textvariable=self.black_var, width=4, font=FNT)
@@ -166,8 +157,8 @@ class PDFLevelPreviewApp:
         )
         self.black_slider.pack(side=tk.LEFT, padx=4)
 
-        r_white = tk.Frame(input_frame)
-        r_white.pack(fill=tk.X, pady=1)
+        r_white = tk.Frame(col1)
+        r_white.pack(fill=tk.X, pady=2)
         tk.Label(r_white, text="흰  색:", font=FNT).pack(side=tk.LEFT)
         self.white_var = tk.IntVar(value=255)
         self.white_entry = tk.Entry(r_white, textvariable=self.white_var, width=4, font=FNT)
@@ -178,8 +169,8 @@ class PDFLevelPreviewApp:
         )
         self.white_slider.pack(side=tk.LEFT, padx=4)
 
-        tk.Button(input_frame, text="저장", command=self.add_level, padx=10, pady=2,
-                  cursor="hand2", font=FNT).pack(fill=tk.X, pady=(2, 0))
+        tk.Button(col1, text="저장", command=self.add_level, padx=10, pady=2,
+                  cursor="hand2", font=FNT).pack(fill=tk.X, pady=(4, 0))
 
         self.black_entry.bind("<Up>",   lambda e: self._nudge(self.black_var, +1))
         self.black_entry.bind("<Down>", lambda e: self._nudge(self.black_var, -1))
@@ -187,15 +178,18 @@ class PDFLevelPreviewApp:
         self.white_entry.bind("<Down>", lambda e: self._nudge(self.white_var, -1))
         self.black_var.trace_add("write", self._on_var_change)
         self.white_var.trace_add("write", self._on_var_change)
-
-        # Enter key = save level (anywhere in the window)
         self.root.bind("<Return>", lambda e: self.add_level())
 
-        ttk.Separator(saved_left, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=4, pady=2)
+        # ── Separator 1 ──
+        ttk.Separator(controls, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=2)
 
-        # Saved level list (scrollable)
-        saved_canvas = tk.Canvas(saved_left)
-        saved_scroll = ttk.Scrollbar(saved_left, orient=tk.VERTICAL, command=saved_canvas.yview)
+        # ── Column 2: 저장된 레벨 리스트 ──
+        col2 = tk.Frame(controls, width=200, padx=4, pady=6)
+        col2.pack(side=tk.LEFT, fill=tk.Y)
+        col2.pack_propagate(False)
+
+        saved_canvas = tk.Canvas(col2)
+        saved_scroll = ttk.Scrollbar(col2, orient=tk.VERTICAL, command=saved_canvas.yview)
         saved_canvas.configure(yscrollcommand=saved_scroll.set)
         saved_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         saved_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -212,13 +206,13 @@ class PDFLevelPreviewApp:
             w.bind("<Button-4>",   self._on_saved_scroll)
             w.bind("<Button-5>",   self._on_saved_scroll)
 
-        # ── Vertical separator ──
-        ttk.Separator(saved_outer, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4)
+        # ── Separator 2 ──
+        ttk.Separator(controls, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=2)
 
-        # ── Right: config panel ──
-        config_frame = tk.Frame(saved_outer)
-        config_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self._build_config_panel(config_frame)
+        # ── Column 3: config 설정 ──
+        col3 = tk.Frame(controls, padx=8, pady=6)
+        col3.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._build_config_panel(col3)
 
     # ------------------------------------------------------------------ #
     # Drag & Drop
