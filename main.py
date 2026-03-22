@@ -98,12 +98,17 @@ class PDFLevelPreviewApp:
             widget.bind("<Button-4>",   self._on_thumb_scroll)   # Linux/macOS up
             widget.bind("<Button-5>",   self._on_thumb_scroll)   # Linux/macOS down
 
-        # ── Right: preview + controls ──────────────────────────────────
-        right = tk.Frame(paned)
-        paned.add(right, minsize=400)
+        # ── Right: preview + controls (vertical resizable) ─────────────
+        right_paned = tk.PanedWindow(
+            paned, orient=tk.VERTICAL,
+            sashwidth=10, sashrelief=tk.RAISED, sashpad=4,
+            sashcursor="sb_v_double_arrow"
+        )
+        paned.add(right_paned, minsize=400)
 
-        preview_frame = tk.Frame(right)
-        preview_frame.pack(fill=tk.BOTH, expand=True)
+        # ── Top: preview ──
+        preview_frame = tk.Frame(right_paned)
+        right_paned.add(preview_frame, minsize=200)
 
         prev_vscroll = ttk.Scrollbar(preview_frame, orient=tk.VERTICAL)
         prev_hscroll = ttk.Scrollbar(preview_frame, orient=tk.HORIZONTAL)
@@ -130,35 +135,51 @@ class PDFLevelPreviewApp:
         self.preview_canvas.bind("<Button-4>", self._on_preview_scroll)
         self.preview_canvas.bind("<Button-5>", self._on_preview_scroll)
 
-        # ── Controls bar (single compact row) ─────────────────────────
-        controls = tk.Frame(right, bd=1, relief=tk.RAISED, pady=8, padx=10)
-        controls.pack(side=tk.BOTTOM, fill=tk.X)
+        # ── Bottom: controls ──
+        controls = tk.Frame(right_paned, bd=1, relief=tk.RAISED, padx=10, pady=6)
+        right_paned.add(controls, minsize=150)
 
-        row = tk.Frame(controls)
-        row.pack(fill=tk.X, pady=4)
+        # Saved levels + Config panel (horizontal split)
+        saved_outer = tk.Frame(controls)
+        saved_outer.pack(fill=tk.BOTH, expand=True)
 
-        tk.Label(row, text="검은색:", font=("", 12)).pack(side=tk.LEFT)
+        # ── Left: level inputs + saved list ──
+        saved_left = tk.Frame(saved_outer, width=250)
+        saved_left.pack(side=tk.LEFT, fill=tk.Y)
+        saved_left.pack_propagate(False)
+
+        FNT = ("", 12)
+
+        # 검은색 / 흰색 입력 + 슬라이더
+        input_frame = tk.Frame(saved_left)
+        input_frame.pack(fill=tk.X, padx=4, pady=(2, 4))
+
+        r_black = tk.Frame(input_frame)
+        r_black.pack(fill=tk.X, pady=1)
+        tk.Label(r_black, text="검은색:", font=FNT).pack(side=tk.LEFT)
         self.black_var = tk.IntVar(value=0)
-        self.black_entry = tk.Entry(row, textvariable=self.black_var, width=4, font=("", 12))
+        self.black_entry = tk.Entry(r_black, textvariable=self.black_var, width=4, font=FNT)
         self.black_entry.pack(side=tk.LEFT, padx=2)
         self.black_slider = ttk.Scale(
-            row, from_=0, to=255, orient=tk.HORIZONTAL,
-            variable=self.black_var, command=self._on_black_slider, length=160
+            r_black, from_=0, to=255, orient=tk.HORIZONTAL,
+            variable=self.black_var, command=self._on_black_slider, length=120
         )
         self.black_slider.pack(side=tk.LEFT, padx=4)
 
-        tk.Label(row, text="흰색:", font=("", 12)).pack(side=tk.LEFT, padx=(12, 0))
+        r_white = tk.Frame(input_frame)
+        r_white.pack(fill=tk.X, pady=1)
+        tk.Label(r_white, text="흰  색:", font=FNT).pack(side=tk.LEFT)
         self.white_var = tk.IntVar(value=255)
-        self.white_entry = tk.Entry(row, textvariable=self.white_var, width=4, font=("", 12))
+        self.white_entry = tk.Entry(r_white, textvariable=self.white_var, width=4, font=FNT)
         self.white_entry.pack(side=tk.LEFT, padx=2)
         self.white_slider = ttk.Scale(
-            row, from_=0, to=255, orient=tk.HORIZONTAL,
-            variable=self.white_var, command=self._on_white_slider, length=160
+            r_white, from_=0, to=255, orient=tk.HORIZONTAL,
+            variable=self.white_var, command=self._on_white_slider, length=120
         )
         self.white_slider.pack(side=tk.LEFT, padx=4)
 
-        tk.Button(row, text="저장", command=self.add_level, padx=10, cursor="hand2",
-                  font=("", 12)).pack(side=tk.LEFT, padx=10)
+        tk.Button(input_frame, text="저장", command=self.add_level, padx=10, pady=2,
+                  cursor="hand2", font=FNT).pack(fill=tk.X, pady=(2, 0))
 
         self.black_entry.bind("<Up>",   lambda e: self._nudge(self.black_var, +1))
         self.black_entry.bind("<Down>", lambda e: self._nudge(self.black_var, -1))
@@ -170,18 +191,9 @@ class PDFLevelPreviewApp:
         # Enter key = save level (anywhere in the window)
         self.root.bind("<Return>", lambda e: self.add_level())
 
-        ttk.Separator(controls, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=4)
+        ttk.Separator(saved_left, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=4, pady=2)
 
-        # Saved levels + Config panel (horizontal split)
-        saved_outer = tk.Frame(controls, height=220)
-        saved_outer.pack(fill=tk.X)
-        saved_outer.pack_propagate(False)
-
-        # ── Left: saved levels with radio buttons ──
-        saved_left = tk.Frame(saved_outer, width=200)
-        saved_left.pack(side=tk.LEFT, fill=tk.Y)
-        saved_left.pack_propagate(False)
-
+        # Saved level list (scrollable)
         saved_canvas = tk.Canvas(saved_left)
         saved_scroll = ttk.Scrollbar(saved_left, orient=tk.VERTICAL, command=saved_canvas.yview)
         saved_canvas.configure(yscrollcommand=saved_scroll.set)
@@ -498,21 +510,22 @@ class PDFLevelPreviewApp:
 
     def _add_level_button(self, black, white):
         FNT = ("", 12)
+        RB_FNT = ("", 14)
         idx = len(self.saved_levels) - 1
         row = tk.Frame(self.saved_frame)
         row.pack(side=tk.TOP, fill=tk.X, padx=2, pady=2)
 
         rb = tk.Radiobutton(
             row, variable=self.selected_level_idx, value=idx,
-            command=lambda b=black, w=white: self.apply_saved_level(b, w),
-            cursor="hand2", font=FNT
+            command=lambda b=black, w=white: self._select_level(idx, b, w),
+            cursor="hand2", font=RB_FNT
         )
         rb.pack(side=tk.LEFT)
 
         label = f"검:{black} 흰:{white}"
         btn = tk.Button(
             row, text=label,
-            command=lambda b=black, w=white: self.apply_saved_level(b, w),
+            command=lambda b=black, w=white: self._select_level(idx, b, w),
             relief=tk.RAISED, padx=6, pady=2, cursor="hand2", font=FNT
         )
         btn.pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -532,6 +545,10 @@ class PDFLevelPreviewApp:
             self.saved_canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
         return "break"
 
+    def _select_level(self, idx, black, white):
+        self.selected_level_idx.set(idx)
+        self.apply_saved_level(black, white)
+
     def apply_saved_level(self, black, white):
         self.black_var.set(black)
         self.white_var.set(white)
@@ -549,7 +566,7 @@ class PDFLevelPreviewApp:
 
         # Row 0: 처리수준
         r0 = tk.Frame(center)
-        r0.pack(pady=3)
+        r0.pack(pady=2)
         tk.Label(r0, text="처리수준:", font=FNT).pack(side=tk.LEFT)
         tk.Radiobutton(r0, text="일반", variable=self.process_level_var, value="일반",
                        cursor="hand2", font=FNT).pack(side=tk.LEFT, padx=2)
@@ -558,7 +575,7 @@ class PDFLevelPreviewApp:
 
         # Row 1: OCR
         r1 = tk.Frame(center)
-        r1.pack(pady=3)
+        r1.pack(pady=2)
         tk.Checkbutton(r1, text="OCR 사용", variable=self.use_ocr_var,
                        command=self._toggle_ocr, cursor="hand2", font=FNT).pack(side=tk.LEFT)
         self.ocr_language_entry = tk.Entry(r1, textvariable=self.ocr_language_var, width=12, font=FNT)
@@ -567,7 +584,7 @@ class PDFLevelPreviewApp:
 
         # Row 2: 분할
         r2 = tk.Frame(center)
-        r2.pack(pady=3)
+        r2.pack(pady=2)
         tk.Checkbutton(r2, text="분할", variable=self.is_split_var,
                        command=self._toggle_split, cursor="hand2", font=FNT).pack(side=tk.LEFT)
         self.split_radio_frame = tk.Frame(r2)
@@ -582,12 +599,12 @@ class PDFLevelPreviewApp:
 
         # Row 3: 분할 상세 (동적)
         self.split_detail_frame = tk.Frame(center)
-        self.split_detail_frame.pack(pady=3)
+        self.split_detail_frame.pack(pady=2)
         self._toggle_split_detail()
 
         # Row 4: 설정 저장 버튼
         tk.Button(center, text="설정 저장", command=self._save_config,
-                  padx=12, pady=4, cursor="hand2", font=FNT).pack(pady=6)
+                  padx=12, pady=4, cursor="hand2", font=FNT).pack(pady=4)
 
     def _toggle_ocr(self):
         if self.use_ocr_var.get():
@@ -665,7 +682,7 @@ class PDFLevelPreviewApp:
         rx = self.root.winfo_rootx() + (self.root.winfo_width() - pw) // 2
         ry = self.root.winfo_rooty() + (self.root.winfo_height() - ph) // 2
         popup.geometry(f"+{rx}+{ry}")
-        self.root.after(500, popup.destroy)
+        self.root.after(1000, popup.destroy)
 
     def _load_config(self, pdf_path):
         config_path = os.path.join(os.path.dirname(pdf_path), "config.json")
