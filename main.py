@@ -130,27 +130,14 @@ class PDFLevelPreviewApp:
         )
         self.white_slider.pack(side=tk.LEFT, padx=4)
 
-        tk.Label(row, text="감마:").pack(side=tk.LEFT, padx=(8, 0))
-        self.gamma_var = tk.DoubleVar(value=1.0)
-        self.gamma_entry = tk.Entry(row, textvariable=self.gamma_var, width=5)
-        self.gamma_entry.pack(side=tk.LEFT, padx=2)
-        self.gamma_slider = ttk.Scale(
-            row, from_=0.1, to=3.0, orient=tk.HORIZONTAL,
-            variable=self.gamma_var, command=self._on_slider_change, length=120
-        )
-        self.gamma_slider.pack(side=tk.LEFT, padx=4)
-
         tk.Button(row, text="저장", command=self.add_level, padx=10).pack(side=tk.LEFT, padx=8)
 
         self.black_entry.bind("<Up>",   lambda e: self._nudge(self.black_var, +1))
         self.black_entry.bind("<Down>", lambda e: self._nudge(self.black_var, -1))
         self.white_entry.bind("<Up>",   lambda e: self._nudge(self.white_var, +1))
         self.white_entry.bind("<Down>", lambda e: self._nudge(self.white_var, -1))
-        self.gamma_entry.bind("<Up>",   lambda e: self._nudge_gamma(+0.05))
-        self.gamma_entry.bind("<Down>", lambda e: self._nudge_gamma(-0.05))
         self.black_var.trace_add("write", self._on_var_change)
         self.white_var.trace_add("write", self._on_var_change)
-        self.gamma_var.trace_add("write", self._on_var_change)
 
         # Enter key = save level (anywhere in the window)
         self.root.bind("<Return>", lambda e: self.add_level())
@@ -308,12 +295,10 @@ class PDFLevelPreviewApp:
     # ------------------------------------------------------------------ #
     # Level adjustment
     # ------------------------------------------------------------------ #
-    def apply_levels(self, image, black, white, gamma=1.0):
+    def apply_levels(self, image, black, white):
         black = max(0, min(255, int(black)))
         white = max(0, min(255, int(white)))
-        gamma = max(0.1, min(3.0, float(gamma)))
         span = max(1, white - black)
-        inv_gamma = 1.0 / gamma
         lut = []
         for i in range(256):
             if i <= black:
@@ -321,8 +306,7 @@ class PDFLevelPreviewApp:
             elif i >= white:
                 lut.append(255)
             else:
-                normalized = (i - black) / span
-                lut.append(min(255, max(0, round(normalized ** inv_gamma * 255))))
+                lut.append(int((i - black) / span * 255 + 0.5))
         return image.point(lut * 3)
 
     # ------------------------------------------------------------------ #
@@ -370,19 +354,17 @@ class PDFLevelPreviewApp:
         try:
             black = int(self.black_var.get())
             white = int(self.white_var.get())
-            gamma = float(self.gamma_var.get())
         except (tk.TclError, ValueError):
             return
 
         black = max(0, min(255, black))
         white = max(0, min(255, white))
-        gamma = max(0.1, min(3.0, gamma))
         zoom = self._current_zoom()
 
-        key = (self.current_page, black, white, round(gamma, 3), zoom)
+        key = (self.current_page, black, white, zoom)
         if key not in self.preview_cache:
             raw = self._render_page(self.current_page, zoom=zoom)
-            self.preview_cache[key] = self.apply_levels(raw, black, white, gamma)
+            self.preview_cache[key] = self.apply_levels(raw, black, white)
 
         self.current_img = self.preview_cache[key]
         self._draw_preview()
@@ -415,30 +397,28 @@ class PDFLevelPreviewApp:
         try:
             black = int(self.black_var.get())
             white = int(self.white_var.get())
-            gamma = round(float(self.gamma_var.get()), 2)
         except (tk.TclError, ValueError):
             return
-        triple = (black, white, gamma)
-        if triple in self.saved_levels:
+        pair = (black, white)
+        if pair in self.saved_levels:
             return
-        self.saved_levels.append(triple)
-        self._add_level_button(black, white, gamma)
+        self.saved_levels.append(pair)
+        self._add_level_button(black, white)
 
-    def _add_level_button(self, black, white, gamma):
-        label = f"검:{black} 흰:{white} γ:{gamma}"
+    def _add_level_button(self, black, white):
+        label = f"검:{black} 흰:{white}"
         btn = tk.Button(
             self.saved_frame,
             text=label,
-            command=lambda b=black, w=white, g=gamma: self.apply_saved_level(b, w, g),
+            command=lambda b=black, w=white: self.apply_saved_level(b, w),
             relief=tk.RAISED, padx=4
         )
         btn.pack(side=tk.LEFT, padx=2, pady=2)
         self.saved_canvas.configure(scrollregion=self.saved_canvas.bbox("all"))
 
-    def apply_saved_level(self, black, white, gamma):
+    def apply_saved_level(self, black, white):
         self.black_var.set(black)
         self.white_var.set(white)
-        self.gamma_var.set(gamma)
         self.update_preview()
 
     # ------------------------------------------------------------------ #
@@ -461,14 +441,6 @@ class PDFLevelPreviewApp:
         self.update_preview()
         return "break"
 
-    def _nudge_gamma(self, delta):
-        try:
-            val = float(self.gamma_var.get())
-        except (tk.TclError, ValueError):
-            val = 1.0
-        self.gamma_var.set(round(max(0.1, min(3.0, val + delta)), 2))
-        self.update_preview()
-        return "break"
 
 
 def main():
