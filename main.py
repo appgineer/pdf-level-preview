@@ -54,7 +54,11 @@ class PDFLevelPreviewApp:
         tk.Button(toolbar, text="+", width=2, command=self.zoom_in).pack(side=tk.RIGHT, padx=2)
 
         # Resizable split
-        paned = tk.PanedWindow(self.root, orient=tk.HORIZONTAL, sashwidth=12, sashrelief=tk.RAISED)
+        paned = tk.PanedWindow(
+            self.root, orient=tk.HORIZONTAL,
+            sashwidth=12, sashrelief=tk.RAISED, sashpad=6,
+            sashcursor="sb_h_double_arrow"
+        )
         paned.pack(fill=tk.BOTH, expand=True)
 
         # ── Left: thumbnail panel ──────────────────────────────────────
@@ -172,6 +176,12 @@ class PDFLevelPreviewApp:
             scrollregion=saved_canvas.bbox("all")
         ))
         self.saved_canvas = saved_canvas
+
+        # 저장 레벨 영역 마우스 휠 스크롤
+        for w in (saved_canvas, self.saved_frame):
+            w.bind("<MouseWheel>", self._on_saved_scroll)
+            w.bind("<Button-4>",   self._on_saved_scroll)
+            w.bind("<Button-5>",   self._on_saved_scroll)
 
     # ------------------------------------------------------------------ #
     # Drag & Drop
@@ -469,7 +479,19 @@ class PDFLevelPreviewApp:
             relief=tk.RAISED, padx=4
         )
         btn.pack(side=tk.TOP, fill=tk.X, padx=2, pady=1)
+        btn.bind("<MouseWheel>", self._on_saved_scroll)
+        btn.bind("<Button-4>",   self._on_saved_scroll)
+        btn.bind("<Button-5>",   self._on_saved_scroll)
         self.saved_canvas.configure(scrollregion=self.saved_canvas.bbox("all"))
+
+    def _on_saved_scroll(self, event):
+        if event.num == 4:
+            self.saved_canvas.yview_scroll(-1, "units")
+        elif event.num == 5:
+            self.saved_canvas.yview_scroll(1, "units")
+        else:
+            self.saved_canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+        return "break"
 
     def apply_saved_level(self, black, white):
         self.black_var.set(black)
