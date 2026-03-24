@@ -320,19 +320,16 @@ class PDFLevelPreviewApp:
             for i in range(page_count):
                 if gen != self._thumb_generation:
                     return
-                # 각 썸네일을 별도 subprocess로 렌더링 (GIL 회피)
-                tmp = tempfile.mktemp(suffix='.raw')
+                tmp = tempfile.mktemp(suffix='.png')
                 try:
                     script = (
                         "import fitz,sys;"
                         "d=fitz.open(sys.argv[1]);"
                         "p=d[int(sys.argv[2])];"
                         "m=fitz.Matrix(0.3,0.3);"
-                        "x=p.get_pixmap(matrix=m);"
-                        "f=open(sys.argv[3],'wb');"
-                        "f.write(f'{x.width},{x.height}\\n'.encode());"
-                        "f.write(bytes(x.samples));"
-                        "f.close();d.close()"
+                        "x=p.get_pixmap(matrix=m,alpha=False);"
+                        "x.save(sys.argv[3]);"
+                        "d.close()"
                     )
                     result = subprocess.run(
                         [sys.executable, '-c', script, pdf_path, str(i), tmp],
@@ -340,11 +337,8 @@ class PDFLevelPreviewApp:
                     )
                     if result.returncode != 0 or gen != self._thumb_generation:
                         continue
-                    with open(tmp, 'rb') as f:
-                        header = f.readline().decode().strip()
-                        w, h = map(int, header.split(','))
-                        data = f.read()
-                    raw = Image.frombytes("RGB", (w, h), data)
+                    raw = Image.open(tmp)
+                    raw.load()
                     ratio = THUMB_W / raw.width
                     th = int(raw.height * ratio)
                     img = raw.resize((THUMB_W, th), Image.LANCZOS)
@@ -433,7 +427,7 @@ class PDFLevelPreviewApp:
     def _render_page(self, page_idx, zoom=2.0):
         page = self.pdf_doc[page_idx]
         mat = fitz.Matrix(zoom, zoom)
-        pix = page.get_pixmap(matrix=mat)
+        pix = page.get_pixmap(matrix=mat, alpha=False)
         return Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
     def _get_base_render(self, page_idx):
@@ -577,18 +571,16 @@ class PDFLevelPreviewApp:
         if self._hires_proc and self._hires_proc.poll() is None:
             self._hires_proc.terminate()
 
-        tmp = tempfile.mktemp(suffix='.raw')
+        tmp = tempfile.mktemp(suffix='.png')
         script = (
             "import fitz,sys;"
             "d=fitz.open(sys.argv[1]);"
             "p=d[int(sys.argv[2])];"
             "z=float(sys.argv[3]);"
             "m=fitz.Matrix(z,z);"
-            "x=p.get_pixmap(matrix=m);"
-            "f=open(sys.argv[4],'wb');"
-            "f.write(f'{x.width},{x.height}\\n'.encode());"
-            "f.write(bytes(x.samples));"
-            "f.close();d.close()"
+            "x=p.get_pixmap(matrix=m,alpha=False);"
+            "x.save(sys.argv[4]);"
+            "d.close()"
         )
         proc = subprocess.Popen(
             [sys.executable, '-c', script, self._pdf_path, str(page_idx), str(BASE_SCALE), tmp],
@@ -611,12 +603,9 @@ class PDFLevelPreviewApp:
             # 프로세스 완료 → 스레드에서 로드 + 레벨 적용
             def load_hires():
                 try:
-                    with open(tmp, 'rb') as f:
-                        header = f.readline().decode().strip()
-                        w, h = map(int, header.split(','))
-                        data = f.read()
+                    hires = Image.open(tmp)
+                    hires.load()
                     os.unlink(tmp)
-                    hires = Image.frombytes("RGB", (w, h), data)
                     self.base_render_cache[page_idx] = hires
                     while len(self.base_render_cache) > 3:
                         self.base_render_cache.popitem(last=False)
@@ -632,6 +621,8 @@ class PDFLevelPreviewApp:
                         self.preview_cache[cache_key] = result
                         self.root.after(0, lambda: self._on_preview_ready(result, gen, hires=True))
                 except Exception:
+                    pass
+                finally:
                     try:
                         os.unlink(tmp)
                     except OSError:
