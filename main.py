@@ -69,6 +69,9 @@ class PDFLevelPreviewApp:
         self.filename_label = tk.Label(toolbar, text="열린 파일 없음", anchor=tk.W)
         self.filename_label.pack(side=tk.LEFT, padx=6)
 
+        self.render_status = tk.Label(toolbar, text="", fg="#999", anchor=tk.W)
+        self.render_status.pack(side=tk.LEFT, padx=6)
+
         tk.Label(toolbar, text="확대:").pack(side=tk.RIGHT, padx=2)
         self.zoom_label = tk.Label(toolbar, text="100%", width=5)
         self.zoom_label.pack(side=tk.RIGHT)
@@ -548,6 +551,7 @@ class PDFLevelPreviewApp:
 
         # 600 DPI base가 이미 캐시되어 있으면 → 스레드에서 레벨+리사이즈 (PIL은 GIL 해제)
         if page_idx in self.base_render_cache:
+            self.render_status.config(text="600 DPI 적용 중...")
             def apply_task():
                 hires = self._get_levels_applied(page_idx, black, white)
                 display_w = int(hires.width * zoom / BASE_SCALE)
@@ -556,11 +560,12 @@ class PDFLevelPreviewApp:
                     (display_w, display_h), Image.LANCZOS)
                 if gen == self._preview_generation:
                     self.preview_cache[key] = result
-                    self.root.after(0, lambda: self._on_preview_ready(result, gen))
+                    self.root.after(0, lambda: self._on_preview_ready(result, gen, hires=True))
             threading.Thread(target=apply_task, daemon=True).start()
             return
 
         # 600 DPI 없음 → 저해상도 즉시 프리뷰 + 600 DPI subprocess
+        self.render_status.config(text="미리보기 (600 DPI 로딩 중...)")
         quick_scale = max(zoom * 2, 2.0)
         quick_img = self._render_page(page_idx, zoom=quick_scale)
         if black != 0 or white != 255:
@@ -633,7 +638,7 @@ class PDFLevelPreviewApp:
                         (display_w, display_h), Image.LANCZOS)
                     if gen == self._preview_generation:
                         self.preview_cache[cache_key] = result
-                        self.root.after(0, lambda: self._on_preview_ready(result, gen))
+                        self.root.after(0, lambda: self._on_preview_ready(result, gen, hires=True))
                 except Exception:
                     try:
                         os.unlink(tmp)
@@ -643,12 +648,13 @@ class PDFLevelPreviewApp:
 
         self.root.after(200, check_hires)
 
-    def _on_preview_ready(self, img, gen):
+    def _on_preview_ready(self, img, gen, hires=False):
         """백그라운드 렌더링 완료 후 메인 스레드에서 호출"""
         if gen != self._preview_generation:
             return
         self.current_img = img
         self._draw_preview()
+        self.render_status.config(text="600 DPI" if hires else "")
 
     def _draw_preview(self):
         if self.current_img is None:
