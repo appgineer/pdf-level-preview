@@ -477,15 +477,14 @@ class PDFLevelPreviewApp:
         black = max(0, min(255, int(black)))
         white = max(0, min(255, int(white)))
         span = max(1, white - black)
-        lut = []
-        for i in range(256):
-            if i <= black:
-                lut.append(0)
-            elif i >= white:
-                lut.append(255)
-            else:
-                lut.append(int((i - black) / span * 255 + 0.5))
-        return image.point(lut * 3)
+        lut = [
+            0 if i <= black else
+            255 if i >= white else
+            int((i - black) / span * 255)
+            for i in range(256)
+        ]
+        channels = len(image.getbands())
+        return image.point(lut * channels)
 
     # ------------------------------------------------------------------ #
     # Zoom
