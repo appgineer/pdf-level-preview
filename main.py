@@ -38,7 +38,7 @@ class PDFLevelPreviewApp:
         # Async rendering state
         self._thumb_generation = 0
         self._preview_generation = 0
-        self._render_lock = threading.Lock()
+        self._pdf_path = None
 
         # Config variables
         self.selected_level_idx = tk.IntVar(value=-1)
@@ -260,6 +260,7 @@ class PDFLevelPreviewApp:
         if self.pdf_doc:
             self.pdf_doc.close()
         self.pdf_doc = fitz.open(path)
+        self._pdf_path = path
         self.thumbnail_cache.clear()
         self.preview_cache.clear()
         self.base_render_cache.clear()
@@ -305,20 +306,28 @@ class PDFLevelPreviewApp:
         self._layout_thumbnails()
         self._bind_thumb_scroll_recursive(self.thumb_frame)
 
-        # Phase 2: 백그라운드에서 순차 렌더링
+        # Phase 2: 백그라운드에서 순차 렌더링 (별도 PDF 인스턴스 사용)
+        pdf_path = self._pdf_path
+
         def render_thumbnails():
-            for i in range(page_count):
-                if gen != self._thumb_generation:
-                    return  # 새 PDF 열림 → 중단
-                with self._render_lock:
-                    raw = self._render_page(i, zoom=0.3)
-                ratio = THUMB_W / raw.width
-                th = int(raw.height * ratio)
-                img = raw.resize((THUMB_W, th), Image.LANCZOS)
-                self.thumbnail_cache[i] = raw
-                if gen != self._thumb_generation:
-                    return
-                self.root.after(0, lambda idx=i, im=img: self._update_thumbnail(idx, im, gen))
+            thumb_doc = fitz.open(pdf_path)
+            try:
+                for i in range(page_count):
+                    if gen != self._thumb_generation:
+                        return
+                    page = thumb_doc[i]
+                    mat = fitz.Matrix(0.3, 0.3)
+                    pix = page.get_pixmap(matrix=mat)
+                    raw = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                    ratio = THUMB_W / raw.width
+                    th = int(raw.height * ratio)
+                    img = raw.resize((THUMB_W, th), Image.LANCZOS)
+                    self.thumbnail_cache[i] = raw
+                    if gen != self._thumb_generation:
+                        return
+                    self.root.after(0, lambda idx=i, im=img: self._update_thumbnail(idx, im, gen))
+            finally:
+                thumb_doc.close()
 
         threading.Thread(target=render_thumbnails, daemon=True).start()
 
@@ -517,14 +526,13 @@ class PDFLevelPreviewApp:
                                         font=("", 16), fill="#ccc")
 
         def render_task():
-            with self._render_lock:
-                hires = self._get_levels_applied(page_idx, black, white)
-                display_w = int(hires.width * zoom / BASE_SCALE)
-                display_h = int(hires.height * zoom / BASE_SCALE)
-                if display_w >= hires.width:
-                    result = hires
-                else:
-                    result = hires.resize((display_w, display_h), Image.LANCZOS)
+            hires = self._get_levels_applied(page_idx, black, white)
+            display_w = int(hires.width * zoom / BASE_SCALE)
+            display_h = int(hires.height * zoom / BASE_SCALE)
+            if display_w >= hires.width:
+                result = hires
+            else:
+                result = hires.resize((display_w, display_h), Image.LANCZOS)
             if gen == self._preview_generation:
                 self.preview_cache[key] = result
                 self.root.after(0, lambda: self._on_preview_ready(result, gen))
