@@ -422,7 +422,7 @@ class PDFLevelPreviewApp:
     def _render_page(self, page_idx, zoom=2.0):
         page = self.pdf_doc[page_idx]
         mat = fitz.Matrix(zoom, zoom)
-        pix = page.get_pixmap(matrix=mat, alpha=False)
+        pix = page.get_pixmap(matrix=mat)
         return Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
     # ------------------------------------------------------------------ #
@@ -445,7 +445,8 @@ class PDFLevelPreviewApp:
             int((i - black) / span * 255)
             for i in range(256)
         ]
-        return image.point(lut * 3)
+        channels = len(image.getbands())
+        return image.point(lut * channels)
 
     # ------------------------------------------------------------------ #
     # Zoom
