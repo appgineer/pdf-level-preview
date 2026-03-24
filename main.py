@@ -753,22 +753,54 @@ class PDFLevelPreviewApp:
     def _build_config_panel(self, parent):
         FNT = ("", 12)
 
-        # 가운데 정렬용 컨테이너
-        center = tk.Frame(parent)
-        center.pack(expand=True)
+        # 좌우 2열 레이아웃: 왼쪽(스캔타입+분할+저장), 오른쪽(OCR)
+        columns = tk.Frame(parent)
+        columns.pack(expand=True, fill=tk.BOTH)
 
-        # Row 0: 스캔타입
-        r0 = tk.Frame(center)
-        r0.pack(pady=2)
-        tk.Label(r0, text="스캔타입:", font=FNT).pack(side=tk.LEFT)
+        # ── 왼쪽 열: 스캔타입, 분할, 저장 ──
+        left = tk.Frame(columns, padx=8, pady=4)
+        left.pack(side=tk.LEFT, fill=tk.Y)
+
+        # 스캔타입
+        tk.Label(left, text="스캔타입:", font=FNT).pack(anchor=tk.W)
         for txt in ("일반", "고급", "안함"):
-            tk.Radiobutton(r0, text=txt, variable=self.scan_type_var, value=txt,
-                           cursor="hand2", font=FNT).pack(side=tk.LEFT, padx=2)
+            tk.Radiobutton(left, text=txt, variable=self.scan_type_var, value=txt,
+                           cursor="hand2", font=FNT).pack(anchor=tk.W)
 
-        # Row 1: OCR (라디오 버튼)
-        r1 = tk.Frame(center)
-        r1.pack(pady=2)
-        tk.Label(r1, text="OCR:", font=FNT).pack(side=tk.LEFT)
+        ttk.Separator(left, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=4)
+
+        # 분할
+        tk.Checkbutton(left, text="분할", variable=self.is_split_var,
+                       command=self._toggle_split, cursor="hand2", font=FNT).pack(anchor=tk.W)
+        self.split_radio_frame = tk.Frame(left)
+        self.split_radio_frame.pack(anchor=tk.W, padx=16)
+        tk.Radiobutton(self.split_radio_frame, text="page", variable=self.split_method_var,
+                       value="page", command=self._toggle_split_detail, cursor="hand2", font=FNT).pack(anchor=tk.W)
+        tk.Radiobutton(self.split_radio_frame, text="size", variable=self.split_method_var,
+                       value="size", command=self._toggle_split_detail, cursor="hand2", font=FNT).pack(anchor=tk.W)
+        for w in self.split_radio_frame.winfo_children():
+            w.config(state=tk.DISABLED)
+
+        self.split_detail_frame = tk.Frame(left)
+        self.split_detail_frame.pack(anchor=tk.W, padx=16)
+        self._toggle_split_detail()
+
+        ttk.Separator(left, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=4)
+
+        tk.Button(left, text="설정 저장", command=self._save_config,
+                  padx=12, pady=4, cursor="hand2", font=FNT).pack(anchor=tk.W)
+
+        # ── 구분선 ──
+        ttk.Separator(columns, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=2)
+
+        # ── 오른쪽 열: OCR (2열 그리드) ──
+        right = tk.Frame(columns, padx=8, pady=4)
+        right.pack(side=tk.LEFT, fill=tk.Y)
+
+        tk.Label(right, text="OCR:", font=FNT).pack(anchor=tk.W)
+        ocr_grid = tk.Frame(right)
+        ocr_grid.pack(anchor=tk.W)
+
         ocr_options = [
             "안함",
             "한국어 및 영어",
@@ -781,33 +813,11 @@ class PDFLevelPreviewApp:
             "중국어(번체)",
             "영어",
         ]
-        for txt in ocr_options:
-            tk.Radiobutton(r1, text=txt, variable=self.ocr_var, value=txt,
-                           cursor="hand2", font=FNT).pack(side=tk.LEFT, padx=2)
-
-        # Row 2: 분할
-        r2 = tk.Frame(center)
-        r2.pack(pady=2)
-        tk.Checkbutton(r2, text="분할", variable=self.is_split_var,
-                       command=self._toggle_split, cursor="hand2", font=FNT).pack(side=tk.LEFT)
-        self.split_radio_frame = tk.Frame(r2)
-        self.split_radio_frame.pack(side=tk.LEFT, padx=4)
-        tk.Radiobutton(self.split_radio_frame, text="page", variable=self.split_method_var,
-                       value="page", command=self._toggle_split_detail, cursor="hand2", font=FNT).pack(side=tk.LEFT)
-        tk.Radiobutton(self.split_radio_frame, text="size", variable=self.split_method_var,
-                       value="size", command=self._toggle_split_detail, cursor="hand2", font=FNT).pack(side=tk.LEFT)
-        # 기본 분할 해제 → 라디오 비활성화
-        for w in self.split_radio_frame.winfo_children():
-            w.config(state=tk.DISABLED)
-
-        # Row 3: 분할 상세 (동적)
-        self.split_detail_frame = tk.Frame(center)
-        self.split_detail_frame.pack(pady=2)
-        self._toggle_split_detail()
-
-        # Row 4: 설정 저장 버튼
-        tk.Button(center, text="설정 저장", command=self._save_config,
-                  padx=12, pady=4, cursor="hand2", font=FNT).pack(pady=4)
+        for i, txt in enumerate(ocr_options):
+            r, c = divmod(i, 2)
+            tk.Radiobutton(ocr_grid, text=txt, variable=self.ocr_var, value=txt,
+                           cursor="hand2", font=FNT, anchor=tk.W).grid(
+                row=r, column=c, sticky=tk.W, padx=(0, 12))
 
     def _toggle_split(self):
         if self.is_split_var.get():
