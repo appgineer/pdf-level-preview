@@ -4,7 +4,10 @@ from PIL import Image, ImageTk
 import fitz  # PyMuPDF
 import json
 import os
+import sys
 import threading
+import subprocess
+import tempfile
 from collections import OrderedDict
 
 ZOOM_STEPS = [0.25, 0.33, 0.5, 0.67, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0]
@@ -39,6 +42,7 @@ class PDFLevelPreviewApp:
         self._thumb_generation = 0
         self._preview_generation = 0
         self._pdf_path = None
+        self._hires_proc = None  # subprocess for 600 DPI rendering
 
         # Config variables
         self.selected_level_idx = tk.IntVar(value=-1)
@@ -306,19 +310,39 @@ class PDFLevelPreviewApp:
         self._layout_thumbnails()
         self._bind_thumb_scroll_recursive(self.thumb_frame)
 
-        # Phase 2: 백그라운드에서 순차 렌더링 (별도 PDF 인스턴스 사용)
+        # Phase 2: 별도 프로세스에서 썸네일 렌더링
         pdf_path = self._pdf_path
 
-        def render_thumbnails():
-            thumb_doc = fitz.open(pdf_path)
-            try:
-                for i in range(page_count):
-                    if gen != self._thumb_generation:
-                        return
-                    page = thumb_doc[i]
-                    mat = fitz.Matrix(0.3, 0.3)
-                    pix = page.get_pixmap(matrix=mat)
-                    raw = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        def render_thumbnails_subprocess():
+            import time
+            for i in range(page_count):
+                if gen != self._thumb_generation:
+                    return
+                # 각 썸네일을 별도 subprocess로 렌더링 (GIL 회피)
+                tmp = tempfile.mktemp(suffix='.raw')
+                try:
+                    script = (
+                        "import fitz,sys;"
+                        "d=fitz.open(sys.argv[1]);"
+                        "p=d[int(sys.argv[2])];"
+                        "m=fitz.Matrix(0.3,0.3);"
+                        "x=p.get_pixmap(matrix=m);"
+                        "f=open(sys.argv[3],'wb');"
+                        "f.write(f'{x.width},{x.height}\\n'.encode());"
+                        "f.write(bytes(x.samples));"
+                        "f.close();d.close()"
+                    )
+                    result = subprocess.run(
+                        [sys.executable, '-c', script, pdf_path, str(i), tmp],
+                        timeout=30, capture_output=True
+                    )
+                    if result.returncode != 0 or gen != self._thumb_generation:
+                        continue
+                    with open(tmp, 'rb') as f:
+                        header = f.readline().decode().strip()
+                        w, h = map(int, header.split(','))
+                        data = f.read()
+                    raw = Image.frombytes("RGB", (w, h), data)
                     ratio = THUMB_W / raw.width
                     th = int(raw.height * ratio)
                     img = raw.resize((THUMB_W, th), Image.LANCZOS)
@@ -326,10 +350,16 @@ class PDFLevelPreviewApp:
                     if gen != self._thumb_generation:
                         return
                     self.root.after(0, lambda idx=i, im=img: self._update_thumbnail(idx, im, gen))
-            finally:
-                thumb_doc.close()
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+                time.sleep(0.01)
 
-        threading.Thread(target=render_thumbnails, daemon=True).start()
+        threading.Thread(target=render_thumbnails_subprocess, daemon=True).start()
 
     def _update_thumbnail(self, idx, img, gen):
         """메인 스레드에서 플레이스홀더를 실제 썸네일로 교체"""
@@ -513,31 +543,106 @@ class PDFLevelPreviewApp:
             self._draw_preview()
             return
 
-        # 캐시 미스 → 백그라운드 렌더링
         self._preview_generation += 1
         gen = self._preview_generation
         page_idx = self.current_page
 
-        # 로딩 표시
-        self.preview_canvas.delete("all")
-        cw = max(1, self.preview_canvas.winfo_width())
-        ch = max(1, self.preview_canvas.winfo_height())
-        self.preview_canvas.create_text(cw // 2, ch // 2, text="로딩 중...",
-                                        font=("", 16), fill="#ccc")
+        # 600 DPI base가 이미 캐시되어 있으면 → 스레드에서 레벨+리사이즈 (PIL은 GIL 해제)
+        if page_idx in self.base_render_cache:
+            def apply_task():
+                hires = self._get_levels_applied(page_idx, black, white)
+                display_w = int(hires.width * zoom / BASE_SCALE)
+                display_h = int(hires.height * zoom / BASE_SCALE)
+                result = hires if display_w >= hires.width else hires.resize(
+                    (display_w, display_h), Image.LANCZOS)
+                if gen == self._preview_generation:
+                    self.preview_cache[key] = result
+                    self.root.after(0, lambda: self._on_preview_ready(result, gen))
+            threading.Thread(target=apply_task, daemon=True).start()
+            return
 
-        def render_task():
-            hires = self._get_levels_applied(page_idx, black, white)
-            display_w = int(hires.width * zoom / BASE_SCALE)
-            display_h = int(hires.height * zoom / BASE_SCALE)
-            if display_w >= hires.width:
-                result = hires
-            else:
-                result = hires.resize((display_w, display_h), Image.LANCZOS)
-            if gen == self._preview_generation:
-                self.preview_cache[key] = result
-                self.root.after(0, lambda: self._on_preview_ready(result, gen))
+        # 600 DPI 없음 → 저해상도 즉시 프리뷰 + 600 DPI subprocess
+        quick_scale = max(zoom * 2, 2.0)
+        quick_img = self._render_page(page_idx, zoom=quick_scale)
+        if black != 0 or white != 255:
+            quick_img = self.apply_levels(quick_img, black, white)
+        display_w = int(quick_img.width * zoom / quick_scale)
+        display_h = int(quick_img.height * zoom / quick_scale)
+        if display_w < quick_img.width:
+            quick_img = quick_img.resize((display_w, display_h), Image.LANCZOS)
+        self.current_img = quick_img
+        self._draw_preview()
 
-        threading.Thread(target=render_task, daemon=True).start()
+        # 600 DPI를 별도 프로세스에서 렌더링
+        self._start_hires_render(page_idx, black, white, zoom, key, gen)
+
+    def _start_hires_render(self, page_idx, black, white, zoom, cache_key, gen):
+        """별도 프로세스에서 600 DPI 렌더링 시작"""
+        if self._hires_proc and self._hires_proc.poll() is None:
+            self._hires_proc.terminate()
+
+        tmp = tempfile.mktemp(suffix='.raw')
+        script = (
+            "import fitz,sys;"
+            "d=fitz.open(sys.argv[1]);"
+            "p=d[int(sys.argv[2])];"
+            "z=float(sys.argv[3]);"
+            "m=fitz.Matrix(z,z);"
+            "x=p.get_pixmap(matrix=m);"
+            "f=open(sys.argv[4],'wb');"
+            "f.write(f'{x.width},{x.height}\\n'.encode());"
+            "f.write(bytes(x.samples));"
+            "f.close();d.close()"
+        )
+        proc = subprocess.Popen(
+            [sys.executable, '-c', script, self._pdf_path, str(page_idx), str(BASE_SCALE), tmp],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        self._hires_proc = proc
+
+        def check_hires():
+            if gen != self._preview_generation:
+                if proc.poll() is None:
+                    proc.terminate()
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                return
+            if proc.poll() is None:
+                self.root.after(200, check_hires)
+                return
+            # 프로세스 완료 → 스레드에서 로드 + 레벨 적용
+            def load_hires():
+                try:
+                    with open(tmp, 'rb') as f:
+                        header = f.readline().decode().strip()
+                        w, h = map(int, header.split(','))
+                        data = f.read()
+                    os.unlink(tmp)
+                    hires = Image.frombytes("RGB", (w, h), data)
+                    self.base_render_cache[page_idx] = hires
+                    while len(self.base_render_cache) > 3:
+                        self.base_render_cache.popitem(last=False)
+                    if black == 0 and white == 255:
+                        leveled = hires
+                    else:
+                        leveled = self.apply_levels(hires, black, white)
+                    display_w = int(leveled.width * zoom / BASE_SCALE)
+                    display_h = int(leveled.height * zoom / BASE_SCALE)
+                    result = leveled if display_w >= leveled.width else leveled.resize(
+                        (display_w, display_h), Image.LANCZOS)
+                    if gen == self._preview_generation:
+                        self.preview_cache[cache_key] = result
+                        self.root.after(0, lambda: self._on_preview_ready(result, gen))
+                except Exception:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+            threading.Thread(target=load_hires, daemon=True).start()
+
+        self.root.after(200, check_hires)
 
     def _on_preview_ready(self, img, gen):
         """백그라운드 렌더링 완료 후 메인 스레드에서 호출"""
