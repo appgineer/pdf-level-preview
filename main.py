@@ -8,7 +8,6 @@ import sys
 import threading
 import subprocess
 import tempfile
-from collections import OrderedDict
 
 ZOOM_STEPS = [0.25, 0.33, 0.5, 0.67, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0]
 ZOOM_DEFAULT_IDX = 5  # 1.0
@@ -29,8 +28,7 @@ class PDFLevelPreviewApp:
         self.saved_levels = []
         self.thumbnail_cache = {}
         self.preview_cache = {}
-        self.base_render_cache = OrderedDict()  # page_idx -> high-res PIL Image (LRU, max 3)
-        self.levels_cache = OrderedDict()  # (page_idx, black, white) -> levels-applied PIL Image (LRU, max 3)
+        self.base_render_cache = {}  # page_idx -> 600 DPI PIL Image
         self.thumb_items = []
         self.thumbnail_photo_refs = []
         self.preview_photo = None
@@ -40,9 +38,7 @@ class PDFLevelPreviewApp:
 
         # Async rendering state
         self._thumb_generation = 0
-        self._preview_generation = 0
         self._pdf_path = None
-        self._hires_proc = None  # subprocess for 600 DPI rendering
 
         # Config variables
         self.selected_level_idx = tk.IntVar(value=-1)
@@ -431,33 +427,6 @@ class PDFLevelPreviewApp:
         mode = "RGBA" if pix.alpha else "RGB"
         return Image.frombytes(mode, [pix.width, pix.height], pix.samples)
 
-    def _get_base_render(self, page_idx):
-        """600 DPI 고해상도 렌더링 (LRU 캐시, 최대 3개)"""
-        if page_idx in self.base_render_cache:
-            self.base_render_cache.move_to_end(page_idx)
-            return self.base_render_cache[page_idx]
-        img = self._render_page(page_idx, zoom=BASE_SCALE)
-        self.base_render_cache[page_idx] = img
-        while len(self.base_render_cache) > 3:
-            self.base_render_cache.popitem(last=False)
-        return img
-
-    def _get_levels_applied(self, page_idx, black, white):
-        """고해상도 이미지에 레벨 적용 (LRU 캐시, 최대 3개)"""
-        key = (page_idx, black, white)
-        if key in self.levels_cache:
-            self.levels_cache.move_to_end(key)
-            return self.levels_cache[key]
-        base = self._get_base_render(page_idx)
-        if black == 0 and white == 255:
-            img = base
-        else:
-            img = self.apply_levels(base, black, white)
-        self.levels_cache[key] = img
-        while len(self.levels_cache) > 3:
-            self.levels_cache.popitem(last=False)
-        return img
-
     # ------------------------------------------------------------------ #
     # Page selection
     # ------------------------------------------------------------------ #
@@ -539,106 +508,34 @@ class PDFLevelPreviewApp:
             self._draw_preview()
             return
 
-        self._preview_generation += 1
-        gen = self._preview_generation
         page_idx = self.current_page
 
-        # 600 DPI base가 이미 캐시되어 있으면 → 스레드에서 레벨+리사이즈 (PIL은 GIL 해제)
-        if page_idx in self.base_render_cache:
-            self.render_status.config(text="600 DPI 적용 중...")
-            def apply_task():
-                hires = self._get_levels_applied(page_idx, black, white)
-                display_w = int(hires.width * zoom / BASE_SCALE)
-                display_h = int(hires.height * zoom / BASE_SCALE)
-                result = hires if display_w >= hires.width else hires.resize(
-                    (display_w, display_h), Image.LANCZOS)
-                if gen == self._preview_generation:
-                    self.preview_cache[key] = result
-                    self.root.after(0, lambda: self._on_preview_ready(result, gen, hires=True))
-            threading.Thread(target=apply_task, daemon=True).start()
-            return
+        # 600 DPI 원본 렌더링 (캐시)
+        if page_idx not in self.base_render_cache:
+            self.render_status.config(text="600 DPI 렌더링 중...")
+            self.root.update_idletasks()
+            self.base_render_cache[page_idx] = self._render_page(page_idx, zoom=BASE_SCALE)
 
-        # 600 DPI 없음 → 로딩 표시 + subprocess로 600 DPI 렌더링
-        self.render_status.config(text="600 DPI 로딩 중...")
-        self.preview_canvas.delete("all")
-        cw = max(1, self.preview_canvas.winfo_width())
-        ch = max(1, self.preview_canvas.winfo_height())
-        self.preview_canvas.create_text(cw // 2, ch // 2, text="600 DPI 로딩 중...",
-                                        font=("", 16), fill="#ccc")
-        self._start_hires_render(page_idx, black, white, zoom, key, gen)
+        base = self.base_render_cache[page_idx]
 
-    def _start_hires_render(self, page_idx, black, white, zoom, cache_key, gen):
-        """별도 프로세스에서 600 DPI 렌더링 시작"""
-        if self._hires_proc and self._hires_proc.poll() is None:
-            self._hires_proc.terminate()
+        # 레벨 적용
+        if black == 0 and white == 255:
+            leveled = base
+        else:
+            leveled = self.apply_levels(base, black, white)
 
-        tmp = tempfile.mktemp(suffix='.png')
-        script = (
-            "import fitz,sys;"
-            "d=fitz.open(sys.argv[1]);"
-            "p=d[int(sys.argv[2])];"
-            "z=float(sys.argv[3]);"
-            "m=fitz.Matrix(z,z);"
-            "x=p.get_pixmap(matrix=m);"
-            "x.save(sys.argv[4]);"
-            "d.close()"
-        )
-        proc = subprocess.Popen(
-            [sys.executable, '-c', script, self._pdf_path, str(page_idx), str(BASE_SCALE), tmp],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-        self._hires_proc = proc
+        # 화면 표시 크기로 리사이즈
+        display_w = int(leveled.width * zoom / BASE_SCALE)
+        display_h = int(leveled.height * zoom / BASE_SCALE)
+        if display_w >= leveled.width:
+            result = leveled
+        else:
+            result = leveled.resize((display_w, display_h), Image.LANCZOS)
 
-        def check_hires():
-            if gen != self._preview_generation:
-                if proc.poll() is None:
-                    proc.terminate()
-                try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
-                return
-            if proc.poll() is None:
-                self.root.after(200, check_hires)
-                return
-            # 프로세스 완료 → 스레드에서 로드 + 레벨 적용
-            def load_hires():
-                try:
-                    hires = Image.open(tmp)
-                    hires.load()
-                    os.unlink(tmp)
-                    self.base_render_cache[page_idx] = hires
-                    while len(self.base_render_cache) > 3:
-                        self.base_render_cache.popitem(last=False)
-                    if black == 0 and white == 255:
-                        leveled = hires
-                    else:
-                        leveled = self.apply_levels(hires, black, white)
-                    display_w = int(leveled.width * zoom / BASE_SCALE)
-                    display_h = int(leveled.height * zoom / BASE_SCALE)
-                    result = leveled if display_w >= leveled.width else leveled.resize(
-                        (display_w, display_h), Image.LANCZOS)
-                    if gen == self._preview_generation:
-                        self.preview_cache[cache_key] = result
-                        self.root.after(0, lambda: self._on_preview_ready(result, gen, hires=True))
-                except Exception:
-                    pass
-                finally:
-                    try:
-                        os.unlink(tmp)
-                    except OSError:
-                        pass
-            threading.Thread(target=load_hires, daemon=True).start()
-
-        self.root.after(200, check_hires)
-
-    def _on_preview_ready(self, img, gen, hires=False):
-        """백그라운드 렌더링 완료 후 메인 스레드에서 호출"""
-        if gen != self._preview_generation:
-            return
-        self.current_img = img
+        self.preview_cache[key] = result
+        self.current_img = result
         self._draw_preview()
-        self.render_status.config(text="600 DPI" if hires else "")
+        self.render_status.config(text="600 DPI")
 
     def _draw_preview(self):
         if self.current_img is None:
