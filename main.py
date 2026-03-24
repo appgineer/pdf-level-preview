@@ -266,7 +266,6 @@ class PDFLevelPreviewApp:
         self.thumbnail_cache.clear()
         self.preview_cache.clear()
         self.base_render_cache.clear()
-        self.levels_cache.clear()
         self.current_page = 0
         self.zoom_idx = ZOOM_DEFAULT_IDX
         self._update_zoom_label()
