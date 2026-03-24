@@ -4,6 +4,8 @@ from PIL import Image, ImageTk
 import fitz  # PyMuPDF
 import json
 import os
+import threading
+from collections import OrderedDict
 
 ZOOM_STEPS = [0.25, 0.33, 0.5, 0.67, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0]
 ZOOM_DEFAULT_IDX = 5  # 1.0
@@ -24,14 +26,19 @@ class PDFLevelPreviewApp:
         self.saved_levels = []
         self.thumbnail_cache = {}
         self.preview_cache = {}
-        self.base_render_cache = {}  # page_idx -> high-res PIL Image
-        self.levels_cache = {}  # (page_idx, black, white) -> levels-applied PIL Image
+        self.base_render_cache = OrderedDict()  # page_idx -> high-res PIL Image (LRU, max 3)
+        self.levels_cache = OrderedDict()  # (page_idx, black, white) -> levels-applied PIL Image (LRU, max 3)
         self.thumb_items = []
         self.thumbnail_photo_refs = []
         self.preview_photo = None
         self.current_img = None
         self.zoom_idx = ZOOM_DEFAULT_IDX
         self.has_dnd = has_dnd
+
+        # Async rendering state
+        self._thumb_generation = 0
+        self._preview_generation = 0
+        self._render_lock = threading.Lock()
 
         # Config variables
         self.selected_level_idx = tk.IntVar(value=-1)
@@ -274,28 +281,67 @@ class PDFLevelPreviewApp:
         self.thumbnail_photo_refs.clear()
         self.thumb_items.clear()
 
-        for i in range(len(self.pdf_doc)):
-            raw = self._render_page(i, zoom=0.3)
-            ratio = THUMB_W / raw.width
-            th = int(raw.height * ratio)
-            img = raw.resize((THUMB_W, th), Image.LANCZOS)
-            photo = ImageTk.PhotoImage(img)
-            self.thumbnail_photo_refs.append(photo)
-            self.thumbnail_cache[i] = raw
+        self._thumb_generation += 1
+        gen = self._thumb_generation
+        page_count = len(self.pdf_doc)
 
+        # Phase 1: 플레이스홀더 즉시 배치
+        for i in range(page_count):
             frame = tk.Frame(self.thumb_frame, bg="#f0f0f0")
+            placeholder = tk.Frame(frame, bg="#d0d0d0", width=THUMB_W, height=int(THUMB_W * 1.4))
+            placeholder.pack()
+            placeholder.pack_propagate(False)
+            tk.Label(placeholder, text=f"p.{i + 1}", font=("", 9), bg="#d0d0d0", fg="#888").place(relx=0.5, rely=0.5, anchor=tk.CENTER)
             btn = tk.Button(
-                frame, image=photo, relief=tk.FLAT,
-                command=lambda idx=i: self.select_page(idx), bd=2, cursor="hand2"
+                frame, text=f"p.{i + 1}", relief=tk.FLAT,
+                command=lambda idx=i: self.select_page(idx), bd=2, cursor="hand2",
+                width=THUMB_W // 8, height=0
             )
-            btn.pack()
+            # btn은 이미지 로드 후 교체됨
             tk.Label(frame, text=f"p.{i + 1}", font=("", 8), bg="#f0f0f0").pack()
-            self.thumb_items.append((photo, frame))
+            self.thumbnail_photo_refs.append(None)  # placeholder
+            self.thumb_items.append((None, frame))
 
         self._layout_thumbnails()
-
-        # Bind mouse wheel to all children in thumbnail area
         self._bind_thumb_scroll_recursive(self.thumb_frame)
+
+        # Phase 2: 백그라운드에서 순차 렌더링
+        def render_thumbnails():
+            for i in range(page_count):
+                if gen != self._thumb_generation:
+                    return  # 새 PDF 열림 → 중단
+                with self._render_lock:
+                    raw = self._render_page(i, zoom=0.3)
+                ratio = THUMB_W / raw.width
+                th = int(raw.height * ratio)
+                img = raw.resize((THUMB_W, th), Image.LANCZOS)
+                self.thumbnail_cache[i] = raw
+                if gen != self._thumb_generation:
+                    return
+                self.root.after(0, lambda idx=i, im=img: self._update_thumbnail(idx, im, gen))
+
+        threading.Thread(target=render_thumbnails, daemon=True).start()
+
+    def _update_thumbnail(self, idx, img, gen):
+        """메인 스레드에서 플레이스홀더를 실제 썸네일로 교체"""
+        if gen != self._thumb_generation:
+            return
+        if idx >= len(self.thumb_items):
+            return
+        _, frame = self.thumb_items[idx]
+        # 기존 위젯 제거
+        for w in frame.winfo_children():
+            w.destroy()
+        photo = ImageTk.PhotoImage(img)
+        self.thumbnail_photo_refs[idx] = photo
+        btn = tk.Button(
+            frame, image=photo, relief=tk.FLAT,
+            command=lambda i=idx: self.select_page(i), bd=2, cursor="hand2"
+        )
+        btn.pack()
+        tk.Label(frame, text=f"p.{idx + 1}", font=("", 8), bg="#f0f0f0").pack()
+        self.thumb_items[idx] = (photo, frame)
+        self._bind_thumb_scroll_recursive(frame)
 
     def _bind_thumb_scroll_recursive(self, widget):
         widget.bind("<MouseWheel>", self._on_thumb_scroll)
@@ -350,21 +396,31 @@ class PDFLevelPreviewApp:
         return Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
     def _get_base_render(self, page_idx):
-        """600 DPI 고해상도 렌더링 (캐시)"""
-        if page_idx not in self.base_render_cache:
-            self.base_render_cache[page_idx] = self._render_page(page_idx, zoom=BASE_SCALE)
-        return self.base_render_cache[page_idx]
+        """600 DPI 고해상도 렌더링 (LRU 캐시, 최대 3개)"""
+        if page_idx in self.base_render_cache:
+            self.base_render_cache.move_to_end(page_idx)
+            return self.base_render_cache[page_idx]
+        img = self._render_page(page_idx, zoom=BASE_SCALE)
+        self.base_render_cache[page_idx] = img
+        while len(self.base_render_cache) > 3:
+            self.base_render_cache.popitem(last=False)
+        return img
 
     def _get_levels_applied(self, page_idx, black, white):
-        """고해상도 이미지에 레벨 적용 (캐시)"""
+        """고해상도 이미지에 레벨 적용 (LRU 캐시, 최대 3개)"""
         key = (page_idx, black, white)
-        if key not in self.levels_cache:
-            base = self._get_base_render(page_idx)
-            if black == 0 and white == 255:
-                self.levels_cache[key] = base
-            else:
-                self.levels_cache[key] = self.apply_levels(base, black, white)
-        return self.levels_cache[key]
+        if key in self.levels_cache:
+            self.levels_cache.move_to_end(key)
+            return self.levels_cache[key]
+        base = self._get_base_render(page_idx)
+        if black == 0 and white == 255:
+            img = base
+        else:
+            img = self.apply_levels(base, black, white)
+        self.levels_cache[key] = img
+        while len(self.levels_cache) > 3:
+            self.levels_cache.popitem(last=False)
+        return img
 
     # ------------------------------------------------------------------ #
     # Page selection
@@ -443,21 +499,43 @@ class PDFLevelPreviewApp:
         zoom = self._current_zoom()
 
         key = (self.current_page, black, white, zoom)
-        if key not in self.preview_cache:
-            # 600 DPI로 렌더링 후 레벨 적용, 그 다음 화면 줌에 맞게 리사이즈
-            hires = self._get_levels_applied(self.current_page, black, white)
-            # 화면 표시 크기 계산: zoom 1.0 = 72 DPI 크기
-            display_w = int(hires.width * zoom / BASE_SCALE)
-            display_h = int(hires.height * zoom / BASE_SCALE)
-            if display_w >= hires.width:
-                # 확대해야 하면 고해상도 그대로 (더 확대할 필요 없음)
-                self.preview_cache[key] = hires
-            else:
-                self.preview_cache[key] = hires.resize(
-                    (display_w, display_h), Image.LANCZOS
-                )
+        if key in self.preview_cache:
+            self.current_img = self.preview_cache[key]
+            self._draw_preview()
+            return
 
-        self.current_img = self.preview_cache[key]
+        # 캐시 미스 → 백그라운드 렌더링
+        self._preview_generation += 1
+        gen = self._preview_generation
+        page_idx = self.current_page
+
+        # 로딩 표시
+        self.preview_canvas.delete("all")
+        cw = max(1, self.preview_canvas.winfo_width())
+        ch = max(1, self.preview_canvas.winfo_height())
+        self.preview_canvas.create_text(cw // 2, ch // 2, text="로딩 중...",
+                                        font=("", 16), fill="#ccc")
+
+        def render_task():
+            with self._render_lock:
+                hires = self._get_levels_applied(page_idx, black, white)
+                display_w = int(hires.width * zoom / BASE_SCALE)
+                display_h = int(hires.height * zoom / BASE_SCALE)
+                if display_w >= hires.width:
+                    result = hires
+                else:
+                    result = hires.resize((display_w, display_h), Image.LANCZOS)
+            if gen == self._preview_generation:
+                self.preview_cache[key] = result
+                self.root.after(0, lambda: self._on_preview_ready(result, gen))
+
+        threading.Thread(target=render_task, daemon=True).start()
+
+    def _on_preview_ready(self, img, gen):
+        """백그라운드 렌더링 완료 후 메인 스레드에서 호출"""
+        if gen != self._preview_generation:
+            return
+        self.current_img = img
         self._draw_preview()
 
     def _draw_preview(self):
