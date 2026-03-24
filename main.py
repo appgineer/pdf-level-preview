@@ -564,20 +564,13 @@ class PDFLevelPreviewApp:
             threading.Thread(target=apply_task, daemon=True).start()
             return
 
-        # 600 DPI 없음 → 저해상도 즉시 프리뷰 + 600 DPI subprocess
-        self.render_status.config(text="미리보기 (600 DPI 로딩 중...)")
-        quick_scale = max(zoom * 2, 2.0)
-        quick_img = self._render_page(page_idx, zoom=quick_scale)
-        if black != 0 or white != 255:
-            quick_img = self.apply_levels(quick_img, black, white)
-        display_w = int(quick_img.width * zoom / quick_scale)
-        display_h = int(quick_img.height * zoom / quick_scale)
-        if display_w < quick_img.width:
-            quick_img = quick_img.resize((display_w, display_h), Image.LANCZOS)
-        self.current_img = quick_img
-        self._draw_preview()
-
-        # 600 DPI를 별도 프로세스에서 렌더링
+        # 600 DPI 없음 → 로딩 표시 + subprocess로 600 DPI 렌더링
+        self.render_status.config(text="600 DPI 로딩 중...")
+        self.preview_canvas.delete("all")
+        cw = max(1, self.preview_canvas.winfo_width())
+        ch = max(1, self.preview_canvas.winfo_height())
+        self.preview_canvas.create_text(cw // 2, ch // 2, text="600 DPI 로딩 중...",
+                                        font=("", 16), fill="#ccc")
         self._start_hires_render(page_idx, black, white, zoom, key, gen)
 
     def _start_hires_render(self, page_idx, black, white, zoom, cache_key, gen):
