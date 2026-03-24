@@ -46,9 +46,8 @@ class PDFLevelPreviewApp:
 
         # Config variables
         self.selected_level_idx = tk.IntVar(value=-1)
-        self.process_level_var = tk.StringVar(value="일반")
-        self.use_ocr_var = tk.BooleanVar(value=False)
-        self.ocr_language_var = tk.StringVar(value="Korean")
+        self.scan_type_var = tk.StringVar(value="일반")
+        self.ocr_var = tk.StringVar(value="안함")
         self.is_split_var = tk.BooleanVar(value=False)
         self.split_method_var = tk.StringVar(value="page")
         self.split_page_ranges_var = tk.StringVar(value="")
@@ -758,23 +757,33 @@ class PDFLevelPreviewApp:
         center = tk.Frame(parent)
         center.pack(expand=True)
 
-        # Row 0: 처리수준
+        # Row 0: 스캔타입
         r0 = tk.Frame(center)
         r0.pack(pady=2)
-        tk.Label(r0, text="처리수준:", font=FNT).pack(side=tk.LEFT)
-        tk.Radiobutton(r0, text="일반", variable=self.process_level_var, value="일반",
-                       cursor="hand2", font=FNT).pack(side=tk.LEFT, padx=2)
-        tk.Radiobutton(r0, text="고급", variable=self.process_level_var, value="고급",
-                       cursor="hand2", font=FNT).pack(side=tk.LEFT, padx=2)
+        tk.Label(r0, text="스캔타입:", font=FNT).pack(side=tk.LEFT)
+        for txt in ("일반", "고급", "안함"):
+            tk.Radiobutton(r0, text=txt, variable=self.scan_type_var, value=txt,
+                           cursor="hand2", font=FNT).pack(side=tk.LEFT, padx=2)
 
-        # Row 1: OCR
+        # Row 1: OCR (라디오 버튼)
         r1 = tk.Frame(center)
         r1.pack(pady=2)
-        tk.Checkbutton(r1, text="OCR 사용", variable=self.use_ocr_var,
-                       command=self._toggle_ocr, cursor="hand2", font=FNT).pack(side=tk.LEFT)
-        self.ocr_language_entry = tk.Entry(r1, textvariable=self.ocr_language_var, width=12, font=FNT)
-        self.ocr_language_entry.pack(side=tk.LEFT, padx=6)
-        self.ocr_language_entry.config(state=tk.DISABLED)
+        tk.Label(r1, text="OCR:", font=FNT).pack(side=tk.LEFT)
+        ocr_options = [
+            "안함",
+            "한국어 및 영어",
+            "일본어 및 영어",
+            "중국어(간체) 및 영어",
+            "중국어(번체) 및 영어",
+            "한국어",
+            "일본어",
+            "중국어(간체)",
+            "중국어(번체)",
+            "영어",
+        ]
+        for txt in ocr_options:
+            tk.Radiobutton(r1, text=txt, variable=self.ocr_var, value=txt,
+                           cursor="hand2", font=FNT).pack(side=tk.LEFT, padx=2)
 
         # Row 2: 분할
         r2 = tk.Frame(center)
@@ -799,12 +808,6 @@ class PDFLevelPreviewApp:
         # Row 4: 설정 저장 버튼
         tk.Button(center, text="설정 저장", command=self._save_config,
                   padx=12, pady=4, cursor="hand2", font=FNT).pack(pady=4)
-
-    def _toggle_ocr(self):
-        if self.use_ocr_var.get():
-            self.ocr_language_entry.config(state=tk.NORMAL)
-        else:
-            self.ocr_language_entry.config(state=tk.DISABLED)
 
     def _toggle_split(self):
         if self.is_split_var.get():
@@ -848,11 +851,10 @@ class PDFLevelPreviewApp:
                 black, white = 0, 255
 
         config = {
-            "process_level": self.process_level_var.get(),
+            "scan_type": self.scan_type_var.get(),
             "black_point": black,
             "white_point": white,
-            "use_ocr": self.use_ocr_var.get(),
-            "ocr_language": self.ocr_language_var.get() if self.use_ocr_var.get() else "",
+            "ocr": self.ocr_var.get(),
             "is_split": self.is_split_var.get(),
             "split_method": self.split_method_var.get() if self.is_split_var.get() else "none",
             "split_page_ranges": self.split_page_ranges_var.get() if self.is_split_var.get() and self.split_method_var.get() == "page" else "",
@@ -888,10 +890,9 @@ class PDFLevelPreviewApp:
         except (json.JSONDecodeError, OSError):
             return
 
-        self.process_level_var.set(cfg.get("process_level", "고급"))
-        self.use_ocr_var.set(cfg.get("use_ocr", True))
-        self.ocr_language_var.set(cfg.get("ocr_language", "Korean"))
-        self.is_split_var.set(cfg.get("is_split", True))
+        self.scan_type_var.set(cfg.get("scan_type", "일반"))
+        self.ocr_var.set(cfg.get("ocr", "안함"))
+        self.is_split_var.set(cfg.get("is_split", False))
         self.split_method_var.set(cfg.get("split_method", "page"))
         self.split_page_ranges_var.set(cfg.get("split_page_ranges", ""))
         self.split_size_mb_var.set(cfg.get("split_size_mb", 0))
@@ -903,7 +904,6 @@ class PDFLevelPreviewApp:
         self.white_var.set(white)
 
         # UI 상태 갱신
-        self._toggle_ocr()
         self._toggle_split()
 
     # ------------------------------------------------------------------ #
