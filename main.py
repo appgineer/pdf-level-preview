@@ -327,7 +327,7 @@ class PDFLevelPreviewApp:
                         "d=fitz.open(sys.argv[1]);"
                         "p=d[int(sys.argv[2])];"
                         "m=fitz.Matrix(0.3,0.3);"
-                        "x=p.get_pixmap(matrix=m,alpha=False);"
+                        "x=p.get_pixmap(matrix=m);"
                         "x.save(sys.argv[3]);"
                         "d.close()"
                     )
@@ -427,8 +427,9 @@ class PDFLevelPreviewApp:
     def _render_page(self, page_idx, zoom=2.0):
         page = self.pdf_doc[page_idx]
         mat = fitz.Matrix(zoom, zoom)
-        pix = page.get_pixmap(matrix=mat, alpha=False)
-        return Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        pix = page.get_pixmap(matrix=mat)
+        mode = "RGBA" if pix.alpha else "RGB"
+        return Image.frombytes(mode, [pix.width, pix.height], pix.samples)
 
     def _get_base_render(self, page_idx):
         """600 DPI 고해상도 렌더링 (LRU 캐시, 최대 3개)"""
@@ -578,7 +579,7 @@ class PDFLevelPreviewApp:
             "p=d[int(sys.argv[2])];"
             "z=float(sys.argv[3]);"
             "m=fitz.Matrix(z,z);"
-            "x=p.get_pixmap(matrix=m,alpha=False);"
+            "x=p.get_pixmap(matrix=m);"
             "x.save(sys.argv[4]);"
             "d.close()"
         )
