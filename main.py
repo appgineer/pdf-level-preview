@@ -724,12 +724,14 @@ class PDFLevelPreviewApp:
             w.config(state=tk.DISABLED)
 
         self.split_detail_frame = tk.Frame(left)
-        self._toggle_split_detail()
 
-        ttk.Separator(left, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=4)
-
-        tk.Button(left, text="설정 저장", command=self._save_config,
+        self._split_bottom = tk.Frame(left)
+        self._split_bottom.pack(fill=tk.X)
+        ttk.Separator(self._split_bottom, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=4)
+        tk.Button(self._split_bottom, text="설정 저장", command=self._save_config,
                   padx=12, pady=4, cursor="hand2", font=FNT).pack(pady=(12, 0))
+
+        self._toggle_split_detail()
 
         # 왼쪽 열 전체 위젯에 스크롤 바인딩
         _bind_scroll_recursive(left)
@@ -819,7 +821,7 @@ class PDFLevelPreviewApp:
             tk.Label(inner, text="크기(MB):", font=FNT).pack(side=tk.LEFT)
             tk.Entry(inner, textvariable=self.split_size_mb_var,
                      width=8, font=FNT).pack(side=tk.LEFT, padx=6)
-        self.split_detail_frame.pack(fill=tk.X)
+        self.split_detail_frame.pack(fill=tk.X, before=self._split_bottom)
         self._bind_left_scroll_recursive(self.split_detail_frame)
 
     def _save_config(self):
