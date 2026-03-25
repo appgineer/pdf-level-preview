@@ -724,8 +724,6 @@ class PDFLevelPreviewApp:
             w.config(state=tk.DISABLED)
 
         self.split_detail_frame = tk.Frame(left)
-        self.split_detail_frame.pack(fill=tk.X)
-        self.split_detail_frame.columnconfigure(0, weight=1)
         self._toggle_split_detail()
 
         ttk.Separator(left, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=4)
@@ -753,22 +751,37 @@ class PDFLevelPreviewApp:
 
         self.ocr_grid = tk.Frame(right)
 
-        ocr_options = [
-            "한국어", "일본어", "영어",
+        ocr_left_group = [
+            "한국어", "영어", "일본어",
             "중국어 간체", "중국어 번체",
-            "독일어", "프랑스어", "스페인어",
+            None,  # 간격
             "한국어 및 영어", "일본어 및 영어",
             "중국어 간체 및 영어", "중국어 번체 및 영어",
+        ]
+        ocr_right_group = [
+            "독일어", "프랑스어", "스페인어",
             "간단한 수학 수식", "단순 화학식", "숫자",
             "Java", "C/C++",
         ]
-        for txt in ocr_options:
+
+        all_names = [t for t in ocr_left_group + ocr_right_group if t is not None]
+        for txt in all_names:
             self.ocr_vars[txt] = tk.BooleanVar(value=False)
-        for i, txt in enumerate(ocr_options):
-            r, c = divmod(i, 2)
-            tk.Checkbutton(self.ocr_grid, text=txt, variable=self.ocr_vars[txt],
-                           cursor="hand2", font=FNT, anchor=tk.W).grid(
-                row=r, column=c, sticky=tk.W, padx=(0, 12))
+
+        ocr_left_col = tk.Frame(self.ocr_grid)
+        ocr_left_col.pack(side=tk.LEFT, anchor=tk.N, padx=(0, 12))
+        for txt in ocr_left_group:
+            if txt is None:
+                tk.Frame(ocr_left_col, height=8).pack()
+            else:
+                tk.Checkbutton(ocr_left_col, text=txt, variable=self.ocr_vars[txt],
+                               cursor="hand2", font=FNT, anchor=tk.W).pack(anchor=tk.W)
+
+        ocr_right_col = tk.Frame(self.ocr_grid)
+        ocr_right_col.pack(side=tk.LEFT, anchor=tk.N)
+        for txt in ocr_right_group:
+            tk.Checkbutton(ocr_right_col, text=txt, variable=self.ocr_vars[txt],
+                           cursor="hand2", font=FNT, anchor=tk.W).pack(anchor=tk.W)
 
     def _toggle_ocr(self):
         if self.ocr_enabled_var.get():
@@ -786,6 +799,7 @@ class PDFLevelPreviewApp:
         self._toggle_split_detail()
 
     def _toggle_split_detail(self):
+        self.split_detail_frame.pack_forget()
         for w in self.split_detail_frame.winfo_children():
             w.destroy()
         self.split_range_text = None
@@ -794,17 +808,18 @@ class PDFLevelPreviewApp:
         FNT = ("", 12)
         method = self.split_method_var.get()
         if method == "page":
-            tk.Label(self.split_detail_frame, text="범위:", font=FNT).grid(row=0, column=0)
+            tk.Label(self.split_detail_frame, text="범위:", font=FNT).pack()
             self.split_range_text = tk.Text(self.split_detail_frame,
                                             width=24, height=3, font=FNT, wrap=tk.WORD)
-            self.split_range_text.grid(row=1, column=0, padx=6, pady=2)
+            self.split_range_text.pack(padx=6, pady=2)
             self.split_range_text.insert("1.0", self.split_page_ranges_var.get())
         elif method == "size":
             inner = tk.Frame(self.split_detail_frame)
-            inner.grid(row=0, column=0, pady=2)
+            inner.pack(pady=2)
             tk.Label(inner, text="크기(MB):", font=FNT).pack(side=tk.LEFT)
             tk.Entry(inner, textvariable=self.split_size_mb_var,
                      width=8, font=FNT).pack(side=tk.LEFT, padx=6)
+        self.split_detail_frame.pack(fill=tk.X)
         self._bind_left_scroll_recursive(self.split_detail_frame)
 
     def _save_config(self):
