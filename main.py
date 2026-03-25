@@ -46,11 +46,12 @@ class PDFLevelPreviewApp:
         # Config variables
         self.selected_level_idx = tk.IntVar(value=-1)
         self.scan_type_var = tk.StringVar(value="일반")
-        self.ocr_var = tk.StringVar(value="안함")
+        self.ocr_vars = {}  # name -> BooleanVar
         self.is_split_var = tk.BooleanVar(value=False)
         self.split_method_var = tk.StringVar(value="page")
         self.split_page_ranges_var = tk.StringVar(value="")
         self.split_size_mb_var = tk.IntVar(value=0)
+        self.split_range_text = None
 
         self._build_ui()
         if has_dnd:
@@ -233,7 +234,7 @@ class PDFLevelPreviewApp:
         self.right_paned.update_idletasks()
         total_h = self.right_paned.winfo_height()
         if total_h > 1:
-            self.right_paned.sash_place(0, 0, int(total_h * 0.8))
+            self.right_paned.sash_place(0, 0, int(total_h * 0.7))
 
     # ------------------------------------------------------------------ #
     # Drag & Drop
@@ -684,7 +685,7 @@ class PDFLevelPreviewApp:
         # ── 구분선 ──
         ttk.Separator(columns, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=2)
 
-        # ── 오른쪽 열: OCR (2열 그리드) ──
+        # ── 오른쪽 열: OCR (2열 그리드, 중복 선택) ──
         right = tk.Frame(columns, padx=8, pady=4)
         right.pack(side=tk.LEFT, fill=tk.Y)
 
@@ -693,20 +694,19 @@ class PDFLevelPreviewApp:
         ocr_grid.pack(anchor=tk.W)
 
         ocr_options = [
-            "안함",
-            "한국어 및 영어",
-            "일본어 및 영어",
-            "중국어(간체) 및 영어",
-            "중국어(번체) 및 영어",
-            "한국어",
-            "일본어",
-            "중국어(간체)",
-            "중국어(번체)",
-            "영어",
+            "한국어", "일본어", "영어",
+            "중국어 간체", "중국어 번체",
+            "독일어", "프랑스어", "스페인어",
+            "한국어 및 영어", "일본어 및 영어",
+            "중국어 간체 및 영어", "중국어 번체 및 영어",
+            "간단한 수학 수식", "단순 화학식", "숫자",
+            "Java", "C/C++",
         ]
+        for txt in ocr_options:
+            self.ocr_vars[txt] = tk.BooleanVar(value=False)
         for i, txt in enumerate(ocr_options):
             r, c = divmod(i, 2)
-            tk.Radiobutton(ocr_grid, text=txt, variable=self.ocr_var, value=txt,
+            tk.Checkbutton(ocr_grid, text=txt, variable=self.ocr_vars[txt],
                            cursor="hand2", font=FNT, anchor=tk.W).grid(
                 row=r, column=c, sticky=tk.W, padx=(0, 12))
 
@@ -722,14 +722,17 @@ class PDFLevelPreviewApp:
     def _toggle_split_detail(self):
         for w in self.split_detail_frame.winfo_children():
             w.destroy()
+        self.split_range_text = None
         if not self.is_split_var.get():
             return
         FNT = ("", 12)
         method = self.split_method_var.get()
         if method == "page":
-            tk.Label(self.split_detail_frame, text="범위:", font=FNT).pack(side=tk.LEFT)
-            tk.Entry(self.split_detail_frame, textvariable=self.split_page_ranges_var,
-                     width=24, font=FNT).pack(side=tk.LEFT, padx=6)
+            tk.Label(self.split_detail_frame, text="범위:", font=FNT).pack(anchor=tk.W)
+            self.split_range_text = tk.Text(self.split_detail_frame,
+                                            width=24, height=3, font=FNT, wrap=tk.WORD)
+            self.split_range_text.pack(anchor=tk.W, padx=6, pady=2)
+            self.split_range_text.insert("1.0", self.split_page_ranges_var.get())
         elif method == "size":
             tk.Label(self.split_detail_frame, text="크기(MB):", font=FNT).pack(side=tk.LEFT)
             tk.Entry(self.split_detail_frame, textvariable=self.split_size_mb_var,
@@ -755,10 +758,10 @@ class PDFLevelPreviewApp:
             "scan_type": self.scan_type_var.get(),
             "black_point": black,
             "white_point": white,
-            "ocr": self.ocr_var.get(),
+            "ocr": [name for name, var in self.ocr_vars.items() if var.get()],
             "is_split": self.is_split_var.get(),
             "split_method": self.split_method_var.get() if self.is_split_var.get() else "none",
-            "split_page_ranges": self.split_page_ranges_var.get() if self.is_split_var.get() and self.split_method_var.get() == "page" else "",
+            "split_page_ranges": self.split_range_text.get("1.0", tk.END).strip() if self.is_split_var.get() and self.split_method_var.get() == "page" and self.split_range_text else "",
             "split_size_mb": int(self.split_size_mb_var.get()) if self.is_split_var.get() and self.split_method_var.get() == "size" else 0,
         }
 
@@ -792,7 +795,11 @@ class PDFLevelPreviewApp:
             return
 
         self.scan_type_var.set(cfg.get("scan_type", "일반"))
-        self.ocr_var.set(cfg.get("ocr", "안함"))
+        ocr_val = cfg.get("ocr", [])
+        if isinstance(ocr_val, str):
+            ocr_val = [ocr_val] if ocr_val != "안함" else []
+        for name, var in self.ocr_vars.items():
+            var.set(name in ocr_val)
         self.is_split_var.set(cfg.get("is_split", False))
         self.split_method_var.set(cfg.get("split_method", "page"))
         self.split_page_ranges_var.set(cfg.get("split_page_ranges", ""))
