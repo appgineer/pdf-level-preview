@@ -8,6 +8,7 @@ import sys
 import threading
 import subprocess
 import tempfile
+import io
 
 ZOOM_STEPS = [0.06, 0.08, 0.12, 0.17, 0.25, 0.33, 0.5, 0.67, 0.75, 1.0]
 ZOOM_DEFAULT_IDX = 2  # 0.12 ≈ 72/600, 페이지 전체 보기
@@ -423,7 +424,8 @@ class PDFLevelPreviewApp:
         page = self.pdf_doc[page_idx]
         mat = fitz.Matrix(zoom, zoom)
         pix = page.get_pixmap(matrix=mat)
-        return Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        png_data = pix.tobytes("png")
+        return Image.open(io.BytesIO(png_data)).convert("RGB")
 
     # ------------------------------------------------------------------ #
     # Page selection
