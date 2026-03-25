@@ -651,38 +651,39 @@ class PDFLevelPreviewApp:
         columns.pack(expand=True, fill=tk.BOTH)
 
         # ── 왼쪽 열: 스캔타입, 분할, 저장 ──
-        left = tk.Frame(columns, padx=8, pady=4)
+        left = tk.Frame(columns, padx=8, pady=4, width=260)
         left.pack(side=tk.LEFT, fill=tk.Y)
+        left.pack_propagate(False)
 
         # 스캔타입
-        tk.Label(left, text="스캔타입:", font=FNT).pack(anchor=tk.W)
+        tk.Label(left, text="스캔타입:", font=FNT).pack()
         for txt in ("일반", "고급", "안함"):
             tk.Radiobutton(left, text=txt, variable=self.scan_type_var, value=txt,
-                           cursor="hand2", font=FNT).pack(anchor=tk.W)
+                           cursor="hand2", font=FNT).pack()
 
         ttk.Separator(left, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=4)
 
         # 분할
         tk.Checkbutton(left, text="분할", variable=self.is_split_var,
-                       command=self._toggle_split, cursor="hand2", font=FNT).pack(anchor=tk.W)
+                       command=self._toggle_split, cursor="hand2", font=FNT).pack()
         self.split_radio_frame = tk.Frame(left)
-        self.split_radio_frame.pack(anchor=tk.W, padx=16)
+        self.split_radio_frame.pack()
         tk.Radiobutton(self.split_radio_frame, text="page", variable=self.split_method_var,
-                       value="page", command=self._toggle_split_detail, cursor="hand2", font=FNT).pack(anchor=tk.W)
+                       value="page", command=self._toggle_split_detail, cursor="hand2", font=FNT).pack()
         tk.Radiobutton(self.split_radio_frame, text="size", variable=self.split_method_var,
-                       value="size", command=self._toggle_split_detail, cursor="hand2", font=FNT).pack(anchor=tk.W)
+                       value="size", command=self._toggle_split_detail, cursor="hand2", font=FNT).pack()
         for w in self.split_radio_frame.winfo_children():
             w.config(state=tk.DISABLED)
 
         self.split_detail_frame = tk.Frame(left)
-        self.split_detail_frame.pack(fill=tk.X, padx=16)
-        self.split_detail_frame.columnconfigure(0, minsize=220)
+        self.split_detail_frame.pack(fill=tk.X)
+        self.split_detail_frame.columnconfigure(0, weight=1)
         self._toggle_split_detail()
 
         ttk.Separator(left, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=4)
 
         tk.Button(left, text="설정 저장", command=self._save_config,
-                  padx=12, pady=4, cursor="hand2", font=FNT).pack(anchor=tk.W)
+                  padx=12, pady=4, cursor="hand2", font=FNT).pack()
 
         # ── 구분선 ──
         ttk.Separator(columns, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=2)
