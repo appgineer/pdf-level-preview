@@ -78,7 +78,7 @@ class PDFLevelPreviewApp:
         # Resizable split
         paned = tk.PanedWindow(
             self.root, orient=tk.HORIZONTAL,
-            sashwidth=12, sashrelief=tk.RAISED, sashpad=6,
+            sashwidth=2, sashrelief=tk.FLAT, sashpad=0,
             sashcursor="sb_h_double_arrow"
         )
         paned.pack(fill=tk.BOTH, expand=True)
@@ -457,7 +457,9 @@ class PDFLevelPreviewApp:
         return ZOOM_STEPS[self.zoom_idx]
 
     def _update_zoom_label(self):
-        self.zoom_label.config(text=f"{int(self._current_zoom() * 100)}%")
+        base_zoom = ZOOM_STEPS[ZOOM_DEFAULT_IDX]
+        pct = int(self._current_zoom() / base_zoom * 100)
+        self.zoom_label.config(text=f"{pct}%")
 
     def zoom_in(self):
         if self.zoom_idx < len(ZOOM_STEPS) - 1:
