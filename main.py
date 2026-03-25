@@ -10,8 +10,10 @@ import subprocess
 import tempfile
 import io
 
-ZOOM_STEPS = [0.06, 0.08, 0.12, 0.17, 0.25, 0.33, 0.5, 0.67, 0.75, 1.0]
-ZOOM_DEFAULT_IDX = 2  # 0.12 ≈ 72/600, 페이지 전체 보기
+# 0.12 = 페이지 전체 보기(100% 기준), 25% 단위
+_BASE = 0.12
+ZOOM_STEPS = [_BASE * p / 100 for p in range(25, 525, 25)]  # 25%~500%
+ZOOM_DEFAULT_IDX = 3  # 100% = index 3 (25,50,75,100,...)
 THUMB_W = 140
 THUMB_MARGIN = 6
 BASE_DPI = 600
