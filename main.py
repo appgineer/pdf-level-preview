@@ -9,8 +9,8 @@ import threading
 import subprocess
 import tempfile
 
-ZOOM_STEPS = [0.25, 0.33, 0.5, 0.67, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0]
-ZOOM_DEFAULT_IDX = 5  # 1.0
+ZOOM_STEPS = [0.06, 0.08, 0.12, 0.17, 0.25, 0.33, 0.5, 0.67, 0.75, 1.0]
+ZOOM_DEFAULT_IDX = 2  # 0.12 ≈ 72/600, 페이지 전체 보기
 THUMB_W = 140
 THUMB_MARGIN = 6
 BASE_DPI = 600
@@ -522,13 +522,13 @@ class PDFLevelPreviewApp:
         else:
             leveled = self.apply_levels(base, black, white)
 
-        # 화면 표시 크기로 리사이즈
-        display_w = int(leveled.width * zoom / BASE_SCALE)
-        display_h = int(leveled.height * zoom / BASE_SCALE)
-        if display_w >= leveled.width:
-            result = leveled
-        else:
+        # zoom 적용 (1.0 = 원본 픽셀 그대로, 축소 시에만 리사이즈)
+        if zoom < 1.0:
+            display_w = int(leveled.width * zoom)
+            display_h = int(leveled.height * zoom)
             result = leveled.resize((display_w, display_h), Image.LANCZOS)
+        else:
+            result = leveled
 
         self.preview_cache[key] = result
         self.current_img = result
