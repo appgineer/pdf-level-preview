@@ -205,18 +205,30 @@ class PDFLevelPreviewApp:
         col2.pack(side=tk.LEFT, fill=tk.Y)
         col2.pack_propagate(False)
 
-        saved_canvas = tk.Canvas(col2)
+        saved_canvas = tk.Canvas(col2, highlightthickness=0)
         saved_scroll = ttk.Scrollbar(col2, orient=tk.VERTICAL, command=saved_canvas.yview)
         saved_canvas.configure(yscrollcommand=saved_scroll.set)
-        saved_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         saved_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         self.saved_frame = tk.Frame(saved_canvas)
         saved_canvas.create_window((0, 0), window=self.saved_frame, anchor=tk.NW)
-        self.saved_frame.bind("<Configure>", lambda e: saved_canvas.configure(
-            scrollregion=saved_canvas.bbox("all")
-        ))
+
+        def _update_saved_scroll(event=None):
+            saved_canvas.configure(scrollregion=saved_canvas.bbox("all"))
+            saved_canvas.update_idletasks()
+            content_h = self.saved_frame.winfo_reqheight()
+            canvas_h = saved_canvas.winfo_height()
+            if content_h > canvas_h:
+                if not saved_scroll.winfo_ismapped():
+                    saved_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+            else:
+                if saved_scroll.winfo_ismapped():
+                    saved_scroll.pack_forget()
+
+        self.saved_frame.bind("<Configure>", _update_saved_scroll)
+        saved_canvas.bind("<Configure>", _update_saved_scroll)
         self.saved_canvas = saved_canvas
+        self._update_saved_scroll = _update_saved_scroll
 
         for w in (saved_canvas, self.saved_frame):
             w.bind("<MouseWheel>", self._on_saved_scroll)
@@ -650,10 +662,36 @@ class PDFLevelPreviewApp:
         columns = tk.Frame(parent)
         columns.pack(expand=True, fill=tk.BOTH)
 
-        # ── 왼쪽 열: 스캔타입, 분할, 저장 ──
-        left = tk.Frame(columns, padx=8, pady=4, width=260)
-        left.pack(side=tk.LEFT, fill=tk.Y)
-        left.pack_propagate(False)
+        # ── 왼쪽 열: 스캔타입, 분할, 저장 (스크롤 가능) ──
+        left_outer = tk.Frame(columns, width=260)
+        left_outer.pack(side=tk.LEFT, fill=tk.Y)
+        left_outer.pack_propagate(False)
+
+        left_canvas = tk.Canvas(left_outer, highlightthickness=0)
+        left_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        left = tk.Frame(left_canvas, padx=8, pady=4)
+        left_canvas.create_window((0, 0), window=left, anchor=tk.NW)
+        left.bind("<Configure>", lambda e: left_canvas.configure(
+            scrollregion=left_canvas.bbox("all")))
+
+        def _on_left_scroll(event):
+            if event.num == 4:
+                left_canvas.yview_scroll(-1, "units")
+            elif event.num == 5:
+                left_canvas.yview_scroll(1, "units")
+            else:
+                left_canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+            return "break"
+
+        for evt in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            left_canvas.bind(evt, _on_left_scroll)
+        left.bind("<MouseWheel>", _on_left_scroll)
+        left.bind("<Button-4>", _on_left_scroll)
+        left.bind("<Button-5>", _on_left_scroll)
+        self._left_canvas = left_canvas
+        self._left_inner = left
+        self._on_left_scroll_fn = _on_left_scroll
 
         # 스캔타입
         tk.Label(left, text="스캔타입:", font=FNT).pack()
@@ -683,7 +721,7 @@ class PDFLevelPreviewApp:
         ttk.Separator(left, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=4)
 
         tk.Button(left, text="설정 저장", command=self._save_config,
-                  padx=12, pady=4, cursor="hand2", font=FNT).pack()
+                  padx=12, pady=4, cursor="hand2", font=FNT).pack(pady=(12, 0))
 
         # ── 구분선 ──
         ttk.Separator(columns, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=2)
@@ -734,6 +772,12 @@ class PDFLevelPreviewApp:
                 w.config(state=tk.DISABLED)
         self._toggle_split_detail()
 
+    def _bind_left_scroll(self, widget):
+        fn = self._on_left_scroll_fn
+        widget.bind("<MouseWheel>", fn)
+        widget.bind("<Button-4>", fn)
+        widget.bind("<Button-5>", fn)
+
     def _toggle_split_detail(self):
         for w in self.split_detail_frame.winfo_children():
             w.destroy()
@@ -743,17 +787,23 @@ class PDFLevelPreviewApp:
         FNT = ("", 12)
         method = self.split_method_var.get()
         if method == "page":
-            tk.Label(self.split_detail_frame, text="범위:", font=FNT).grid(row=0, column=0)
+            lbl = tk.Label(self.split_detail_frame, text="범위:", font=FNT)
+            lbl.grid(row=0, column=0)
             self.split_range_text = tk.Text(self.split_detail_frame,
                                             width=24, height=3, font=FNT, wrap=tk.WORD)
             self.split_range_text.grid(row=1, column=0, padx=6, pady=2)
             self.split_range_text.insert("1.0", self.split_page_ranges_var.get())
+            self._bind_left_scroll(lbl)
         elif method == "size":
             inner = tk.Frame(self.split_detail_frame)
             inner.grid(row=0, column=0, pady=2)
-            tk.Label(inner, text="크기(MB):", font=FNT).pack(side=tk.LEFT)
-            tk.Entry(inner, textvariable=self.split_size_mb_var,
-                     width=8, font=FNT).pack(side=tk.LEFT, padx=6)
+            lbl = tk.Label(inner, text="크기(MB):", font=FNT)
+            lbl.pack(side=tk.LEFT)
+            ent = tk.Entry(inner, textvariable=self.split_size_mb_var,
+                     width=8, font=FNT)
+            ent.pack(side=tk.LEFT, padx=6)
+            for w in (inner, lbl, ent):
+                self._bind_left_scroll(w)
 
     def _save_config(self):
         if not self.pdf_doc:
