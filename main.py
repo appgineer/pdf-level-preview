@@ -73,7 +73,7 @@ class PDFLevelPreviewApp:
         self.render_status = tk.Label(toolbar, text="", fg="#999", anchor=tk.W)
         self.render_status.pack(side=tk.LEFT, padx=6)
 
-        tk.Label(toolbar, text="확대:").pack(side=tk.RIGHT, padx=2)
+        tk.Label(toolbar, text="확대").pack(side=tk.RIGHT, padx=2)
         self.zoom_label = tk.Label(toolbar, text="100%", width=5)
         self.zoom_label.pack(side=tk.RIGHT)
         tk.Button(toolbar, text="-", width=2, command=self.zoom_out, cursor="hand2").pack(side=tk.RIGHT, padx=2)
@@ -704,7 +704,7 @@ class PDFLevelPreviewApp:
             left_canvas.bind(evt, _on_left_scroll)
 
         # 스캔타입
-        tk.Label(left, text="스캔타입:", font=FNT).pack()
+        tk.Label(left, text="스캔타입", font=FNT).pack()
         for txt in ("일반", "고급", "안함"):
             tk.Radiobutton(left, text=txt, variable=self.scan_type_var, value=txt,
                            cursor="hand2", font=FNT).pack()
@@ -716,9 +716,9 @@ class PDFLevelPreviewApp:
                        command=self._toggle_split, cursor="hand2", font=FNT).pack()
         self.split_radio_frame = tk.Frame(left)
         self.split_radio_frame.pack()
-        tk.Radiobutton(self.split_radio_frame, text="page", variable=self.split_method_var,
+        tk.Radiobutton(self.split_radio_frame, text="페이지", variable=self.split_method_var,
                        value="page", command=self._toggle_split_detail, cursor="hand2", font=FNT).pack()
-        tk.Radiobutton(self.split_radio_frame, text="size", variable=self.split_method_var,
+        tk.Radiobutton(self.split_radio_frame, text="크기", variable=self.split_method_var,
                        value="size", command=self._toggle_split_detail, cursor="hand2", font=FNT).pack()
         for w in self.split_radio_frame.winfo_children():
             w.config(state=tk.DISABLED)
@@ -743,7 +743,7 @@ class PDFLevelPreviewApp:
         right = tk.Frame(columns, padx=8, pady=4)
         right.pack(side=tk.LEFT, fill=tk.Y)
 
-        tk.Label(right, text="OCR:", font=FNT).pack(anchor=tk.W)
+        tk.Label(right, text="OCR", font=FNT).pack(anchor=tk.W)
         ocr_toggle_frame = tk.Frame(right)
         ocr_toggle_frame.pack(anchor=tk.W)
         tk.Radiobutton(ocr_toggle_frame, text="사용", variable=self.ocr_enabled_var,
