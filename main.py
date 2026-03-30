@@ -32,7 +32,7 @@ class PDFLevelPreviewApp:
         self.saved_levels = []
         self.thumbnail_cache = {}
         self.preview_cache = {}
-        self.base_render_cache = {}  # page_idx -> original PIL Image
+        self.base_render_cache = {}  # page_idx -> 600 DPI PIL Image
         self.thumbnail_photo_refs = {}
         self._drawn_pages = {}
         self._page_count = 0
@@ -523,18 +523,6 @@ class PDFLevelPreviewApp:
     # ------------------------------------------------------------------ #
     # Rendering
     # ------------------------------------------------------------------ #
-    def _extract_page_image(self, page_idx):
-        """페이지에서 원본 이미지를 직접 추출. 실패 시 렌더링 폴백."""
-        page = self.pdf_doc[page_idx]
-        images = page.get_images(full=True)
-        if images:
-            xref = images[0][0]
-            img_data = self.pdf_doc.extract_image(xref)
-            if img_data:
-                return Image.open(io.BytesIO(img_data["image"])).convert("RGB")
-        # 이미지 추출 실패 시 렌더링 폴백
-        return self._render_page(page_idx)
-
     def _render_page(self, page_idx, zoom=2.0):
         page = self.pdf_doc[page_idx]
         mat = fitz.Matrix(zoom, zoom)
@@ -628,11 +616,11 @@ class PDFLevelPreviewApp:
 
         page_idx = self.current_page
 
-        # 원본 이미지 추출 (캐시)
+        # 600 DPI 원본 렌더링 (캐시)
         if page_idx not in self.base_render_cache:
-            self.render_status.config(text="원본 이미지 추출 중...")
+            self.render_status.config(text="600 DPI 렌더링 중...")
             self.root.update_idletasks()
-            self.base_render_cache[page_idx] = self._extract_page_image(page_idx)
+            self.base_render_cache[page_idx] = self._render_page(page_idx, zoom=BASE_SCALE)
 
         base = self.base_render_cache[page_idx]
 
@@ -642,18 +630,22 @@ class PDFLevelPreviewApp:
         else:
             leveled = self.apply_levels(base, black, white)
 
-        # zoom 적용 (표시 크기 조정)
+        # zoom 적용 — 단계적 축소로 노이즈 방지
         display_w = int(leveled.width * zoom)
         display_h = int(leveled.height * zoom)
-        if (display_w, display_h) != (leveled.width, leveled.height):
-            result = leveled.resize((display_w, display_h), Image.LANCZOS)
+        if display_w < leveled.width:
+            result = leveled
+            while result.width > display_w * 2:
+                result = result.resize(
+                    (result.width // 2, result.height // 2), Image.BOX)
+            result = result.resize((display_w, display_h), Image.LANCZOS)
         else:
             result = leveled
 
         self.preview_cache[key] = result
         self.current_img = result
         self._draw_preview()
-        self.render_status.config(text=f"원본 {base.width}x{base.height}")
+        self.render_status.config(text="600 DPI")
 
     def _draw_preview(self):
         if self.current_img is None:
