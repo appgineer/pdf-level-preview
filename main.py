@@ -523,7 +523,19 @@ class PDFLevelPreviewApp:
     # ------------------------------------------------------------------ #
     # Rendering
     # ------------------------------------------------------------------ #
-    def _render_page(self, page_idx, zoom=2.0):
+    def _get_native_scale(self, page_idx):
+        """내장 이미지의 원본 해상도에 맞는 정확한 스케일 계산"""
+        page = self.pdf_doc[page_idx]
+        images = page.get_images(full=True)
+        if images:
+            img_w = images[0][2]
+            page_w = page.rect.width
+            return img_w / page_w
+        return BASE_SCALE
+
+    def _render_page(self, page_idx, zoom=None):
+        if zoom is None:
+            zoom = self._get_native_scale(page_idx)
         page = self.pdf_doc[page_idx]
         mat = fitz.Matrix(zoom, zoom)
         pix = page.get_pixmap(matrix=mat)
@@ -615,11 +627,11 @@ class PDFLevelPreviewApp:
 
         page_idx = self.current_page
 
-        # 600 DPI 원본 렌더링 (캐시)
+        # 원본 해상도로 렌더링 (캐시)
         if page_idx not in self.base_render_cache:
-            self.render_status.config(text="600 DPI 렌더링 중...")
+            self.render_status.config(text="원본 해상도 렌더링 중...")
             self.root.update_idletasks()
-            self.base_render_cache[page_idx] = self._render_page(page_idx, zoom=BASE_SCALE)
+            self.base_render_cache[page_idx] = self._render_page(page_idx)
 
         base = self.base_render_cache[page_idx]
 
