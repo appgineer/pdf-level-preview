@@ -32,7 +32,7 @@ class PDFLevelPreviewApp:
         self.saved_levels = []
         self.thumbnail_cache = {}
         self.preview_cache = {}
-        self.base_render_cache = {}  # page_idx -> 600 DPI PIL Image
+        self.base_render_cache = {}  # (page_idx, scale) -> PIL Image
         self.thumbnail_photo_refs = {}
         self._drawn_pages = {}
         self._page_count = 0
@@ -615,33 +615,29 @@ class PDFLevelPreviewApp:
             return
 
         page_idx = self.current_page
+        display_scale = zoom * BASE_SCALE
 
-        # 600 DPI 원본 렌더링 (캐시)
-        if page_idx not in self.base_render_cache:
-            self.render_status.config(text="600 DPI 렌더링 중...")
+        # 표시 해상도로 직접 렌더링 (캐시)
+        render_key = (page_idx, round(display_scale, 4))
+        if render_key not in self.base_render_cache:
+            dpi = int(display_scale * 72)
+            self.render_status.config(text=f"{dpi} DPI 렌더링 중...")
             self.root.update_idletasks()
-            self.base_render_cache[page_idx] = self._render_page(page_idx, zoom=BASE_SCALE)
+            self.base_render_cache[render_key] = self._render_page(page_idx, zoom=display_scale)
 
-        base = self.base_render_cache[page_idx]
+        base = self.base_render_cache[render_key]
 
         # 레벨 적용
         if black == 0 and white == 255:
-            leveled = base
+            result = base
         else:
-            leveled = self.apply_levels(base, black, white)
-
-        # zoom 적용 (1.0 = 원본 픽셀 그대로, 축소 시에만 리사이즈)
-        if zoom < 1.0:
-            display_w = int(leveled.width * zoom)
-            display_h = int(leveled.height * zoom)
-            result = leveled.resize((display_w, display_h), Image.BOX)
-        else:
-            result = leveled
+            result = self.apply_levels(base, black, white)
 
         self.preview_cache[key] = result
         self.current_img = result
         self._draw_preview()
-        self.render_status.config(text="600 DPI")
+        dpi = int(display_scale * 72)
+        self.render_status.config(text=f"{dpi} DPI")
 
     def _draw_preview(self):
         if self.current_img is None:
