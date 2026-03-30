@@ -9,6 +9,7 @@ import threading
 import subprocess
 import tempfile
 import io
+from concurrent.futures import ThreadPoolExecutor
 
 # 0.12 = 페이지 전체 보기(100% 기준), 25% 단위
 _BASE = 0.12
@@ -89,7 +90,7 @@ class PDFLevelPreviewApp:
         # Resizable split
         paned = tk.PanedWindow(
             self.root, orient=tk.HORIZONTAL,
-            sashwidth=2, sashrelief=tk.FLAT, sashpad=0,
+            sashwidth=8, sashrelief=tk.FLAT, sashpad=0,
             sashcursor="sb_h_double_arrow"
         )
         paned.pack(fill=tk.BOTH, expand=True)
@@ -310,51 +311,53 @@ class PDFLevelPreviewApp:
         self._compute_thumb_layout()
         self._draw_visible_thumbs()
 
-        # Phase 2: 별도 프로세스에서 썸네일 렌더링
+        # Phase 2: 병렬 프로세스로 썸네일 렌더링
         pdf_path = self._pdf_path
         page_count = self._page_count
+        workers = max(1, ((os.cpu_count() or 4) * 3) // 4)
 
-        def render_thumbnails_subprocess():
-            import time
-            for i in range(page_count):
+        def render_one_page(i):
+            if gen != self._thumb_generation:
+                return
+            tmp = tempfile.mktemp(suffix='.png')
+            try:
+                script = (
+                    "import fitz,sys;"
+                    "d=fitz.open(sys.argv[1]);"
+                    "p=d[int(sys.argv[2])];"
+                    "m=fitz.Matrix(0.3,0.3);"
+                    "x=p.get_pixmap(matrix=m);"
+                    "x.save(sys.argv[3]);"
+                    "d.close()"
+                )
+                result = subprocess.run(
+                    [sys.executable, '-c', script, pdf_path, str(i), tmp],
+                    timeout=30, capture_output=True
+                )
+                if result.returncode != 0 or gen != self._thumb_generation:
+                    return
+                raw = Image.open(tmp)
+                raw.load()
+                ratio = THUMB_W / raw.width
+                th = int(raw.height * ratio)
+                img = raw.resize((THUMB_W, th), Image.LANCZOS)
+                self.thumbnail_cache[i] = img
                 if gen != self._thumb_generation:
                     return
-                tmp = tempfile.mktemp(suffix='.png')
+                self.root.after(0, lambda idx=i: self._on_thumb_rendered(idx, gen))
+            except Exception:
+                pass
+            finally:
                 try:
-                    script = (
-                        "import fitz,sys;"
-                        "d=fitz.open(sys.argv[1]);"
-                        "p=d[int(sys.argv[2])];"
-                        "m=fitz.Matrix(0.3,0.3);"
-                        "x=p.get_pixmap(matrix=m);"
-                        "x.save(sys.argv[3]);"
-                        "d.close()"
-                    )
-                    result = subprocess.run(
-                        [sys.executable, '-c', script, pdf_path, str(i), tmp],
-                        timeout=30, capture_output=True
-                    )
-                    if result.returncode != 0 or gen != self._thumb_generation:
-                        continue
-                    raw = Image.open(tmp)
-                    raw.load()
-                    ratio = THUMB_W / raw.width
-                    th = int(raw.height * ratio)
-                    img = raw.resize((THUMB_W, th), Image.LANCZOS)
-                    self.thumbnail_cache[i] = img
-                    if gen != self._thumb_generation:
-                        return
-                    self.root.after(0, lambda idx=i: self._on_thumb_rendered(idx, gen))
-                except Exception:
+                    os.unlink(tmp)
+                except OSError:
                     pass
-                finally:
-                    try:
-                        os.unlink(tmp)
-                    except OSError:
-                        pass
-                time.sleep(0.01)
 
-        threading.Thread(target=render_thumbnails_subprocess, daemon=True).start()
+        def render_all():
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                pool.map(render_one_page, range(page_count))
+
+        threading.Thread(target=render_all, daemon=True).start()
 
     def _on_thumb_rendered(self, idx, gen):
         if gen != self._thumb_generation:
