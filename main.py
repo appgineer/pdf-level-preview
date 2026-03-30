@@ -634,7 +634,7 @@ class PDFLevelPreviewApp:
         if zoom < 1.0:
             display_w = int(leveled.width * zoom)
             display_h = int(leveled.height * zoom)
-            result = leveled.resize((display_w, display_h), Image.LANCZOS)
+            result = leveled.resize((display_w, display_h), Image.BOX)
         else:
             result = leveled
 
