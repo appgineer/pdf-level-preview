@@ -32,8 +32,15 @@ class PDFLevelPreviewApp:
         self.thumbnail_cache = {}
         self.preview_cache = {}
         self.base_render_cache = {}  # page_idx -> 600 DPI PIL Image
-        self.thumb_items = []
-        self.thumbnail_photo_refs = []
+        self.thumbnail_photo_refs = {}
+        self._drawn_pages = {}
+        self._page_count = 0
+        self._thumb_cols = 1
+        self._thumb_cell_h = 0
+        self._thumb_total_height = 0
+        self._thumb_offset_x = 0
+        self._selection_rect_id = None
+        self._visible_redraw_id = None
         self.preview_photo = None
         self.current_img = None
         self.zoom_idx = ZOOM_DEFAULT_IDX
@@ -93,24 +100,20 @@ class PDFLevelPreviewApp:
 
         self.thumb_canvas = tk.Canvas(left, bg="#f0f0f0")
         thumb_vscroll = ttk.Scrollbar(left, orient=tk.VERTICAL, command=self.thumb_canvas.yview)
-        self.thumb_canvas.configure(yscrollcommand=thumb_vscroll.set)
+        def _on_thumb_yscroll(*args):
+            thumb_vscroll.set(*args)
+            self._schedule_visible_redraw()
+        self.thumb_canvas.configure(yscrollcommand=_on_thumb_yscroll)
         thumb_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.thumb_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        self.thumb_frame = tk.Frame(self.thumb_canvas, bg="#f0f0f0")
-        self._thumb_win_id = self.thumb_canvas.create_window(
-            (0, 0), window=self.thumb_frame, anchor=tk.NW
-        )
-        self.thumb_frame.bind("<Configure>", lambda e: self.thumb_canvas.configure(
-            scrollregion=self.thumb_canvas.bbox("all")
-        ))
         self.thumb_canvas.bind("<Configure>", self._on_thumb_canvas_resize)
+        self.thumb_canvas.bind("<Button-1>", self._on_thumb_click)
 
         # Mouse wheel scrolling on left panel
-        for widget in (self.thumb_canvas, self.thumb_frame):
-            widget.bind("<MouseWheel>", self._on_thumb_scroll)   # Windows
-            widget.bind("<Button-4>",   self._on_thumb_scroll)   # Linux/macOS up
-            widget.bind("<Button-5>",   self._on_thumb_scroll)   # Linux/macOS down
+        self.thumb_canvas.bind("<MouseWheel>", self._on_thumb_scroll)
+        self.thumb_canvas.bind("<Button-4>",   self._on_thumb_scroll)
+        self.thumb_canvas.bind("<Button-5>",   self._on_thumb_scroll)
 
         # ── Right: preview + controls (vertical resizable) ─────────────
         self.right_paned = tk.PanedWindow(
@@ -292,40 +295,24 @@ class PDFLevelPreviewApp:
         self.update_preview()
 
     # ------------------------------------------------------------------ #
-    # Thumbnails (multi-column, centered)
+    # Thumbnails (canvas-native virtual scrolling)
     # ------------------------------------------------------------------ #
     def _build_thumbnails(self):
-        for w in self.thumb_frame.winfo_children():
-            w.destroy()
+        self.thumb_canvas.delete("all")
         self.thumbnail_photo_refs.clear()
-        self.thumb_items.clear()
+        self._drawn_pages.clear()
+        self._selection_rect_id = None
 
         self._thumb_generation += 1
         gen = self._thumb_generation
-        page_count = len(self.pdf_doc)
+        self._page_count = len(self.pdf_doc)
 
-        # Phase 1: 플레이스홀더 즉시 배치
-        for i in range(page_count):
-            frame = tk.Frame(self.thumb_frame, bg="#f0f0f0")
-            placeholder = tk.Frame(frame, bg="#d0d0d0", width=THUMB_W, height=int(THUMB_W * 1.4))
-            placeholder.pack()
-            placeholder.pack_propagate(False)
-            tk.Label(placeholder, text=f"p.{i + 1}", font=("", 9), bg="#d0d0d0", fg="#888").place(relx=0.5, rely=0.5, anchor=tk.CENTER)
-            btn = tk.Button(
-                frame, text=f"p.{i + 1}", relief=tk.FLAT,
-                command=lambda idx=i: self.select_page(idx), bd=2, cursor="hand2",
-                width=THUMB_W // 8, height=0
-            )
-            # btn은 이미지 로드 후 교체됨
-            tk.Label(frame, text=f"p.{i + 1}", font=("", 8), bg="#f0f0f0").pack()
-            self.thumbnail_photo_refs.append(None)  # placeholder
-            self.thumb_items.append((None, frame))
-
-        self._layout_thumbnails()
-        self._bind_thumb_scroll_recursive(self.thumb_frame)
+        self._compute_thumb_layout()
+        self._draw_visible_thumbs()
 
         # Phase 2: 별도 프로세스에서 썸네일 렌더링
         pdf_path = self._pdf_path
+        page_count = self._page_count
 
         def render_thumbnails_subprocess():
             import time
@@ -354,10 +341,10 @@ class PDFLevelPreviewApp:
                     ratio = THUMB_W / raw.width
                     th = int(raw.height * ratio)
                     img = raw.resize((THUMB_W, th), Image.LANCZOS)
-                    self.thumbnail_cache[i] = raw
+                    self.thumbnail_cache[i] = img
                     if gen != self._thumb_generation:
                         return
-                    self.root.after(0, lambda idx=i, im=img: self._update_thumbnail(idx, im, gen))
+                    self.root.after(0, lambda idx=i: self._on_thumb_rendered(idx, gen))
                 except Exception:
                     pass
                 finally:
@@ -369,33 +356,140 @@ class PDFLevelPreviewApp:
 
         threading.Thread(target=render_thumbnails_subprocess, daemon=True).start()
 
-    def _update_thumbnail(self, idx, img, gen):
-        """메인 스레드에서 플레이스홀더를 실제 썸네일로 교체"""
+    def _on_thumb_rendered(self, idx, gen):
         if gen != self._thumb_generation:
             return
-        if idx >= len(self.thumb_items):
-            return
-        _, frame = self.thumb_items[idx]
-        # 기존 위젯 제거
-        for w in frame.winfo_children():
-            w.destroy()
-        photo = ImageTk.PhotoImage(img)
-        self.thumbnail_photo_refs[idx] = photo
-        btn = tk.Button(
-            frame, image=photo, relief=tk.FLAT,
-            command=lambda i=idx: self.select_page(i), bd=2, cursor="hand2"
-        )
-        btn.pack()
-        tk.Label(frame, text=f"p.{idx + 1}", font=("", 8), bg="#f0f0f0").pack()
-        self.thumb_items[idx] = (photo, frame)
-        self._bind_thumb_scroll_recursive(frame)
+        if idx in self._drawn_pages:
+            self._draw_thumb_page(idx)
 
-    def _bind_thumb_scroll_recursive(self, widget):
-        widget.bind("<MouseWheel>", self._on_thumb_scroll)
-        widget.bind("<Button-4>",   self._on_thumb_scroll)
-        widget.bind("<Button-5>",   self._on_thumb_scroll)
-        for child in widget.winfo_children():
-            self._bind_thumb_scroll_recursive(child)
+    def _compute_thumb_layout(self):
+        canvas_w = self.thumb_canvas.winfo_width()
+        if canvas_w <= 1:
+            canvas_w = 220
+
+        col_w = THUMB_W + THUMB_MARGIN * 2
+        self._thumb_cols = max(1, canvas_w // col_w)
+        total_grid_w = self._thumb_cols * col_w
+        self._thumb_offset_x = max(0, (canvas_w - total_grid_w) // 2)
+
+        self._thumb_cell_h = int(THUMB_W * 1.4) + 20 + THUMB_MARGIN * 2
+        rows = (self._page_count + self._thumb_cols - 1) // self._thumb_cols if self._page_count > 0 else 0
+        self._thumb_total_height = rows * self._thumb_cell_h
+
+        self.thumb_canvas.configure(scrollregion=(0, 0, canvas_w, self._thumb_total_height))
+
+    def _get_thumb_pos(self, page_idx):
+        col = page_idx % self._thumb_cols
+        row = page_idx // self._thumb_cols
+        col_w = THUMB_W + THUMB_MARGIN * 2
+        x = self._thumb_offset_x + col * col_w + THUMB_MARGIN
+        y = row * self._thumb_cell_h + THUMB_MARGIN
+        return x, y
+
+    def _draw_visible_thumbs(self):
+        if self._page_count == 0:
+            return
+
+        if self._visible_redraw_id is not None:
+            self.root.after_cancel(self._visible_redraw_id)
+            self._visible_redraw_id = None
+
+        top_frac, bot_frac = self.thumb_canvas.yview()
+        total_h = self._thumb_total_height
+        if total_h <= 0:
+            return
+
+        vis_top = top_frac * total_h - self._thumb_cell_h
+        vis_bot = bot_frac * total_h + self._thumb_cell_h
+
+        top_row = max(0, int(vis_top // self._thumb_cell_h))
+        bot_row = int(vis_bot // self._thumb_cell_h)
+
+        visible = set()
+        for row in range(top_row, bot_row + 1):
+            for col in range(self._thumb_cols):
+                idx = row * self._thumb_cols + col
+                if 0 <= idx < self._page_count:
+                    visible.add(idx)
+
+        to_remove = set(self._drawn_pages.keys()) - visible
+        for idx in to_remove:
+            for item_id in self._drawn_pages[idx]:
+                self.thumb_canvas.delete(item_id)
+            self.thumbnail_photo_refs.pop(idx, None)
+            del self._drawn_pages[idx]
+
+        for idx in visible:
+            if idx not in self._drawn_pages:
+                self._draw_thumb_page(idx)
+
+        self._draw_selection()
+
+    def _draw_thumb_page(self, idx):
+        if idx in self._drawn_pages:
+            for item_id in self._drawn_pages[idx]:
+                self.thumb_canvas.delete(item_id)
+
+        x, y = self._get_thumb_pos(idx)
+        thumb_h = int(THUMB_W * 1.4)
+        items = []
+
+        if idx in self.thumbnail_cache:
+            img = self.thumbnail_cache[idx]
+            photo = ImageTk.PhotoImage(img)
+            self.thumbnail_photo_refs[idx] = photo
+            img_id = self.thumb_canvas.create_image(
+                x + THUMB_W // 2, y + thumb_h // 2,
+                image=photo, anchor=tk.CENTER
+            )
+            items.append(img_id)
+        else:
+            rect_id = self.thumb_canvas.create_rectangle(
+                x, y, x + THUMB_W, y + thumb_h,
+                fill="#d0d0d0", outline="#d0d0d0"
+            )
+            items.append(rect_id)
+            txt_id = self.thumb_canvas.create_text(
+                x + THUMB_W // 2, y + thumb_h // 2,
+                text=f"p.{idx + 1}", font=("", 9), fill="#888"
+            )
+            items.append(txt_id)
+
+        label_id = self.thumb_canvas.create_text(
+            x + THUMB_W // 2, y + thumb_h + 10,
+            text=f"p.{idx + 1}", font=("", 8), fill="#000"
+        )
+        items.append(label_id)
+
+        self._drawn_pages[idx] = items
+
+    def _draw_selection(self):
+        if self._selection_rect_id is not None:
+            self.thumb_canvas.delete(self._selection_rect_id)
+            self._selection_rect_id = None
+
+        if self._page_count == 0 or self.current_page not in self._drawn_pages:
+            return
+
+        x, y = self._get_thumb_pos(self.current_page)
+        thumb_h = int(THUMB_W * 1.4)
+        self._selection_rect_id = self.thumb_canvas.create_rectangle(
+            x - 2, y - 2, x + THUMB_W + 2, y + thumb_h + 2,
+            outline="#0078d7", width=3
+        )
+
+    def _on_thumb_click(self, event):
+        if self._page_count == 0:
+            return
+        cx = self.thumb_canvas.canvasx(event.x)
+        cy = self.thumb_canvas.canvasy(event.y)
+        thumb_h = int(THUMB_W * 1.4)
+
+        for idx in self._drawn_pages:
+            x, y = self._get_thumb_pos(idx)
+            if x <= cx <= x + THUMB_W and y <= cy <= y + thumb_h + 20:
+                self.select_page(idx)
+                return
 
     def _on_thumb_scroll(self, event):
         if event.num == 4:
@@ -404,34 +498,23 @@ class PDFLevelPreviewApp:
             self.thumb_canvas.yview_scroll(1, "units")
         else:
             self.thumb_canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+        self._schedule_visible_redraw()
         return "break"
 
+    def _schedule_visible_redraw(self):
+        if self._visible_redraw_id is not None:
+            self.root.after_cancel(self._visible_redraw_id)
+        self._visible_redraw_id = self.root.after(16, self._draw_visible_thumbs)
+
     def _on_thumb_canvas_resize(self, event):
-        self._layout_thumbnails()
-
-    def _layout_thumbnails(self, event=None):
-        if not self.thumb_items:
+        if self._page_count == 0:
             return
-        canvas_w = self.thumb_canvas.winfo_width()
-        if canvas_w <= 1:
-            canvas_w = 220
-
-        col_w = THUMB_W + THUMB_MARGIN * 2
-        cols = max(1, canvas_w // col_w)
-        total_w = cols * col_w
-        offset_x = max(0, (canvas_w - total_w) // 2)
-
-        for _, frame in self.thumb_items:
-            frame.grid_forget()
-
-        for i, (photo, frame) in enumerate(self.thumb_items):
-            r = i // cols
-            c = i % cols
-            frame.grid(row=r, column=c, padx=THUMB_MARGIN, pady=THUMB_MARGIN)
-
-        # Center the frame within the canvas
-        self.thumb_canvas.coords(self._thumb_win_id, offset_x, 0)
-        self.thumb_canvas.configure(scrollregion=self.thumb_canvas.bbox("all"))
+        self._compute_thumb_layout()
+        self.thumb_canvas.delete("all")
+        self._drawn_pages.clear()
+        self.thumbnail_photo_refs.clear()
+        self._selection_rect_id = None
+        self._draw_visible_thumbs()
 
     # ------------------------------------------------------------------ #
     # Rendering
@@ -448,6 +531,7 @@ class PDFLevelPreviewApp:
     # ------------------------------------------------------------------ #
     def select_page(self, page_idx):
         self.current_page = page_idx
+        self._draw_selection()
         self.update_preview()
 
     # ------------------------------------------------------------------ #
