@@ -32,7 +32,7 @@ class PDFLevelPreviewApp:
         self.saved_levels = []
         self.thumbnail_cache = {}
         self.preview_cache = {}
-        self.base_render_cache = {}  # (page_idx, scale) -> PIL Image
+        self.base_render_cache = {}  # page_idx -> original PIL Image
         self.thumbnail_photo_refs = {}
         self._drawn_pages = {}
         self._page_count = 0
@@ -523,6 +523,18 @@ class PDFLevelPreviewApp:
     # ------------------------------------------------------------------ #
     # Rendering
     # ------------------------------------------------------------------ #
+    def _extract_page_image(self, page_idx):
+        """페이지에서 원본 이미지를 직접 추출. 실패 시 렌더링 폴백."""
+        page = self.pdf_doc[page_idx]
+        images = page.get_images(full=True)
+        if images:
+            xref = images[0][0]
+            img_data = self.pdf_doc.extract_image(xref)
+            if img_data:
+                return Image.open(io.BytesIO(img_data["image"])).convert("RGB")
+        # 이미지 추출 실패 시 렌더링 폴백
+        return self._render_page(page_idx)
+
     def _render_page(self, page_idx, zoom=2.0):
         page = self.pdf_doc[page_idx]
         mat = fitz.Matrix(zoom, zoom)
@@ -615,29 +627,33 @@ class PDFLevelPreviewApp:
             return
 
         page_idx = self.current_page
-        display_scale = zoom * BASE_SCALE
 
-        # 표시 해상도로 직접 렌더링 (캐시)
-        render_key = (page_idx, round(display_scale, 4))
-        if render_key not in self.base_render_cache:
-            dpi = int(display_scale * 72)
-            self.render_status.config(text=f"{dpi} DPI 렌더링 중...")
+        # 원본 이미지 추출 (캐시)
+        if page_idx not in self.base_render_cache:
+            self.render_status.config(text="원본 이미지 추출 중...")
             self.root.update_idletasks()
-            self.base_render_cache[render_key] = self._render_page(page_idx, zoom=display_scale)
+            self.base_render_cache[page_idx] = self._extract_page_image(page_idx)
 
-        base = self.base_render_cache[render_key]
+        base = self.base_render_cache[page_idx]
 
         # 레벨 적용
         if black == 0 and white == 255:
-            result = base
+            leveled = base
         else:
-            result = self.apply_levels(base, black, white)
+            leveled = self.apply_levels(base, black, white)
+
+        # zoom 적용 (표시 크기 조정)
+        display_w = int(leveled.width * zoom)
+        display_h = int(leveled.height * zoom)
+        if (display_w, display_h) != (leveled.width, leveled.height):
+            result = leveled.resize((display_w, display_h), Image.LANCZOS)
+        else:
+            result = leveled
 
         self.preview_cache[key] = result
         self.current_img = result
         self._draw_preview()
-        dpi = int(display_scale * 72)
-        self.render_status.config(text=f"{dpi} DPI")
+        self.render_status.config(text=f"원본 {base.width}x{base.height}")
 
     def _draw_preview(self):
         if self.current_img is None:
