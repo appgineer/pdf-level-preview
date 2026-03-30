@@ -11,14 +11,11 @@ import tempfile
 import io
 from concurrent.futures import ThreadPoolExecutor
 
-# 0.12 = 페이지 전체 보기(100% 기준), 25% 단위
-_BASE = 0.12
-ZOOM_STEPS = [_BASE * p / 100 for p in range(25, 525, 25)]  # 25%~500%
-ZOOM_DEFAULT_IDX = 3  # 100% = index 3 (25,50,75,100,...)
+# 100% = 원본 이미지 픽셀 1:1, 25%~500%
+ZOOM_PCTS = [p for p in range(25, 525, 25)]  # 25,50,75,100,...,500
+ZOOM_DEFAULT_IDX = 3  # 100% = index 3
 THUMB_W = 140
 THUMB_MARGIN = 6
-BASE_DPI = 576  # 72 * 8 = 576 (정수 스케일)
-BASE_SCALE = BASE_DPI // 72  # 8
 
 
 class PDFLevelPreviewApp:
@@ -547,12 +544,6 @@ class PDFLevelPreviewApp:
     def select_page(self, page_idx):
         self.current_page = page_idx
         self._draw_selection()
-        # 디버그: 페이지 내 이미지 정보 출력
-        page = self.pdf_doc[page_idx]
-        images = page.get_images(full=True)
-        print(f"[페이지 {page_idx}] 이미지 {len(images)}개, 페이지 크기: {page.rect.width:.1f}x{page.rect.height:.1f}pt")
-        for i, img in enumerate(images):
-            print(f"  이미지 {i}: xref={img[0]}, {img[2]}x{img[3]}px, bpc={img[4]}, cs={img[5]}")
         self.update_preview()
 
     # ------------------------------------------------------------------ #
@@ -574,16 +565,14 @@ class PDFLevelPreviewApp:
     # ------------------------------------------------------------------ #
     # Zoom
     # ------------------------------------------------------------------ #
-    def _current_zoom(self):
-        return ZOOM_STEPS[self.zoom_idx]
+    def _current_zoom_pct(self):
+        return ZOOM_PCTS[self.zoom_idx]
 
     def _update_zoom_label(self):
-        base_zoom = ZOOM_STEPS[ZOOM_DEFAULT_IDX]
-        pct = int(self._current_zoom() / base_zoom * 100)
-        self.zoom_label.config(text=f"{pct}%")
+        self.zoom_label.config(text=f"{self._current_zoom_pct()}%")
 
     def zoom_in(self):
-        if self.zoom_idx < len(ZOOM_STEPS) - 1:
+        if self.zoom_idx < len(ZOOM_PCTS) - 1:
             self.zoom_idx += 1
             self._update_zoom_label()
             self.preview_cache.clear()
@@ -623,9 +612,9 @@ class PDFLevelPreviewApp:
 
         black = max(0, min(255, black))
         white = max(0, min(255, white))
-        zoom = self._current_zoom()
+        zoom_pct = self._current_zoom_pct()
 
-        key = (self.current_page, black, white, zoom)
+        key = (self.current_page, black, white, zoom_pct)
         if key in self.preview_cache:
             self.current_img = self.preview_cache[key]
             self._draw_preview()
@@ -647,22 +636,19 @@ class PDFLevelPreviewApp:
         else:
             leveled = self.apply_levels(base, black, white)
 
-        # zoom 적용 — 단계적 축소로 노이즈 방지
-        display_w = int(leveled.width * zoom)
-        display_h = int(leveled.height * zoom)
-        if display_w < leveled.width:
+        # zoom 적용 (100% = 원본 픽셀 1:1, 축소/확대)
+        if zoom_pct == 100:
             result = leveled
-            while result.width > display_w * 2:
-                result = result.resize(
-                    (result.width // 2, result.height // 2), Image.BOX)
-            result = result.resize((display_w, display_h), Image.LANCZOS)
         else:
-            result = leveled
+            scale = zoom_pct / 100.0
+            display_w = int(leveled.width * scale)
+            display_h = int(leveled.height * scale)
+            result = leveled.resize((display_w, display_h), Image.LANCZOS)
 
         self.preview_cache[key] = result
         self.current_img = result
         self._draw_preview()
-        self.render_status.config(text="600 DPI")
+        self.render_status.config(text=f"{base.width}x{base.height} ({zoom_pct}%)")
 
     def _draw_preview(self):
         if self.current_img is None:
