@@ -630,6 +630,12 @@ class PDFLevelPreviewApp:
 
         base = self.base_render_cache[page_idx]
 
+        # 디버그: 원본 렌더링 이미지 저장 (첫 렌더링 시)
+        debug_path = os.path.join(tempfile.gettempdir(), f"debug_page_{page_idx}.png")
+        if not os.path.exists(debug_path):
+            base.save(debug_path)
+            print(f"[디버그] 렌더링 이미지 저장: {debug_path} ({base.width}x{base.height})")
+
         # 레벨 적용
         if black == 0 and white == 255:
             leveled = base
