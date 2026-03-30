@@ -17,8 +17,8 @@ ZOOM_STEPS = [_BASE * p / 100 for p in range(25, 525, 25)]  # 25%~500%
 ZOOM_DEFAULT_IDX = 3  # 100% = index 3 (25,50,75,100,...)
 THUMB_W = 140
 THUMB_MARGIN = 6
-BASE_DPI = 600
-BASE_SCALE = BASE_DPI / 72  # ~8.33
+BASE_DPI = 576  # 72 * 8 = 576 (정수 스케일)
+BASE_SCALE = BASE_DPI // 72  # 8
 
 
 class PDFLevelPreviewApp:
@@ -527,8 +527,7 @@ class PDFLevelPreviewApp:
         page = self.pdf_doc[page_idx]
         mat = fitz.Matrix(zoom, zoom)
         pix = page.get_pixmap(matrix=mat)
-        png_data = pix.tobytes("png")
-        return Image.open(io.BytesIO(png_data)).convert("RGB")
+        return Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
 
     # ------------------------------------------------------------------ #
     # Page selection
