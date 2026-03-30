@@ -65,6 +65,7 @@ class PDFLevelPreviewApp:
         self._build_ui()
         if has_dnd:
             self._bind_dnd()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ------------------------------------------------------------------ #
     # UI construction
@@ -1025,6 +1026,12 @@ class PDFLevelPreviewApp:
         self.update_preview()
         return "break"
 
+    def _on_close(self):
+        self._thumb_generation += 1
+        if self.pdf_doc:
+            self.pdf_doc.close()
+            self.pdf_doc = None
+        self.root.destroy()
 
 
 def main():
