@@ -547,6 +547,12 @@ class PDFLevelPreviewApp:
     def select_page(self, page_idx):
         self.current_page = page_idx
         self._draw_selection()
+        # 디버그: 페이지 내 이미지 정보 출력
+        page = self.pdf_doc[page_idx]
+        images = page.get_images(full=True)
+        print(f"[페이지 {page_idx}] 이미지 {len(images)}개, 페이지 크기: {page.rect.width:.1f}x{page.rect.height:.1f}pt")
+        for i, img in enumerate(images):
+            print(f"  이미지 {i}: xref={img[0]}, {img[2]}x{img[3]}px, bpc={img[4]}, cs={img[5]}")
         self.update_preview()
 
     # ------------------------------------------------------------------ #
