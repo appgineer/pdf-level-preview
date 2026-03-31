@@ -28,8 +28,8 @@ class PDFLevelPreviewApp:
         # 화면의 50% 크기 (최소 1200x800 보장), 가운데 배치
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
-        win_w = max(1200, screen_w // 2)
-        win_h = max(800, screen_h // 2)
+        win_w = max(1600, screen_w // 2)
+        win_h = max(1000, screen_h // 2)
         x = max(0, (screen_w - win_w) // 2)
         y = max(0, (screen_h - win_h) // 2)
         self.root.geometry(f"{win_w}x{win_h}+{x}+{y}")
@@ -259,7 +259,9 @@ class PDFLevelPreviewApp:
         self.right_paned.update_idletasks()
         total_h = self.right_paned.winfo_height()
         if total_h > 1:
-            self.right_paned.sash_place(0, 0, int(total_h * 0.7))
+            # 하단 설정 영역 30% 고정, 나머지 프리뷰
+            bottom_h = int(total_h * 0.3)
+            self.right_paned.sash_place(0, 0, total_h - bottom_h)
 
     # ------------------------------------------------------------------ #
     # Drag & Drop
