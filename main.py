@@ -13,7 +13,10 @@ from concurrent.futures import ThreadPoolExecutor
 
 # 100% = 원본 이미지 픽셀 1:1, 25%~500%
 ZOOM_PCTS = [p for p in range(25, 525, 25)]  # 25,50,75,100,...,500
-ZOOM_DEFAULT_IDX = 3  # 100% = index 3
+ZOOM_DEFAULT_IDX = 0  # 25% = index 0 (페이지 전체 보기)
+UI_FONT = ("맑은 고딕", 14)
+UI_FONT_SMALL = ("맑은 고딕", 12)
+UI_FONT_BOLD = ("맑은 고딕", 14, "bold")
 THUMB_W = 140
 THUMB_MARGIN = 6
 
@@ -72,18 +75,18 @@ class PDFLevelPreviewApp:
         toolbar = tk.Frame(self.root, bd=1, relief=tk.RAISED, pady=4)
         toolbar.pack(side=tk.TOP, fill=tk.X)
 
-        tk.Button(toolbar, text="파일 열기", command=self.open_pdf, cursor="hand2").pack(side=tk.LEFT, padx=6)
-        self.filename_label = tk.Label(toolbar, text="열린 파일 없음", anchor=tk.W)
+        tk.Button(toolbar, text="파일 열기", command=self.open_pdf, cursor="hand2", font=UI_FONT).pack(side=tk.LEFT, padx=6)
+        self.filename_label = tk.Label(toolbar, text="열린 파일 없음", anchor=tk.W, font=UI_FONT_SMALL)
         self.filename_label.pack(side=tk.LEFT, padx=6)
 
-        self.render_status = tk.Label(toolbar, text="", fg="#999", anchor=tk.W)
+        self.render_status = tk.Label(toolbar, text="", fg="#999", anchor=tk.W, font=UI_FONT_SMALL)
         self.render_status.pack(side=tk.LEFT, padx=6)
 
-        tk.Label(toolbar, text="확대").pack(side=tk.RIGHT, padx=2)
-        self.zoom_label = tk.Label(toolbar, text="100%", width=5)
+        tk.Label(toolbar, text="확대", font=UI_FONT_SMALL).pack(side=tk.RIGHT, padx=2)
+        self.zoom_label = tk.Label(toolbar, text="25%", width=5, font=UI_FONT_BOLD)
         self.zoom_label.pack(side=tk.RIGHT)
-        tk.Button(toolbar, text="-", width=2, command=self.zoom_out, cursor="hand2").pack(side=tk.RIGHT, padx=2)
-        tk.Button(toolbar, text="+", width=2, command=self.zoom_in, cursor="hand2").pack(side=tk.RIGHT, padx=2)
+        tk.Button(toolbar, text="-", width=2, command=self.zoom_out, cursor="hand2", font=UI_FONT).pack(side=tk.RIGHT, padx=2)
+        tk.Button(toolbar, text="+", width=2, command=self.zoom_in, cursor="hand2", font=UI_FONT).pack(side=tk.RIGHT, padx=2)
 
         # Resizable split
         paned = tk.PanedWindow(
@@ -158,7 +161,7 @@ class PDFLevelPreviewApp:
         # 초기 비율: 미리보기 80%, 설정 20%
         self.root.after(50, self._set_initial_sash)
 
-        FNT = ("", 12)
+        FNT = UI_FONT
 
         # ── Column 1: 레벨 조정 ──
         col1 = tk.Frame(controls, padx=8, pady=6)
@@ -452,13 +455,13 @@ class PDFLevelPreviewApp:
             items.append(rect_id)
             txt_id = self.thumb_canvas.create_text(
                 x + THUMB_W // 2, y + thumb_h // 2,
-                text=f"p.{idx + 1}", font=("", 9), fill="#888"
+                text=f"p.{idx + 1}", font=("맑은 고딕", 11), fill="#888"
             )
             items.append(txt_id)
 
         label_id = self.thumb_canvas.create_text(
             x + THUMB_W // 2, y + thumb_h + 10,
-            text=f"p.{idx + 1}", font=("", 8), fill="#000"
+            text=f"p.{idx + 1}", font=("맑은 고딕", 11), fill="#000"
         )
         items.append(label_id)
 
@@ -708,8 +711,8 @@ class PDFLevelPreviewApp:
         self._add_level_button(black, white)
 
     def _add_level_button(self, black, white):
-        FNT = ("", 12)
-        RB_FNT = ("", 14)
+        FNT = UI_FONT
+        RB_FNT = UI_FONT_BOLD
         idx = len(self.saved_levels) - 1
         row = tk.Frame(self.saved_frame)
         row.pack(side=tk.TOP, fill=tk.X, padx=2, pady=2)
@@ -757,7 +760,7 @@ class PDFLevelPreviewApp:
     # Config panel
     # ------------------------------------------------------------------ #
     def _build_config_panel(self, parent):
-        FNT = ("", 12)
+        FNT = UI_FONT
 
         # 좌우 2열 레이아웃: 왼쪽(스캔타입+분할+저장), 오른쪽(OCR)
         columns = tk.Frame(parent)
@@ -908,7 +911,7 @@ class PDFLevelPreviewApp:
         self.split_range_text = None
         if not self.is_split_var.get():
             return
-        FNT = ("", 12)
+        FNT = UI_FONT
         method = self.split_method_var.get()
         if method == "page":
             tk.Label(self.split_detail_frame, text="범위:", font=FNT).pack()
