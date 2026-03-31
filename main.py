@@ -14,9 +14,9 @@ from concurrent.futures import ThreadPoolExecutor
 # 100% = 원본 이미지 픽셀 1:1, 25%~500%
 ZOOM_PCTS = [p for p in range(25, 525, 25)]  # 25,50,75,100,...,500
 ZOOM_DEFAULT_IDX = 0  # 25% = index 0 (페이지 전체 보기)
-UI_FONT = ("맑은 고딕", 18)
-UI_FONT_SMALL = ("맑은 고딕", 16)
-UI_FONT_BOLD = ("맑은 고딕", 18, "bold")
+UI_FONT = ("맑은 고딕", 20)
+UI_FONT_SMALL = ("맑은 고딕", 18)
+UI_FONT_BOLD = ("맑은 고딕", 20, "bold")
 THUMB_W = 140
 THUMB_MARGIN = 6
 
@@ -25,7 +25,14 @@ class PDFLevelPreviewApp:
     def __init__(self, root, has_dnd=False):
         self.root = root
         self.root.title("PDF Level Preview")
-        self.root.geometry("1200x800")
+        # 화면의 50% 크기로 가운데 배치
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        win_w = screen_w // 2
+        win_h = screen_h // 2
+        x = (screen_w - win_w) // 2
+        y = (screen_h - win_h) // 2
+        self.root.geometry(f"{win_w}x{win_h}+{x}+{y}")
 
         self.pdf_doc = None
         self.current_page = 0
@@ -158,7 +165,7 @@ class PDFLevelPreviewApp:
         controls = tk.Frame(self.right_paned, bd=1, relief=tk.RAISED)
         self.right_paned.add(controls, minsize=120)
 
-        # 초기 비율: 미리보기 80%, 설정 20%
+        # 초기 비율: 미리보기 70%, 설정 30%
         self.root.after(50, self._set_initial_sash)
 
         FNT = UI_FONT
@@ -455,13 +462,13 @@ class PDFLevelPreviewApp:
             items.append(rect_id)
             txt_id = self.thumb_canvas.create_text(
                 x + THUMB_W // 2, y + thumb_h // 2,
-                text=f"p.{idx + 1}", font=("맑은 고딕", 14), fill="#888"
+                text=f"p.{idx + 1}", font=("맑은 고딕", 16), fill="#888"
             )
             items.append(txt_id)
 
         label_id = self.thumb_canvas.create_text(
             x + THUMB_W // 2, y + thumb_h + 10,
-            text=f"p.{idx + 1}", font=("맑은 고딕", 14), fill="#000"
+            text=f"p.{idx + 1}", font=("맑은 고딕", 16), fill="#000"
         )
         items.append(label_id)
 
