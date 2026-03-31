@@ -14,9 +14,9 @@ from concurrent.futures import ThreadPoolExecutor
 # 100% = 원본 이미지 픽셀 1:1, 25%~500%
 ZOOM_PCTS = [p for p in range(25, 525, 25)]  # 25,50,75,100,...,500
 ZOOM_DEFAULT_IDX = 0  # 25% = index 0 (페이지 전체 보기)
-UI_FONT = ("맑은 고딕", 14)
-UI_FONT_SMALL = ("맑은 고딕", 12)
-UI_FONT_BOLD = ("맑은 고딕", 14, "bold")
+UI_FONT = ("맑은 고딕", 18)
+UI_FONT_SMALL = ("맑은 고딕", 16)
+UI_FONT_BOLD = ("맑은 고딕", 18, "bold")
 THUMB_W = 140
 THUMB_MARGIN = 6
 
@@ -455,13 +455,13 @@ class PDFLevelPreviewApp:
             items.append(rect_id)
             txt_id = self.thumb_canvas.create_text(
                 x + THUMB_W // 2, y + thumb_h // 2,
-                text=f"p.{idx + 1}", font=("맑은 고딕", 11), fill="#888"
+                text=f"p.{idx + 1}", font=("맑은 고딕", 14), fill="#888"
             )
             items.append(txt_id)
 
         label_id = self.thumb_canvas.create_text(
             x + THUMB_W // 2, y + thumb_h + 10,
-            text=f"p.{idx + 1}", font=("맑은 고딕", 11), fill="#000"
+            text=f"p.{idx + 1}", font=("맑은 고딕", 14), fill="#000"
         )
         items.append(label_id)
 
