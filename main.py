@@ -25,13 +25,13 @@ class PDFLevelPreviewApp:
     def __init__(self, root, has_dnd=False):
         self.root = root
         self.root.title("PDF Level Preview")
-        # 화면의 50% 크기로 가운데 배치
+        # 화면의 50% 크기 (최소 1200x800 보장), 가운데 배치
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
-        win_w = screen_w // 2
-        win_h = screen_h // 2
-        x = (screen_w - win_w) // 2
-        y = (screen_h - win_h) // 2
+        win_w = max(1200, screen_w // 2)
+        win_h = max(800, screen_h // 2)
+        x = max(0, (screen_w - win_w) // 2)
+        y = max(0, (screen_h - win_h) // 2)
         self.root.geometry(f"{win_w}x{win_h}+{x}+{y}")
 
         self.pdf_doc = None
