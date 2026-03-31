@@ -1056,6 +1056,13 @@ def main():
         root = tk.Tk()
         has_dnd = False
 
+    # Windows HiDPI 스케일링 비활성화 (이미지 원본 화질 유지)
+    try:
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        pass
+
     app = PDFLevelPreviewApp(root, has_dnd=has_dnd)
     root.mainloop()
 
