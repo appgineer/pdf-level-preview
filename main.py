@@ -217,11 +217,9 @@ class PDFLevelPreviewApp:
 
         # ── Column 1: 레벨 조정 ──
         col1 = tk.Frame(controls, padx=16, pady=8)
-        col1.pack(side=tk.LEFT, fill=tk.BOTH)
-        col1_inner = tk.Frame(col1)
-        col1_inner.pack(expand=True)
+        col1.pack(side=tk.LEFT, fill=tk.Y)
 
-        r_black = tk.Frame(col1_inner)
+        r_black = tk.Frame(col1)
         r_black.pack(fill=tk.X, pady=2)
         tk.Label(r_black, text="검은색:", font=FNT).pack(side=tk.LEFT)
         self.black_var = tk.IntVar(value=0)
@@ -232,7 +230,7 @@ class PDFLevelPreviewApp:
             variable=self.black_var, command=self._on_black_slider, length=200
         )
 
-        r_white = tk.Frame(col1_inner)
+        r_white = tk.Frame(col1)
         r_white.pack(fill=tk.X, pady=2)
         tk.Label(r_white, text="흰  색:", font=FNT).pack(side=tk.LEFT)
         self.white_var = tk.IntVar(value=255)
@@ -243,7 +241,7 @@ class PDFLevelPreviewApp:
             variable=self.white_var, command=self._on_white_slider, length=200
         )
 
-        tk.Button(col1_inner, text="저장", command=self.add_level, padx=10, pady=2,
+        tk.Button(col1, text="저장", command=self.add_level, padx=10, pady=2,
                   cursor="hand2", font=FNT).pack(fill=tk.X, pady=(4, 0))
 
         self.black_entry.bind("<Up>",   lambda e: self._nudge(self.black_var, +1))
@@ -268,9 +266,12 @@ class PDFLevelPreviewApp:
         saved_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         self.saved_frame = tk.Frame(saved_canvas)
-        saved_canvas.create_window((0, 0), window=self.saved_frame, anchor=tk.NW)
+        self._saved_frame_win = saved_canvas.create_window((0, 0), window=self.saved_frame, anchor=tk.N)
 
         def _update_saved_scroll(event=None):
+            # 가로 가운데 정렬
+            cw = saved_canvas.winfo_width()
+            saved_canvas.coords(self._saved_frame_win, cw // 2, 0)
             saved_canvas.configure(scrollregion=saved_canvas.bbox("all"))
             saved_canvas.update_idletasks()
             content_h = self.saved_frame.winfo_reqheight()
