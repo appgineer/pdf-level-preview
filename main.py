@@ -12,7 +12,7 @@ import io
 from concurrent.futures import ThreadPoolExecutor
 
 # 100% = 원본 이미지 픽셀 1:1, 25%~500%
-ZOOM_PCTS = [p for p in range(25, 525, 25)]  # 25,50,75,100,...,500
+ZOOM_PCTS = [p for p in range(25, 150, 25)]  # 25,50,75,100,125 (최대 125%)
 ZOOM_DEFAULT_IDX = 0  # 25% = index 0 (페이지 전체 보기)
 UI_FONT = ("맑은 고딕", 20)
 UI_FONT_SMALL = ("맑은 고딕", 18)
@@ -143,7 +143,7 @@ class PDFLevelPreviewApp:
         # Resizable split
         paned = tk.PanedWindow(
             self.root, orient=tk.HORIZONTAL,
-            sashwidth=8, sashrelief=tk.FLAT, sashpad=0,
+            sashwidth=16, sashrelief=tk.RAISED, sashpad=4,
             sashcursor="sb_h_double_arrow"
         )
         paned.pack(fill=tk.BOTH, expand=True)
@@ -216,7 +216,7 @@ class PDFLevelPreviewApp:
         FNT = UI_FONT
 
         # ── Column 1: 레벨 조정 ──
-        col1 = tk.Frame(controls, padx=8, pady=6)
+        col1 = tk.Frame(controls, padx=16, pady=12)
         col1.pack(side=tk.LEFT, fill=tk.Y)
 
         r_black = tk.Frame(col1)
@@ -302,8 +302,8 @@ class PDFLevelPreviewApp:
         self.right_paned.update_idletasks()
         total_h = self.right_paned.winfo_height()
         if total_h > 1:
-            # 하단 설정 영역 30% 고정, 나머지 프리뷰
-            bottom_h = int(total_h * 0.3)
+            # 하단 설정 영역 35% 고정, 나머지 프리뷰
+            bottom_h = int(total_h * 0.35)
             self.right_paned.sash_place(0, 0, total_h - bottom_h)
 
     # ------------------------------------------------------------------ #
@@ -822,14 +822,14 @@ class PDFLevelPreviewApp:
         columns.pack(expand=True, fill=tk.BOTH)
 
         # ── 왼쪽 열: 스캔타입, 분할, 저장 (스크롤 가능) ──
-        left_outer = tk.Frame(columns, width=260)
+        left_outer = tk.Frame(columns, width=300)
         left_outer.pack(side=tk.LEFT, fill=tk.Y)
         left_outer.pack_propagate(False)
 
         left_canvas = tk.Canvas(left_outer, highlightthickness=0)
         left_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        left = tk.Frame(left_canvas, padx=8, pady=4)
+        left = tk.Frame(left_canvas, padx=16, pady=8)
         left_win = left_canvas.create_window((0, 0), window=left, anchor=tk.NW)
 
         def _sync_left_width(event=None):
