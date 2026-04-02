@@ -221,7 +221,7 @@ class PDFLevelPreviewApp:
 
         r_black = tk.Frame(col1)
         r_black.pack(fill=tk.X, pady=(4, 8))
-        tk.Label(r_black, text="검은색:", font=FNT, width=5, anchor=tk.E).pack(side=tk.LEFT)
+        tk.Label(r_black, text="검은색:", font=FNT, width=6, anchor=tk.E).pack(side=tk.LEFT)
         self.black_var = tk.IntVar(value=0)
         self.black_entry = tk.Entry(r_black, textvariable=self.black_var, width=6, font=FNT)
         self.black_entry.pack(side=tk.LEFT, padx=6)
@@ -232,7 +232,7 @@ class PDFLevelPreviewApp:
 
         r_white = tk.Frame(col1)
         r_white.pack(fill=tk.X, pady=(0, 12))
-        tk.Label(r_white, text="흰색:", font=FNT, width=5, anchor=tk.E).pack(side=tk.LEFT)
+        tk.Label(r_white, text="흰색:", font=FNT, width=6, anchor=tk.E).pack(side=tk.LEFT)
         self.white_var = tk.IntVar(value=255)
         self.white_entry = tk.Entry(r_white, textvariable=self.white_var, width=6, font=FNT)
         self.white_entry.pack(side=tk.LEFT, padx=6)
@@ -241,6 +241,7 @@ class PDFLevelPreviewApp:
             variable=self.white_var, command=self._on_white_slider, length=200
         )
 
+        ttk.Separator(col1, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=(0, 8))
         tk.Button(col1, text="저장", command=self.add_level, padx=10, pady=2,
                   cursor="hand2", font=FNT).pack(fill=tk.X)
 
@@ -725,11 +726,15 @@ class PDFLevelPreviewApp:
         ch = max(1, self.preview_canvas.winfo_height())
         iw, ih = img.width, img.height
 
-        x = max(cw // 2, iw // 2)
-        y = max(ch // 2, ih // 2)
+        pad = 20  # 위아래 좌우 최소 여백
+        x = max(cw // 2, iw // 2 + pad)
+        y = max(ch // 2, ih // 2 + pad)
+
+        total_w = max(cw, iw + pad * 2)
+        total_h = max(ch, ih + pad * 2)
 
         self.preview_canvas.delete("all")
-        self.preview_canvas.config(scrollregion=(0, 0, max(cw, iw), max(ch, ih)))
+        self.preview_canvas.config(scrollregion=(0, 0, total_w, total_h))
         self.preview_canvas.create_image(x, y, anchor=tk.CENTER, image=photo)
 
     def _on_preview_resize(self, event):
@@ -945,12 +950,23 @@ class PDFLevelPreviewApp:
             scrollregion=ocr_canvas.bbox("all")))
 
         def _on_ocr_scroll(event):
+            # 콘텐츠가 캔버스보다 작으면 스크롤 무시
+            bbox = ocr_canvas.bbox("all")
+            if not bbox:
+                return "break"
+            content_h = bbox[3] - bbox[1]
+            canvas_h = ocr_canvas.winfo_height()
+            if content_h <= canvas_h:
+                return "break"
             if event.num == 4:
                 ocr_canvas.yview_scroll(-1, "units")
             elif event.num == 5:
                 ocr_canvas.yview_scroll(1, "units")
             else:
                 ocr_canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+            # 맨 위 넘어가지 않도록 보정
+            if float(ocr_canvas.yview()[0]) < 0:
+                ocr_canvas.yview_moveto(0)
             return "break"
 
         self._ocr_canvas = ocr_canvas
