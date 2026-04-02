@@ -67,7 +67,7 @@ class PDFLevelPreviewApp:
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
         win_w = max(2400, int(screen_w * 0.75))
-        win_h = max(1500, int(screen_h * 0.75))
+        win_h = max(1800, int(screen_h * 0.75) + 300)
         x = max(0, (screen_w - win_w) // 2)
         y = max(0, (screen_h - win_h) // 2)
         self.root.geometry(f"{win_w}x{win_h}+{x}+{y}")
@@ -227,9 +227,8 @@ class PDFLevelPreviewApp:
         self.black_entry.pack(side=tk.LEFT, padx=2)
         self.black_slider = ttk.Scale(
             r_black, from_=0, to=255, orient=tk.HORIZONTAL,
-            variable=self.black_var, command=self._on_black_slider, length=120
+            variable=self.black_var, command=self._on_black_slider, length=200
         )
-        self.black_slider.pack(side=tk.LEFT, padx=4)
 
         r_white = tk.Frame(col1)
         r_white.pack(fill=tk.X, pady=2)
@@ -239,9 +238,8 @@ class PDFLevelPreviewApp:
         self.white_entry.pack(side=tk.LEFT, padx=2)
         self.white_slider = ttk.Scale(
             r_white, from_=0, to=255, orient=tk.HORIZONTAL,
-            variable=self.white_var, command=self._on_white_slider, length=120
+            variable=self.white_var, command=self._on_white_slider, length=200
         )
-        self.white_slider.pack(side=tk.LEFT, padx=4)
 
         tk.Button(col1, text="저장", command=self.add_level, padx=10, pady=2,
                   cursor="hand2", font=FNT).pack(fill=tk.X, pady=(4, 0))
@@ -258,7 +256,7 @@ class PDFLevelPreviewApp:
         ttk.Separator(controls, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=2)
 
         # ── Column 2: 저장된 레벨 리스트 ──
-        col2 = tk.Frame(controls, width=200, padx=4, pady=6)
+        col2 = tk.Frame(controls, width=320, padx=4, pady=6)
         col2.pack(side=tk.LEFT, fill=tk.Y)
         col2.pack_propagate(False)
 
@@ -774,7 +772,10 @@ class PDFLevelPreviewApp:
         rb = tk.Radiobutton(
             row, variable=self.selected_level_idx, value=idx,
             command=lambda b=black, w=white: self._select_level(idx, b, w),
-            cursor="hand2", font=RB_FNT
+            cursor="hand2", font=RB_FNT,
+            image=self._ind_tk['rb_off'], selectimage=self._ind_tk['rb_on'],
+            indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
+            selectcolor=self._bg_color
         )
         rb.pack(side=tk.LEFT)
 
@@ -910,19 +911,34 @@ class PDFLevelPreviewApp:
         ttk.Separator(columns, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=2)
 
         # ── 오른쪽 열: OCR (2열 그리드, 중복 선택, 스크롤 가능) ──
-        right_outer = tk.Frame(columns, padx=8, pady=4)
-        right_outer.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        right = tk.Frame(columns, padx=8, pady=4)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        ocr_canvas = tk.Canvas(right_outer, highlightthickness=0)
-        ocr_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tk.Label(right, text="OCR", font=FNT).pack(anchor=tk.W)
+        ocr_toggle_frame = tk.Frame(right)
+        ocr_toggle_frame.pack(anchor=tk.W)
+        tk.Radiobutton(ocr_toggle_frame, text="사용", variable=self.ocr_enabled_var,
+                       value=True, command=self._toggle_ocr, cursor="hand2", font=FNT,
+                       image=self._ind_tk['rb_off'], selectimage=self._ind_tk['rb_on'],
+                       indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
+                       selectcolor=self._bg_color).pack(side=tk.LEFT)
+        tk.Radiobutton(ocr_toggle_frame, text="안함", variable=self.ocr_enabled_var,
+                       value=False, command=self._toggle_ocr, cursor="hand2", font=FNT,
+                       image=self._ind_tk['rb_off'], selectimage=self._ind_tk['rb_on'],
+                       indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
+                       selectcolor=self._bg_color).pack(side=tk.LEFT)
 
-        right = tk.Frame(ocr_canvas)
-        ocr_win = ocr_canvas.create_window((0, 0), window=right, anchor=tk.NW)
+        # OCR 체크박스 목록을 스크롤 가능한 캔버스에 배치
+        ocr_canvas = tk.Canvas(right, highlightthickness=0)
+        ocr_canvas.pack(fill=tk.BOTH, expand=True)
 
-        def _sync_ocr_width(event=None):
-            ocr_canvas.itemconfigure(ocr_win, width=ocr_canvas.winfo_width())
-        ocr_canvas.bind("<Configure>", _sync_ocr_width)
-        right.bind("<Configure>", lambda e: ocr_canvas.configure(
+        self.ocr_grid = tk.Frame(ocr_canvas)
+        ocr_grid_win = ocr_canvas.create_window((0, 0), window=self.ocr_grid, anchor=tk.NW)
+
+        def _sync_ocr_grid_width(event=None):
+            ocr_canvas.itemconfigure(ocr_grid_win, width=ocr_canvas.winfo_width())
+        ocr_canvas.bind("<Configure>", _sync_ocr_grid_width)
+        self.ocr_grid.bind("<Configure>", lambda e: ocr_canvas.configure(
             scrollregion=ocr_canvas.bbox("all")))
 
         def _on_ocr_scroll(event):
@@ -945,22 +961,6 @@ class PDFLevelPreviewApp:
 
         for evt in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
             ocr_canvas.bind(evt, _on_ocr_scroll)
-
-        tk.Label(right, text="OCR", font=FNT).pack(anchor=tk.W)
-        ocr_toggle_frame = tk.Frame(right)
-        ocr_toggle_frame.pack(anchor=tk.W)
-        tk.Radiobutton(ocr_toggle_frame, text="사용", variable=self.ocr_enabled_var,
-                       value=True, command=self._toggle_ocr, cursor="hand2", font=FNT,
-                       image=self._ind_tk['rb_off'], selectimage=self._ind_tk['rb_on'],
-                       indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
-                       selectcolor=self._bg_color).pack(side=tk.LEFT)
-        tk.Radiobutton(ocr_toggle_frame, text="안함", variable=self.ocr_enabled_var,
-                       value=False, command=self._toggle_ocr, cursor="hand2", font=FNT,
-                       image=self._ind_tk['rb_off'], selectimage=self._ind_tk['rb_on'],
-                       indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
-                       selectcolor=self._bg_color).pack(side=tk.LEFT)
-
-        self.ocr_grid = tk.Frame(right)
 
         ocr_left_group = [
             "한국어", "영어", "일본어",
@@ -1000,8 +1000,8 @@ class PDFLevelPreviewApp:
                            indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
                            selectcolor=self._bg_color).pack(anchor=tk.W)
 
-        # OCR 영역 전체 스크롤 바인딩
-        _bind_ocr_scroll_recursive(right)
+        # OCR 체크박스 영역 스크롤 바인딩
+        _bind_ocr_scroll_recursive(self.ocr_grid)
 
     def _toggle_ocr(self):
         if self.ocr_enabled_var.get():
@@ -1079,8 +1079,8 @@ class PDFLevelPreviewApp:
         popup = tk.Toplevel(self.root)
         popup.overrideredirect(True)
         popup.attributes("-topmost", True)
-        tk.Label(popup, text="설정이 생성되었습니다.", font=("", 13),
-                 padx=20, pady=12, bg="#333", fg="#fff").pack()
+        tk.Label(popup, text="설정이 생성되었습니다.", font=("", 39),
+                 padx=30, pady=18, bg="#333", fg="#fff").pack()
         # 부모 창 중앙에 배치
         popup.update_idletasks()
         pw = popup.winfo_width()
