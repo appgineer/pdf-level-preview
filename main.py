@@ -25,11 +25,11 @@ class PDFLevelPreviewApp:
     def __init__(self, root, has_dnd=False):
         self.root = root
         self.root.title("PDF Level Preview")
-        # 화면의 50% 크기 (최소 1200x800 보장), 가운데 배치
+        # 화면의 75% 크기 (최소 2400x1500 보장), 가운데 배치
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
-        win_w = max(1600, screen_w // 2)
-        win_h = max(1000, screen_h // 2)
+        win_w = max(2400, int(screen_w * 0.75))
+        win_h = max(1500, int(screen_h * 0.75))
         x = max(0, (screen_w - win_w) // 2)
         y = max(0, (screen_h - win_h) // 2)
         self.root.geometry(f"{win_w}x{win_h}+{x}+{y}")
@@ -78,6 +78,12 @@ class PDFLevelPreviewApp:
     # UI construction
     # ------------------------------------------------------------------ #
     def _build_ui(self):
+        # 체크박스/라디오버튼 인디케이터 크기 2배
+        style = ttk.Style()
+        style.theme_use('clam')
+        style.configure('Big.TCheckbutton', font=UI_FONT, indicatorsize=24)
+        style.configure('Big.TRadiobutton', font=UI_FONT, indicatorsize=24)
+
         # Top toolbar
         toolbar = tk.Frame(self.root, bd=1, relief=tk.RAISED, pady=4)
         toolbar.pack(side=tk.TOP, fill=tk.X)
@@ -819,22 +825,22 @@ class PDFLevelPreviewApp:
         # 스캔타입
         tk.Label(left, text="스캔타입", font=FNT).pack()
         for txt in ("일반", "고급", "안함"):
-            tk.Radiobutton(left, text=txt, variable=self.scan_type_var, value=txt,
-                           cursor="hand2", font=FNT).pack()
+            ttk.Radiobutton(left, text=txt, variable=self.scan_type_var, value=txt,
+                            cursor="hand2", style='Big.TRadiobutton').pack()
 
         ttk.Separator(left, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=4)
 
         # 분할
-        tk.Checkbutton(left, text="분할", variable=self.is_split_var,
-                       command=self._toggle_split, cursor="hand2", font=FNT).pack()
+        ttk.Checkbutton(left, text="분할", variable=self.is_split_var,
+                        command=self._toggle_split, cursor="hand2", style='Big.TCheckbutton').pack()
         self.split_radio_frame = tk.Frame(left)
         self.split_radio_frame.pack()
-        tk.Radiobutton(self.split_radio_frame, text="페이지", variable=self.split_method_var,
-                       value="page", command=self._toggle_split_detail, cursor="hand2", font=FNT).pack()
-        tk.Radiobutton(self.split_radio_frame, text="크기", variable=self.split_method_var,
-                       value="size", command=self._toggle_split_detail, cursor="hand2", font=FNT).pack()
+        ttk.Radiobutton(self.split_radio_frame, text="페이지", variable=self.split_method_var,
+                        value="page", command=self._toggle_split_detail, cursor="hand2", style='Big.TRadiobutton').pack()
+        ttk.Radiobutton(self.split_radio_frame, text="크기", variable=self.split_method_var,
+                        value="size", command=self._toggle_split_detail, cursor="hand2", style='Big.TRadiobutton').pack()
         for w in self.split_radio_frame.winfo_children():
-            w.config(state=tk.DISABLED)
+            w.state(['disabled'])
 
         self.split_detail_frame = tk.Frame(left)
 
@@ -859,10 +865,10 @@ class PDFLevelPreviewApp:
         tk.Label(right, text="OCR", font=FNT).pack(anchor=tk.W)
         ocr_toggle_frame = tk.Frame(right)
         ocr_toggle_frame.pack(anchor=tk.W)
-        tk.Radiobutton(ocr_toggle_frame, text="사용", variable=self.ocr_enabled_var,
-                       value=True, command=self._toggle_ocr, cursor="hand2", font=FNT).pack(side=tk.LEFT)
-        tk.Radiobutton(ocr_toggle_frame, text="안함", variable=self.ocr_enabled_var,
-                       value=False, command=self._toggle_ocr, cursor="hand2", font=FNT).pack(side=tk.LEFT)
+        ttk.Radiobutton(ocr_toggle_frame, text="사용", variable=self.ocr_enabled_var,
+                        value=True, command=self._toggle_ocr, cursor="hand2", style='Big.TRadiobutton').pack(side=tk.LEFT)
+        ttk.Radiobutton(ocr_toggle_frame, text="안함", variable=self.ocr_enabled_var,
+                        value=False, command=self._toggle_ocr, cursor="hand2", style='Big.TRadiobutton').pack(side=tk.LEFT)
 
         self.ocr_grid = tk.Frame(right)
 
@@ -889,14 +895,14 @@ class PDFLevelPreviewApp:
             if txt is None:
                 tk.Frame(ocr_left_col, height=8).pack()
             else:
-                tk.Checkbutton(ocr_left_col, text=txt, variable=self.ocr_vars[txt],
-                               cursor="hand2", font=FNT, anchor=tk.W).pack(anchor=tk.W)
+                ttk.Checkbutton(ocr_left_col, text=txt, variable=self.ocr_vars[txt],
+                                cursor="hand2", style='Big.TCheckbutton').pack(anchor=tk.W)
 
         ocr_right_col = tk.Frame(self.ocr_grid)
         ocr_right_col.pack(side=tk.LEFT, anchor=tk.N)
         for txt in ocr_right_group:
-            tk.Checkbutton(ocr_right_col, text=txt, variable=self.ocr_vars[txt],
-                           cursor="hand2", font=FNT, anchor=tk.W).pack(anchor=tk.W)
+            ttk.Checkbutton(ocr_right_col, text=txt, variable=self.ocr_vars[txt],
+                            cursor="hand2", style='Big.TCheckbutton').pack(anchor=tk.W)
 
     def _toggle_ocr(self):
         if self.ocr_enabled_var.get():
@@ -907,10 +913,10 @@ class PDFLevelPreviewApp:
     def _toggle_split(self):
         if self.is_split_var.get():
             for w in self.split_radio_frame.winfo_children():
-                w.config(state=tk.NORMAL)
+                w.state(['!disabled'])
         else:
             for w in self.split_radio_frame.winfo_children():
-                w.config(state=tk.DISABLED)
+                w.state(['disabled'])
         self._toggle_split_detail()
 
     def _toggle_split_detail(self):
