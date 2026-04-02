@@ -216,10 +216,12 @@ class PDFLevelPreviewApp:
         FNT = UI_FONT
 
         # ── Column 1: 레벨 조정 ──
-        col1 = tk.Frame(controls, padx=16, pady=12)
-        col1.pack(side=tk.LEFT, fill=tk.Y)
+        col1 = tk.Frame(controls, padx=16, pady=8)
+        col1.pack(side=tk.LEFT, fill=tk.BOTH)
+        col1_inner = tk.Frame(col1)
+        col1_inner.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
 
-        r_black = tk.Frame(col1)
+        r_black = tk.Frame(col1_inner)
         r_black.pack(fill=tk.X, pady=2)
         tk.Label(r_black, text="검은색:", font=FNT).pack(side=tk.LEFT)
         self.black_var = tk.IntVar(value=0)
@@ -230,7 +232,7 @@ class PDFLevelPreviewApp:
             variable=self.black_var, command=self._on_black_slider, length=200
         )
 
-        r_white = tk.Frame(col1)
+        r_white = tk.Frame(col1_inner)
         r_white.pack(fill=tk.X, pady=2)
         tk.Label(r_white, text="흰  색:", font=FNT).pack(side=tk.LEFT)
         self.white_var = tk.IntVar(value=255)
@@ -241,7 +243,7 @@ class PDFLevelPreviewApp:
             variable=self.white_var, command=self._on_white_slider, length=200
         )
 
-        tk.Button(col1, text="저장", command=self.add_level, padx=10, pady=2,
+        tk.Button(col1_inner, text="저장", command=self.add_level, padx=10, pady=2,
                   cursor="hand2", font=FNT).pack(fill=tk.X, pady=(4, 0))
 
         self.black_entry.bind("<Up>",   lambda e: self._nudge(self.black_var, +1))
@@ -256,8 +258,8 @@ class PDFLevelPreviewApp:
         ttk.Separator(controls, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=2)
 
         # ── Column 2: 저장된 레벨 리스트 ──
-        col2 = tk.Frame(controls, width=320, padx=4, pady=6)
-        col2.pack(side=tk.LEFT, fill=tk.Y)
+        col2 = tk.Frame(controls, width=320, padx=16, pady=8)
+        col2.pack(side=tk.LEFT, fill=tk.BOTH)
         col2.pack_propagate(False)
 
         saved_canvas = tk.Canvas(col2, highlightthickness=0)
@@ -911,7 +913,7 @@ class PDFLevelPreviewApp:
         ttk.Separator(columns, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=2)
 
         # ── 오른쪽 열: OCR (2열 그리드, 중복 선택, 스크롤 가능) ──
-        right = tk.Frame(columns, padx=8, pady=4)
+        right = tk.Frame(columns, padx=(16, 0), pady=4)
         right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         tk.Label(right, text="OCR", font=FNT).pack(anchor=tk.W)
