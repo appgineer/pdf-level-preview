@@ -11,9 +11,10 @@ import tempfile
 import io
 from concurrent.futures import ThreadPoolExecutor
 
-# 100% = 원본 이미지 픽셀 1:1, 25%~500%
-ZOOM_PCTS = [p for p in range(25, 150, 25)]  # 25,50,75,100,125 (최대 125%)
-ZOOM_DEFAULT_IDX = 0  # 25% = index 0 (페이지 전체 보기)
+# 100% = 원본 이미지 픽셀 1:1
+# index 0 = "맞춤(Fit)" 모드, 이후 50%,75%,100%,125%
+ZOOM_LEVELS = [0, 50, 75, 100, 125]  # 0 = fit
+ZOOM_DEFAULT_IDX = 0
 UI_FONT = ("맑은 고딕", 20)
 UI_FONT_SMALL = ("맑은 고딕", 18)
 UI_FONT_BOLD = ("맑은 고딕", 20, "bold")
@@ -135,7 +136,7 @@ class PDFLevelPreviewApp:
         self.render_status.pack(side=tk.LEFT, padx=6)
 
         tk.Label(toolbar, text="확대", font=UI_FONT_SMALL).pack(side=tk.RIGHT, padx=2)
-        self.zoom_label = tk.Label(toolbar, text="25%", width=5, font=UI_FONT_BOLD)
+        self.zoom_label = tk.Label(toolbar, text="맞춤", width=5, font=UI_FONT_BOLD)
         self.zoom_label.pack(side=tk.RIGHT)
         tk.Button(toolbar, text="-", width=2, command=self.zoom_out, cursor="hand2", font=UI_FONT).pack(side=tk.RIGHT, padx=2)
         tk.Button(toolbar, text="+", width=2, command=self.zoom_in, cursor="hand2", font=UI_FONT).pack(side=tk.RIGHT, padx=2)
@@ -625,13 +626,35 @@ class PDFLevelPreviewApp:
     # Zoom
     # ------------------------------------------------------------------ #
     def _current_zoom_pct(self):
-        return ZOOM_PCTS[self.zoom_idx]
+        """0이면 fit 모드, 아니면 고정 퍼센트"""
+        return ZOOM_LEVELS[self.zoom_idx]
+
+    def _fit_zoom_pct(self):
+        """캔버스에 페이지가 딱 맞는 zoom 퍼센트 계산"""
+        if self.current_img is None and self.current_page in self.base_render_cache:
+            base = self.base_render_cache[self.current_page]
+        elif self.pdf_doc:
+            page_idx = self.current_page
+            if page_idx not in self.base_render_cache:
+                self.base_render_cache[page_idx] = self._render_page(page_idx)
+            base = self.base_render_cache[page_idx]
+        else:
+            return 25
+        cw = max(1, self.preview_canvas.winfo_width())
+        ch = max(1, self.preview_canvas.winfo_height())
+        scale_w = cw / base.width
+        scale_h = ch / base.height
+        return min(scale_w, scale_h) * 100
 
     def _update_zoom_label(self):
-        self.zoom_label.config(text=f"{self._current_zoom_pct()}%")
+        pct = self._current_zoom_pct()
+        if pct == 0:
+            self.zoom_label.config(text="맞춤")
+        else:
+            self.zoom_label.config(text=f"{pct}%")
 
     def zoom_in(self):
-        if self.zoom_idx < len(ZOOM_PCTS) - 1:
+        if self.zoom_idx < len(ZOOM_LEVELS) - 1:
             self.zoom_idx += 1
             self._update_zoom_label()
             self.preview_cache.clear()
@@ -671,7 +694,8 @@ class PDFLevelPreviewApp:
 
         black = max(0, min(255, black))
         white = max(0, min(255, white))
-        zoom_pct = self._current_zoom_pct()
+        raw_pct = self._current_zoom_pct()
+        zoom_pct = self._fit_zoom_pct() if raw_pct == 0 else raw_pct
 
         key = (self.current_page, black, white, zoom_pct)
         if key in self.preview_cache:
@@ -738,7 +762,12 @@ class PDFLevelPreviewApp:
         self.preview_canvas.create_image(x, y, anchor=tk.CENTER, image=photo)
 
     def _on_preview_resize(self, event):
-        self._draw_preview()
+        if self._current_zoom_pct() == 0:
+            # fit 모드에서는 캔버스 크기 변경 시 다시 계산
+            self.preview_cache.clear()
+            self.update_preview()
+        else:
+            self._draw_preview()
 
     def _on_drag_start(self, event):
         self.preview_canvas.scan_mark(event.x, event.y)
