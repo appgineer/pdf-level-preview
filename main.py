@@ -219,7 +219,7 @@ class PDFLevelPreviewApp:
         col1 = tk.Frame(controls, padx=16, pady=8)
         col1.pack(side=tk.LEFT, fill=tk.BOTH)
         col1_inner = tk.Frame(col1)
-        col1_inner.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
+        col1_inner.pack(expand=True)
 
         r_black = tk.Frame(col1_inner)
         r_black.pack(fill=tk.X, pady=2)
