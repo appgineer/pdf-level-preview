@@ -913,8 +913,8 @@ class PDFLevelPreviewApp:
         ttk.Separator(columns, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=2)
 
         # ── 오른쪽 열: OCR (2열 그리드, 중복 선택, 스크롤 가능) ──
-        right = tk.Frame(columns, padx=(16, 0), pady=4)
-        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        right = tk.Frame(columns, pady=4)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(16, 0))
 
         tk.Label(right, text="OCR", font=FNT).pack(anchor=tk.W)
         ocr_toggle_frame = tk.Frame(right)
