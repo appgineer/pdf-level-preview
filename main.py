@@ -220,29 +220,29 @@ class PDFLevelPreviewApp:
         col1.pack(side=tk.LEFT, fill=tk.Y)
 
         r_black = tk.Frame(col1)
-        r_black.pack(fill=tk.X, pady=2)
-        tk.Label(r_black, text="검은색:", font=FNT).pack(side=tk.LEFT)
+        r_black.pack(fill=tk.X, pady=(4, 8))
+        tk.Label(r_black, text="검은색:", font=FNT, width=5, anchor=tk.E).pack(side=tk.LEFT)
         self.black_var = tk.IntVar(value=0)
-        self.black_entry = tk.Entry(r_black, textvariable=self.black_var, width=4, font=FNT)
-        self.black_entry.pack(side=tk.LEFT, padx=2)
+        self.black_entry = tk.Entry(r_black, textvariable=self.black_var, width=6, font=FNT)
+        self.black_entry.pack(side=tk.LEFT, padx=6)
         self.black_slider = ttk.Scale(
             r_black, from_=0, to=255, orient=tk.HORIZONTAL,
             variable=self.black_var, command=self._on_black_slider, length=200
         )
 
         r_white = tk.Frame(col1)
-        r_white.pack(fill=tk.X, pady=2)
-        tk.Label(r_white, text="흰  색:", font=FNT).pack(side=tk.LEFT)
+        r_white.pack(fill=tk.X, pady=(0, 12))
+        tk.Label(r_white, text="흰색:", font=FNT, width=5, anchor=tk.E).pack(side=tk.LEFT)
         self.white_var = tk.IntVar(value=255)
-        self.white_entry = tk.Entry(r_white, textvariable=self.white_var, width=4, font=FNT)
-        self.white_entry.pack(side=tk.LEFT, padx=2)
+        self.white_entry = tk.Entry(r_white, textvariable=self.white_var, width=6, font=FNT)
+        self.white_entry.pack(side=tk.LEFT, padx=6)
         self.white_slider = ttk.Scale(
             r_white, from_=0, to=255, orient=tk.HORIZONTAL,
             variable=self.white_var, command=self._on_white_slider, length=200
         )
 
         tk.Button(col1, text="저장", command=self.add_level, padx=10, pady=2,
-                  cursor="hand2", font=FNT).pack(fill=tk.X, pady=(4, 0))
+                  cursor="hand2", font=FNT).pack(fill=tk.X)
 
         self.black_entry.bind("<Up>",   lambda e: self._nudge(self.black_var, +1))
         self.black_entry.bind("<Down>", lambda e: self._nudge(self.black_var, -1))
@@ -930,10 +930,10 @@ class PDFLevelPreviewApp:
                        image=self._ind_tk['rb_off'], selectimage=self._ind_tk['rb_on'],
                        indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
                        selectcolor=self._bg_color).pack(side=tk.LEFT)
+        ocr_toggle_frame.pack(anchor=tk.W, pady=(0, 8))
 
         # OCR 체크박스 목록을 스크롤 가능한 캔버스에 배치
         ocr_canvas = tk.Canvas(right, highlightthickness=0)
-        ocr_canvas.pack(fill=tk.BOTH, expand=True)
 
         self.ocr_grid = tk.Frame(ocr_canvas)
         ocr_grid_win = ocr_canvas.create_window((0, 0), window=self.ocr_grid, anchor=tk.NW)
@@ -1006,12 +1006,16 @@ class PDFLevelPreviewApp:
         # OCR 체크박스 영역 스크롤 바인딩
         _bind_ocr_scroll_recursive(self.ocr_grid)
 
+        # 초기 상태: 안함이므로 캔버스 숨김
+        if not self.ocr_enabled_var.get():
+            ocr_canvas.pack_forget()
+
     def _toggle_ocr(self):
         if self.ocr_enabled_var.get():
-            self.ocr_grid.pack(anchor=tk.W)
+            self._ocr_canvas.pack(fill=tk.BOTH, expand=True)
             self._bind_ocr_scroll_recursive(self.ocr_grid)
         else:
-            self.ocr_grid.pack_forget()
+            self._ocr_canvas.pack_forget()
 
     def _toggle_split(self):
         if self.is_split_var.get():
