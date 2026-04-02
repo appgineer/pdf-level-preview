@@ -216,7 +216,7 @@ class PDFLevelPreviewApp:
         FNT = UI_FONT
 
         # ── Column 1: 레벨 조정 ──
-        col1 = tk.Frame(controls, padx=16, pady=8)
+        col1 = tk.Frame(controls, padx=80, pady=8)
         col1.pack(side=tk.LEFT, fill=tk.Y)
 
         r_black = tk.Frame(col1)
