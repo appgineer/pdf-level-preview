@@ -1,6 +1,6 @@
 import tkinter as tk
 from tkinter import ttk, filedialog
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageDraw
 import fitz  # PyMuPDF
 import json
 import os
@@ -19,6 +19,44 @@ UI_FONT_SMALL = ("맑은 고딕", 18)
 UI_FONT_BOLD = ("맑은 고딕", 20, "bold")
 THUMB_W = 140
 THUMB_MARGIN = 6
+INDICATOR_SIZE = 24  # 체크박스/라디오버튼 인디케이터 크기
+
+
+def _make_indicator_images():
+    """체크박스/라디오버튼용 큰 인디케이터 이미지 생성"""
+    s = INDICATOR_SIZE
+    imgs = {}
+
+    # 체크박스 - 미선택
+    img = Image.new('RGBA', (s, s), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rectangle([0, 0, s-1, s-1], outline='#666666', width=2, fill='white')
+    imgs['cb_off'] = img
+
+    # 체크박스 - 선택 (체크마크)
+    img = Image.new('RGBA', (s, s), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rectangle([0, 0, s-1, s-1], outline='#666666', width=2, fill='white')
+    # 체크마크
+    pts = [(int(s*0.2), int(s*0.5)), (int(s*0.4), int(s*0.75)), (int(s*0.8), int(s*0.25))]
+    d.line(pts, fill='#333333', width=3)
+    imgs['cb_on'] = img
+
+    # 라디오 - 미선택
+    img = Image.new('RGBA', (s, s), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.ellipse([1, 1, s-2, s-2], outline='#666666', width=2, fill='white')
+    imgs['rb_off'] = img
+
+    # 라디오 - 선택
+    img = Image.new('RGBA', (s, s), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.ellipse([1, 1, s-2, s-2], outline='#666666', width=2, fill='white')
+    m = int(s * 0.28)
+    d.ellipse([m, m, s-m, s-m], fill='#333333')
+    imgs['rb_on'] = img
+
+    return imgs
 
 
 class PDFLevelPreviewApp:
@@ -78,11 +116,12 @@ class PDFLevelPreviewApp:
     # UI construction
     # ------------------------------------------------------------------ #
     def _build_ui(self):
-        # 체크박스/라디오버튼 인디케이터 크기 2배
-        style = ttk.Style()
-        style.theme_use('clam')
-        style.configure('Big.TCheckbutton', font=UI_FONT, indicatorsize=24)
-        style.configure('Big.TRadiobutton', font=UI_FONT, indicatorsize=24)
+        # 체크박스/라디오버튼 인디케이터 크기 2배 (커스텀 이미지)
+        ind_imgs = _make_indicator_images()
+        self._ind_tk = {}
+        for k, v in ind_imgs.items():
+            self._ind_tk[k] = ImageTk.PhotoImage(v)
+        self._bg_color = self.root.cget('bg')
 
         # Top toolbar
         toolbar = tk.Frame(self.root, bd=1, relief=tk.RAISED, pady=4)
@@ -825,22 +864,34 @@ class PDFLevelPreviewApp:
         # 스캔타입
         tk.Label(left, text="스캔타입", font=FNT).pack()
         for txt in ("일반", "고급", "안함"):
-            ttk.Radiobutton(left, text=txt, variable=self.scan_type_var, value=txt,
-                            cursor="hand2", style='Big.TRadiobutton').pack()
+            tk.Radiobutton(left, text=txt, variable=self.scan_type_var, value=txt,
+                           cursor="hand2", font=FNT,
+                           image=self._ind_tk['rb_off'], selectimage=self._ind_tk['rb_on'],
+                           indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
+                           selectcolor=self._bg_color).pack()
 
         ttk.Separator(left, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=4)
 
         # 분할
-        ttk.Checkbutton(left, text="분할", variable=self.is_split_var,
-                        command=self._toggle_split, cursor="hand2", style='Big.TCheckbutton').pack()
+        tk.Checkbutton(left, text="분할", variable=self.is_split_var,
+                       command=self._toggle_split, cursor="hand2", font=FNT,
+                       image=self._ind_tk['cb_off'], selectimage=self._ind_tk['cb_on'],
+                       indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
+                       selectcolor=self._bg_color).pack()
         self.split_radio_frame = tk.Frame(left)
         self.split_radio_frame.pack()
-        ttk.Radiobutton(self.split_radio_frame, text="페이지", variable=self.split_method_var,
-                        value="page", command=self._toggle_split_detail, cursor="hand2", style='Big.TRadiobutton').pack()
-        ttk.Radiobutton(self.split_radio_frame, text="크기", variable=self.split_method_var,
-                        value="size", command=self._toggle_split_detail, cursor="hand2", style='Big.TRadiobutton').pack()
+        tk.Radiobutton(self.split_radio_frame, text="페이지", variable=self.split_method_var,
+                       value="page", command=self._toggle_split_detail, cursor="hand2", font=FNT,
+                       image=self._ind_tk['rb_off'], selectimage=self._ind_tk['rb_on'],
+                       indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
+                       selectcolor=self._bg_color).pack()
+        tk.Radiobutton(self.split_radio_frame, text="크기", variable=self.split_method_var,
+                       value="size", command=self._toggle_split_detail, cursor="hand2", font=FNT,
+                       image=self._ind_tk['rb_off'], selectimage=self._ind_tk['rb_on'],
+                       indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
+                       selectcolor=self._bg_color).pack()
         for w in self.split_radio_frame.winfo_children():
-            w.state(['disabled'])
+            w.config(state=tk.DISABLED)
 
         self.split_detail_frame = tk.Frame(left)
 
@@ -858,17 +909,56 @@ class PDFLevelPreviewApp:
         # ── 구분선 ──
         ttk.Separator(columns, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=2)
 
-        # ── 오른쪽 열: OCR (2열 그리드, 중복 선택) ──
-        right = tk.Frame(columns, padx=8, pady=4)
-        right.pack(side=tk.LEFT, fill=tk.Y)
+        # ── 오른쪽 열: OCR (2열 그리드, 중복 선택, 스크롤 가능) ──
+        right_outer = tk.Frame(columns, padx=8, pady=4)
+        right_outer.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        ocr_canvas = tk.Canvas(right_outer, highlightthickness=0)
+        ocr_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        right = tk.Frame(ocr_canvas)
+        ocr_win = ocr_canvas.create_window((0, 0), window=right, anchor=tk.NW)
+
+        def _sync_ocr_width(event=None):
+            ocr_canvas.itemconfigure(ocr_win, width=ocr_canvas.winfo_width())
+        ocr_canvas.bind("<Configure>", _sync_ocr_width)
+        right.bind("<Configure>", lambda e: ocr_canvas.configure(
+            scrollregion=ocr_canvas.bbox("all")))
+
+        def _on_ocr_scroll(event):
+            if event.num == 4:
+                ocr_canvas.yview_scroll(-1, "units")
+            elif event.num == 5:
+                ocr_canvas.yview_scroll(1, "units")
+            else:
+                ocr_canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+            return "break"
+
+        self._ocr_canvas = ocr_canvas
+
+        def _bind_ocr_scroll_recursive(widget):
+            for evt in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                widget.bind(evt, _on_ocr_scroll)
+            for child in widget.winfo_children():
+                _bind_ocr_scroll_recursive(child)
+        self._bind_ocr_scroll_recursive = _bind_ocr_scroll_recursive
+
+        for evt in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            ocr_canvas.bind(evt, _on_ocr_scroll)
 
         tk.Label(right, text="OCR", font=FNT).pack(anchor=tk.W)
         ocr_toggle_frame = tk.Frame(right)
         ocr_toggle_frame.pack(anchor=tk.W)
-        ttk.Radiobutton(ocr_toggle_frame, text="사용", variable=self.ocr_enabled_var,
-                        value=True, command=self._toggle_ocr, cursor="hand2", style='Big.TRadiobutton').pack(side=tk.LEFT)
-        ttk.Radiobutton(ocr_toggle_frame, text="안함", variable=self.ocr_enabled_var,
-                        value=False, command=self._toggle_ocr, cursor="hand2", style='Big.TRadiobutton').pack(side=tk.LEFT)
+        tk.Radiobutton(ocr_toggle_frame, text="사용", variable=self.ocr_enabled_var,
+                       value=True, command=self._toggle_ocr, cursor="hand2", font=FNT,
+                       image=self._ind_tk['rb_off'], selectimage=self._ind_tk['rb_on'],
+                       indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
+                       selectcolor=self._bg_color).pack(side=tk.LEFT)
+        tk.Radiobutton(ocr_toggle_frame, text="안함", variable=self.ocr_enabled_var,
+                       value=False, command=self._toggle_ocr, cursor="hand2", font=FNT,
+                       image=self._ind_tk['rb_off'], selectimage=self._ind_tk['rb_on'],
+                       indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
+                       selectcolor=self._bg_color).pack(side=tk.LEFT)
 
         self.ocr_grid = tk.Frame(right)
 
@@ -895,28 +985,38 @@ class PDFLevelPreviewApp:
             if txt is None:
                 tk.Frame(ocr_left_col, height=8).pack()
             else:
-                ttk.Checkbutton(ocr_left_col, text=txt, variable=self.ocr_vars[txt],
-                                cursor="hand2", style='Big.TCheckbutton').pack(anchor=tk.W)
+                tk.Checkbutton(ocr_left_col, text=txt, variable=self.ocr_vars[txt],
+                               cursor="hand2", font=FNT, anchor=tk.W,
+                               image=self._ind_tk['cb_off'], selectimage=self._ind_tk['cb_on'],
+                               indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
+                               selectcolor=self._bg_color).pack(anchor=tk.W)
 
         ocr_right_col = tk.Frame(self.ocr_grid)
         ocr_right_col.pack(side=tk.LEFT, anchor=tk.N)
         for txt in ocr_right_group:
-            ttk.Checkbutton(ocr_right_col, text=txt, variable=self.ocr_vars[txt],
-                            cursor="hand2", style='Big.TCheckbutton').pack(anchor=tk.W)
+            tk.Checkbutton(ocr_right_col, text=txt, variable=self.ocr_vars[txt],
+                           cursor="hand2", font=FNT, anchor=tk.W,
+                           image=self._ind_tk['cb_off'], selectimage=self._ind_tk['cb_on'],
+                           indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
+                           selectcolor=self._bg_color).pack(anchor=tk.W)
+
+        # OCR 영역 전체 스크롤 바인딩
+        _bind_ocr_scroll_recursive(right)
 
     def _toggle_ocr(self):
         if self.ocr_enabled_var.get():
             self.ocr_grid.pack(anchor=tk.W)
+            self._bind_ocr_scroll_recursive(self.ocr_grid)
         else:
             self.ocr_grid.pack_forget()
 
     def _toggle_split(self):
         if self.is_split_var.get():
             for w in self.split_radio_frame.winfo_children():
-                w.state(['!disabled'])
+                w.config(state=tk.NORMAL)
         else:
             for w in self.split_radio_frame.winfo_children():
-                w.state(['disabled'])
+                w.config(state=tk.DISABLED)
         self._toggle_split_detail()
 
     def _toggle_split_detail(self):
