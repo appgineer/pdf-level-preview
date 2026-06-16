@@ -18,7 +18,7 @@ ZOOM_DEFAULT_IDX = 0
 UI_FONT = ("맑은 고딕", 20)
 UI_FONT_SMALL = ("맑은 고딕", 18)
 UI_FONT_BOLD = ("맑은 고딕", 20, "bold")
-THUMB_W = 140
+THUMB_W = 280
 THUMB_MARGIN = 6
 INDICATOR_SIZE = 24  # 체크박스/라디오버튼 인디케이터 크기
 
@@ -151,7 +151,7 @@ class PDFLevelPreviewApp:
 
         # ── Left: thumbnail panel ──────────────────────────────────────
         left = tk.Frame(paned, bd=1, relief=tk.SUNKEN)
-        paned.add(left, minsize=160, width=220)
+        paned.add(left, minsize=160, width=320)
 
         self.thumb_canvas = tk.Canvas(left, bg="#f0f0f0")
         thumb_vscroll = ttk.Scrollbar(left, orient=tk.VERTICAL, command=self.thumb_canvas.yview)
@@ -383,7 +383,7 @@ class PDFLevelPreviewApp:
                     "import fitz,sys;"
                     "d=fitz.open(sys.argv[1]);"
                     "p=d[int(sys.argv[2])];"
-                    "m=fitz.Matrix(0.3,0.3);"
+                    "m=fitz.Matrix(0.6,0.6);"
                     "x=p.get_pixmap(matrix=m);"
                     "x.save(sys.argv[3]);"
                     "d.close()"
