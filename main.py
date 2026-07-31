@@ -21,6 +21,8 @@ UI_FONT_BOLD = ("맑은 고딕", 20, "bold")
 THUMB_W = 280
 THUMB_MARGIN = 6
 INDICATOR_SIZE = 24  # 체크박스/라디오버튼 인디케이터 크기
+# 내장 이미지가 없는 페이지(벡터/텍스트)의 렌더 스케일. 1.0 = 72 DPI
+BASE_SCALE = 8  # 576 DPI
 
 
 def _make_indicator_images():
@@ -170,17 +172,9 @@ class PDFLevelPreviewApp:
         self.thumb_canvas.bind("<Button-4>",   self._on_thumb_scroll)
         self.thumb_canvas.bind("<Button-5>",   self._on_thumb_scroll)
 
-        # ── Right: preview + controls (vertical resizable) ─────────────
-        self.right_paned = tk.PanedWindow(
-            paned, orient=tk.VERTICAL,
-            sashwidth=6, sashrelief=tk.RAISED,
-            sashcursor="sb_v_double_arrow"
-        )
-        paned.add(self.right_paned, minsize=400)
-
-        # ── Top: preview ──
-        preview_frame = tk.Frame(self.right_paned)
-        self.right_paned.add(preview_frame, minsize=200)
+        # ── Center: preview ────────────────────────────────────────────
+        preview_frame = tk.Frame(paned)
+        paned.add(preview_frame, minsize=400, stretch="always")
 
         prev_vscroll = ttk.Scrollbar(preview_frame, orient=tk.VERTICAL)
         prev_hscroll = ttk.Scrollbar(preview_frame, orient=tk.HORIZONTAL)
@@ -207,43 +201,63 @@ class PDFLevelPreviewApp:
         self.preview_canvas.bind("<Button-4>", self._on_preview_scroll)
         self.preview_canvas.bind("<Button-5>", self._on_preview_scroll)
 
-        # ── Bottom: controls (3-column) ──
-        controls = tk.Frame(self.right_paned, bd=1, relief=tk.RAISED)
-        self.right_paned.add(controls, minsize=120)
+        # ── Right: 설정 세로 컬럼 ──────────────────────────────────────
+        settings_outer = tk.Frame(paned, bd=1, relief=tk.RAISED)
+        paned.add(settings_outer, minsize=320, width=440, stretch="never")
+        self._build_settings_panel(settings_outer)
 
-        # 초기 비율: 미리보기 70%, 설정 30%
-        self.root.after(50, self._set_initial_sash)
-
+    def _build_settings_panel(self, parent):
+        """오른쪽 설정 컬럼. 스크롤 캔버스 하나 안에 모든 설정을 세로로 쌓는다."""
         FNT = UI_FONT
 
-        # ── Column 1: 레벨 조정 ──
-        col1 = tk.Frame(controls, padx=80, pady=8)
-        col1.pack(side=tk.LEFT, fill=tk.Y)
+        canvas = tk.Canvas(parent, highlightthickness=0)
+        vscroll = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=vscroll.set)
+        vscroll.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        r_black = tk.Frame(col1)
+        inner = tk.Frame(canvas, padx=16, pady=8)
+        inner_win = canvas.create_window((0, 0), window=inner, anchor=tk.NW)
+
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(inner_win, width=e.width))
+        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+
+        def _on_settings_scroll(event):
+            if event.num == 4:
+                canvas.yview_scroll(-1, "units")
+            elif event.num == 5:
+                canvas.yview_scroll(1, "units")
+            else:
+                canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+            return "break"
+
+        def _bind_scroll_recursive(widget):
+            for evt in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                widget.bind(evt, _on_settings_scroll)
+            for child in widget.winfo_children():
+                _bind_scroll_recursive(child)
+
+        self._bind_settings_scroll = _bind_scroll_recursive
+
+        for evt in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            canvas.bind(evt, _on_settings_scroll)
+
+        # ── 레벨 조정 ──
+        r_black = tk.Frame(inner)
         r_black.pack(fill=tk.X, pady=(4, 8))
         tk.Label(r_black, text="검은색:", font=FNT, width=6, anchor=tk.E).pack(side=tk.LEFT)
         self.black_var = tk.IntVar(value=0)
         self.black_entry = tk.Entry(r_black, textvariable=self.black_var, width=6, font=FNT)
         self.black_entry.pack(side=tk.LEFT, padx=6)
-        self.black_slider = ttk.Scale(
-            r_black, from_=0, to=255, orient=tk.HORIZONTAL,
-            variable=self.black_var, command=self._on_black_slider, length=200
-        )
 
-        r_white = tk.Frame(col1)
+        r_white = tk.Frame(inner)
         r_white.pack(fill=tk.X, pady=(0, 12))
         tk.Label(r_white, text="흰색:", font=FNT, width=6, anchor=tk.E).pack(side=tk.LEFT)
         self.white_var = tk.IntVar(value=255)
         self.white_entry = tk.Entry(r_white, textvariable=self.white_var, width=6, font=FNT)
         self.white_entry.pack(side=tk.LEFT, padx=6)
-        self.white_slider = ttk.Scale(
-            r_white, from_=0, to=255, orient=tk.HORIZONTAL,
-            variable=self.white_var, command=self._on_white_slider, length=200
-        )
 
-        ttk.Separator(col1, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=(0, 8))
-        tk.Button(col1, text="저장", command=self.add_level, padx=10, pady=2,
+        tk.Button(inner, text="저장", command=self.add_level, padx=10, pady=2,
                   cursor="hand2", font=FNT).pack(fill=tk.X)
 
         self.black_entry.bind("<Up>",   lambda e: self._nudge(self.black_var, +1))
@@ -254,62 +268,18 @@ class PDFLevelPreviewApp:
         self.white_var.trace_add("write", self._on_var_change)
         self.root.bind("<Return>", lambda e: self.add_level())
 
-        # ── Separator 1 ──
-        ttk.Separator(controls, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=2)
+        ttk.Separator(inner, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
 
-        # ── Column 2: 저장된 레벨 리스트 ──
-        col2 = tk.Frame(controls, width=320, padx=16, pady=8)
-        col2.pack(side=tk.LEFT, fill=tk.BOTH)
-        col2.pack_propagate(False)
+        # ── 저장된 레벨 리스트 ──
+        self.saved_frame = tk.Frame(inner)
+        self.saved_frame.pack(fill=tk.X)
 
-        saved_canvas = tk.Canvas(col2, highlightthickness=0)
-        saved_scroll = ttk.Scrollbar(col2, orient=tk.VERTICAL, command=saved_canvas.yview)
-        saved_canvas.configure(yscrollcommand=saved_scroll.set)
-        saved_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        ttk.Separator(inner, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
 
-        self.saved_frame = tk.Frame(saved_canvas)
-        self._saved_frame_win = saved_canvas.create_window((0, 0), window=self.saved_frame, anchor=tk.N)
+        # ── 스캔타입 / 분할 / OCR ──
+        self._build_config_panel(inner)
 
-        def _update_saved_scroll(event=None):
-            # 가로 가운데 정렬
-            cw = saved_canvas.winfo_width()
-            saved_canvas.coords(self._saved_frame_win, cw // 2, 0)
-            saved_canvas.configure(scrollregion=saved_canvas.bbox("all"))
-            saved_canvas.update_idletasks()
-            content_h = self.saved_frame.winfo_reqheight()
-            canvas_h = saved_canvas.winfo_height()
-            if content_h > canvas_h:
-                if not saved_scroll.winfo_ismapped():
-                    saved_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-            else:
-                if saved_scroll.winfo_ismapped():
-                    saved_scroll.pack_forget()
-
-        self.saved_frame.bind("<Configure>", _update_saved_scroll)
-        saved_canvas.bind("<Configure>", _update_saved_scroll)
-        self.saved_canvas = saved_canvas
-        self._update_saved_scroll = _update_saved_scroll
-
-        for w in (saved_canvas, self.saved_frame):
-            w.bind("<MouseWheel>", self._on_saved_scroll)
-            w.bind("<Button-4>",   self._on_saved_scroll)
-            w.bind("<Button-5>",   self._on_saved_scroll)
-
-        # ── Separator 2 ──
-        ttk.Separator(controls, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=2)
-
-        # ── Column 3: config 설정 ──
-        col3 = tk.Frame(controls, padx=8, pady=6)
-        col3.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self._build_config_panel(col3)
-
-    def _set_initial_sash(self):
-        self.right_paned.update_idletasks()
-        total_h = self.right_paned.winfo_height()
-        if total_h > 1:
-            # 하단 설정 영역 35% 고정, 나머지 프리뷰
-            bottom_h = int(total_h * 0.35)
-            self.right_paned.sash_place(0, 0, total_h - bottom_h)
+        _bind_scroll_recursive(inner)
 
     # ------------------------------------------------------------------ #
     # Drag & Drop
@@ -824,20 +794,7 @@ class PDFLevelPreviewApp:
         )
         btn.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        for w in (row, rb, btn):
-            w.bind("<MouseWheel>", self._on_saved_scroll)
-            w.bind("<Button-4>",   self._on_saved_scroll)
-            w.bind("<Button-5>",   self._on_saved_scroll)
-        self.saved_canvas.configure(scrollregion=self.saved_canvas.bbox("all"))
-
-    def _on_saved_scroll(self, event):
-        if event.num == 4:
-            self.saved_canvas.yview_scroll(-1, "units")
-        elif event.num == 5:
-            self.saved_canvas.yview_scroll(1, "units")
-        else:
-            self.saved_canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
-        return "break"
+        self._bind_settings_scroll(row)
 
     def _select_level(self, idx, black, white):
         self.selected_level_idx.set(idx)
@@ -854,213 +811,89 @@ class PDFLevelPreviewApp:
     def _build_config_panel(self, parent):
         FNT = UI_FONT
 
-        # 좌우 2열 레이아웃: 왼쪽(스캔타입+분할+저장), 오른쪽(OCR)
-        columns = tk.Frame(parent)
-        columns.pack(expand=True, fill=tk.BOTH)
-
-        # ── 왼쪽 열: 스캔타입, 분할, 저장 (스크롤 가능) ──
-        left_outer = tk.Frame(columns, width=300)
-        left_outer.pack(side=tk.LEFT, fill=tk.Y)
-        left_outer.pack_propagate(False)
-
-        left_canvas = tk.Canvas(left_outer, highlightthickness=0)
-        left_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        left = tk.Frame(left_canvas, padx=16, pady=8)
-        left_win = left_canvas.create_window((0, 0), window=left, anchor=tk.NW)
-
-        def _sync_left_width(event=None):
-            left_canvas.itemconfigure(left_win, width=left_canvas.winfo_width())
-        left_canvas.bind("<Configure>", _sync_left_width)
-
-        left.bind("<Configure>", lambda e: left_canvas.configure(
-            scrollregion=left_canvas.bbox("all")))
-
-        def _on_left_scroll(event):
-            if event.num == 4:
-                left_canvas.yview_scroll(-1, "units")
-            elif event.num == 5:
-                left_canvas.yview_scroll(1, "units")
-            else:
-                left_canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
-            return "break"
-
-        self._left_canvas = left_canvas
-        self._left_inner = left
-        self._on_left_scroll_fn = _on_left_scroll
-
-        def _bind_scroll_recursive(widget):
-            for evt in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
-                widget.bind(evt, _on_left_scroll)
-            for child in widget.winfo_children():
-                _bind_scroll_recursive(child)
-        self._bind_left_scroll_recursive = _bind_scroll_recursive
-
-        for evt in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
-            left_canvas.bind(evt, _on_left_scroll)
-
         # 스캔타입
-        tk.Label(left, text="스캔타입", font=FNT).pack()
-        for txt in ("일반", "고급", "안함"):
-            tk.Radiobutton(left, text=txt, variable=self.scan_type_var, value=txt,
+        tk.Label(parent, text="스캔타입", font=FNT, anchor=tk.W).pack(fill=tk.X)
+        scan_frame = tk.Frame(parent)
+        scan_frame.pack(anchor=tk.W, pady=(0, 8))
+        for txt in ("일반", "고급"):
+            tk.Radiobutton(scan_frame, text=txt, variable=self.scan_type_var, value=txt,
                            cursor="hand2", font=FNT,
                            image=self._ind_tk['rb_off'], selectimage=self._ind_tk['rb_on'],
                            indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
-                           selectcolor=self._bg_color).pack()
-
-        ttk.Separator(left, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=4)
+                           selectcolor=self._bg_color).pack(side=tk.LEFT, padx=(0, 12))
 
         # 분할
-        tk.Checkbutton(left, text="분할", variable=self.is_split_var,
+        tk.Checkbutton(parent, text="분할", variable=self.is_split_var,
                        command=self._toggle_split, cursor="hand2", font=FNT,
                        image=self._ind_tk['cb_off'], selectimage=self._ind_tk['cb_on'],
                        indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
-                       selectcolor=self._bg_color).pack()
-        self.split_radio_frame = tk.Frame(left)
-        self.split_radio_frame.pack()
-        tk.Radiobutton(self.split_radio_frame, text="페이지", variable=self.split_method_var,
-                       value="page", command=self._toggle_split_detail, cursor="hand2", font=FNT,
-                       image=self._ind_tk['rb_off'], selectimage=self._ind_tk['rb_on'],
-                       indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
-                       selectcolor=self._bg_color).pack()
-        tk.Radiobutton(self.split_radio_frame, text="크기", variable=self.split_method_var,
-                       value="size", command=self._toggle_split_detail, cursor="hand2", font=FNT,
-                       image=self._ind_tk['rb_off'], selectimage=self._ind_tk['rb_on'],
-                       indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
-                       selectcolor=self._bg_color).pack()
+                       selectcolor=self._bg_color).pack(anchor=tk.W)
+        self.split_radio_frame = tk.Frame(parent)
+        self.split_radio_frame.pack(anchor=tk.W)
+        for txt, val in (("페이지", "page"), ("크기", "size")):
+            tk.Radiobutton(self.split_radio_frame, text=txt, variable=self.split_method_var,
+                           value=val, command=self._toggle_split_detail, cursor="hand2", font=FNT,
+                           image=self._ind_tk['rb_off'], selectimage=self._ind_tk['rb_on'],
+                           indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
+                           selectcolor=self._bg_color).pack(side=tk.LEFT, padx=(0, 12))
         for w in self.split_radio_frame.winfo_children():
             w.config(state=tk.DISABLED)
 
-        self.split_detail_frame = tk.Frame(left)
+        self.split_detail_frame = tk.Frame(parent)
 
-        self._split_bottom = tk.Frame(left)
+        self._split_bottom = tk.Frame(parent)
         self._split_bottom.pack(fill=tk.X)
-        ttk.Separator(self._split_bottom, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=4)
         tk.Button(self._split_bottom, text="설정 저장", command=self._save_config,
-                  padx=12, pady=4, cursor="hand2", font=FNT).pack(pady=(12, 0))
+                  padx=12, pady=4, cursor="hand2", font=FNT).pack(fill=tk.X, pady=(12, 0))
 
         self._toggle_split_detail()
 
-        # 왼쪽 열 전체 위젯에 스크롤 바인딩
-        _bind_scroll_recursive(left)
+        ttk.Separator(parent, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
 
-        # ── 구분선 ──
-        ttk.Separator(columns, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=2)
-
-        # ── 오른쪽 열: OCR (2열 그리드, 중복 선택, 스크롤 가능) ──
-        right = tk.Frame(columns, pady=4)
-        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(16, 0))
-
-        tk.Label(right, text="OCR", font=FNT).pack(anchor=tk.W)
-        ocr_toggle_frame = tk.Frame(right)
-        ocr_toggle_frame.pack(anchor=tk.W)
-        tk.Radiobutton(ocr_toggle_frame, text="사용", variable=self.ocr_enabled_var,
-                       value=True, command=self._toggle_ocr, cursor="hand2", font=FNT,
-                       image=self._ind_tk['rb_off'], selectimage=self._ind_tk['rb_on'],
-                       indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
-                       selectcolor=self._bg_color).pack(side=tk.LEFT)
-        tk.Radiobutton(ocr_toggle_frame, text="안함", variable=self.ocr_enabled_var,
-                       value=False, command=self._toggle_ocr, cursor="hand2", font=FNT,
-                       image=self._ind_tk['rb_off'], selectimage=self._ind_tk['rb_on'],
-                       indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
-                       selectcolor=self._bg_color).pack(side=tk.LEFT)
+        # OCR
+        tk.Label(parent, text="OCR", font=FNT, anchor=tk.W).pack(fill=tk.X)
+        ocr_toggle_frame = tk.Frame(parent)
         ocr_toggle_frame.pack(anchor=tk.W, pady=(0, 8))
+        for txt, val in (("사용", True), ("안함", False)):
+            tk.Radiobutton(ocr_toggle_frame, text=txt, variable=self.ocr_enabled_var,
+                           value=val, command=self._toggle_ocr, cursor="hand2", font=FNT,
+                           image=self._ind_tk['rb_off'], selectimage=self._ind_tk['rb_on'],
+                           indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
+                           selectcolor=self._bg_color).pack(side=tk.LEFT, padx=(0, 12))
 
-        # OCR 체크박스 목록을 스크롤 가능한 캔버스에 배치
-        ocr_canvas = tk.Canvas(right, highlightthickness=0)
-
-        self.ocr_grid = tk.Frame(ocr_canvas)
-        ocr_grid_win = ocr_canvas.create_window((0, 0), window=self.ocr_grid, anchor=tk.NW)
-
-        def _sync_ocr_grid_width(event=None):
-            ocr_canvas.itemconfigure(ocr_grid_win, width=ocr_canvas.winfo_width())
-        ocr_canvas.bind("<Configure>", _sync_ocr_grid_width)
-        self.ocr_grid.bind("<Configure>", lambda e: ocr_canvas.configure(
-            scrollregion=ocr_canvas.bbox("all")))
-
-        def _on_ocr_scroll(event):
-            # 콘텐츠가 캔버스보다 작으면 스크롤 무시
-            bbox = ocr_canvas.bbox("all")
-            if not bbox:
-                return "break"
-            content_h = bbox[3] - bbox[1]
-            canvas_h = ocr_canvas.winfo_height()
-            if content_h <= canvas_h:
-                return "break"
-            if event.num == 4:
-                ocr_canvas.yview_scroll(-1, "units")
-            elif event.num == 5:
-                ocr_canvas.yview_scroll(1, "units")
-            else:
-                ocr_canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
-            # 맨 위 넘어가지 않도록 보정
-            if float(ocr_canvas.yview()[0]) < 0:
-                ocr_canvas.yview_moveto(0)
-            return "break"
-
-        self._ocr_canvas = ocr_canvas
-
-        def _bind_ocr_scroll_recursive(widget):
-            for evt in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
-                widget.bind(evt, _on_ocr_scroll)
-            for child in widget.winfo_children():
-                _bind_ocr_scroll_recursive(child)
-        self._bind_ocr_scroll_recursive = _bind_ocr_scroll_recursive
-
-        for evt in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
-            ocr_canvas.bind(evt, _on_ocr_scroll)
-
-        ocr_left_group = [
+        # OCR 언어 (1열 세로, 중복 선택) - 스크롤은 바깥 설정 캔버스가 담당
+        self.ocr_grid = tk.Frame(parent)
+        ocr_names = [
             "한국어", "영어", "일본어",
             "중국어 간체", "중국어 번체",
             None,  # 간격
             "한국어 및 영어", "일본어 및 영어",
             "중국어 간체 및 영어", "중국어 번체 및 영어",
-        ]
-        ocr_right_group = [
+            None,  # 간격
             "독일어", "프랑스어", "스페인어",
             "간단한 수학 수식", "단순 화학식", "숫자",
             "Java", "C/C++",
         ]
-
-        all_names = [t for t in ocr_left_group + ocr_right_group if t is not None]
-        for txt in all_names:
-            self.ocr_vars[txt] = tk.BooleanVar(value=False)
-
-        ocr_left_col = tk.Frame(self.ocr_grid)
-        ocr_left_col.pack(side=tk.LEFT, anchor=tk.N, padx=(0, 12))
-        for txt in ocr_left_group:
+        for txt in ocr_names:
             if txt is None:
-                tk.Frame(ocr_left_col, height=8).pack()
-            else:
-                tk.Checkbutton(ocr_left_col, text=txt, variable=self.ocr_vars[txt],
-                               cursor="hand2", font=FNT, anchor=tk.W,
-                               image=self._ind_tk['cb_off'], selectimage=self._ind_tk['cb_on'],
-                               indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
-                               selectcolor=self._bg_color).pack(anchor=tk.W)
-
-        ocr_right_col = tk.Frame(self.ocr_grid)
-        ocr_right_col.pack(side=tk.LEFT, anchor=tk.N)
-        for txt in ocr_right_group:
-            tk.Checkbutton(ocr_right_col, text=txt, variable=self.ocr_vars[txt],
+                tk.Frame(self.ocr_grid, height=8).pack()
+                continue
+            self.ocr_vars[txt] = tk.BooleanVar(value=False)
+            tk.Checkbutton(self.ocr_grid, text=txt, variable=self.ocr_vars[txt],
                            cursor="hand2", font=FNT, anchor=tk.W,
                            image=self._ind_tk['cb_off'], selectimage=self._ind_tk['cb_on'],
                            indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
                            selectcolor=self._bg_color).pack(anchor=tk.W)
 
-        # OCR 체크박스 영역 스크롤 바인딩
-        _bind_ocr_scroll_recursive(self.ocr_grid)
-
-        # 초기 상태: 안함이므로 캔버스 숨김
-        if not self.ocr_enabled_var.get():
-            ocr_canvas.pack_forget()
+        # 초기 상태: 안함이므로 언어 목록 숨김
+        if self.ocr_enabled_var.get():
+            self.ocr_grid.pack(fill=tk.X)
 
     def _toggle_ocr(self):
         if self.ocr_enabled_var.get():
-            self._ocr_canvas.pack(fill=tk.BOTH, expand=True)
-            self._bind_ocr_scroll_recursive(self.ocr_grid)
+            self.ocr_grid.pack(fill=tk.X)
         else:
-            self._ocr_canvas.pack_forget()
+            self.ocr_grid.pack_forget()
 
     def _toggle_split(self):
         if self.is_split_var.get():
@@ -1081,10 +914,10 @@ class PDFLevelPreviewApp:
         FNT = UI_FONT
         method = self.split_method_var.get()
         if method == "page":
-            tk.Label(self.split_detail_frame, text="범위:", font=FNT).pack()
+            tk.Label(self.split_detail_frame, text="범위:", font=FNT, anchor=tk.W).pack(fill=tk.X)
             self.split_range_text = tk.Text(self.split_detail_frame,
-                                            width=24, height=3, font=FNT, wrap=tk.WORD)
-            self.split_range_text.pack(padx=6, pady=2)
+                                            width=16, height=3, font=FNT, wrap=tk.WORD)
+            self.split_range_text.pack(fill=tk.X, pady=2)
             self.split_range_text.insert("1.0", self.split_page_ranges_var.get())
         elif method == "size":
             inner = tk.Frame(self.split_detail_frame)
@@ -1093,7 +926,7 @@ class PDFLevelPreviewApp:
             tk.Entry(inner, textvariable=self.split_size_mb_var,
                      width=8, font=FNT).pack(side=tk.LEFT, padx=6)
         self.split_detail_frame.pack(fill=tk.X, before=self._split_bottom)
-        self._bind_left_scroll_recursive(self.split_detail_frame)
+        self._bind_settings_scroll(self.split_detail_frame)
 
     def _save_config(self):
         if not self.pdf_doc:
@@ -1152,7 +985,9 @@ class PDFLevelPreviewApp:
         except (json.JSONDecodeError, OSError):
             return
 
-        self.scan_type_var.set(cfg.get("scan_type", "일반"))
+        # 구버전 config의 "안함"은 "일반"과 동작이 같으므로 "일반"으로 흡수
+        scan_type = cfg.get("scan_type", "일반")
+        self.scan_type_var.set("일반" if scan_type == "안함" else scan_type)
 
         ocr_val = cfg.get("ocr", False)
         if isinstance(ocr_val, list):
@@ -1187,14 +1022,6 @@ class PDFLevelPreviewApp:
     # ------------------------------------------------------------------ #
     # Slider / entry callbacks
     # ------------------------------------------------------------------ #
-    def _on_black_slider(self, val):
-        self.black_var.set(int(float(val)))
-        self.update_preview()
-
-    def _on_white_slider(self, val):
-        self.white_var.set(int(float(val)))
-        self.update_preview()
-
     def _on_var_change(self, *_):
         if hasattr(self, "_var_after_id"):
             self.root.after_cancel(self._var_after_id)
