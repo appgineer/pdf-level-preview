@@ -219,8 +219,18 @@ class PDFLevelPreviewApp:
         inner = tk.Frame(canvas, padx=16, pady=8)
         inner_win = canvas.create_window((0, 0), window=inner, anchor=tk.NW)
 
-        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(inner_win, width=e.width))
-        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        def _sync_scroll_region(event=None):
+            # scrollregion이 캔버스보다 작으면 Tk가 내용을 세로 가운데로 밀어버린다.
+            # 최소 높이를 캔버스 높이로 잡아 항상 위쪽에 붙인다.
+            height = max(inner.winfo_reqheight(), canvas.winfo_height())
+            canvas.configure(scrollregion=(0, 0, canvas.winfo_width(), height))
+
+        def _on_canvas_configure(event):
+            canvas.itemconfigure(inner_win, width=event.width)
+            _sync_scroll_region()
+
+        canvas.bind("<Configure>", _on_canvas_configure)
+        inner.bind("<Configure>", _sync_scroll_region)
 
         def _on_settings_scroll(event):
             if event.num == 4:
