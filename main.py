@@ -1062,11 +1062,12 @@ class PDFLevelPreviewApp:
 
 
 def _cleanup_temp_files():
-    """이전 실행이 임시폴더에 남긴 파일 정리"""
+    """임시폴더에 남은 찌꺼기 파일 정리 (이전 실행 + ABBYY)"""
     tmp_dir = tempfile.gettempdir()
     patterns = (
         f"{TEMP_PREFIX}*.png",   # 종료 시 finally를 못 타고 남은 썸네일 임시파일
         "debug_page_*.png",      # 구버전 디버그 코드 잔존물
+        "xml_file*.xml",         # ABBYY FineReader 찌꺼기
     )
     for pattern in patterns:
         for path in glob.glob(os.path.join(tmp_dir, pattern)):
