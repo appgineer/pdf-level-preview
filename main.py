@@ -8,6 +8,7 @@ import sys
 import threading
 import subprocess
 import tempfile
+import glob
 import io
 from concurrent.futures import ThreadPoolExecutor
 
@@ -23,6 +24,10 @@ THUMB_MARGIN = 6
 INDICATOR_SIZE = 24  # 체크박스/라디오버튼 인디케이터 크기
 # 내장 이미지가 없는 페이지(벡터/텍스트)의 렌더 스케일. 1.0 = 72 DPI
 BASE_SCALE = 8  # 576 DPI
+# 레벨 적용 결과 캐시 상한. 100% 확대 시 항목당 ~49MB
+PREVIEW_CACHE_MAX = 8
+# 임시폴더에 남기는 파일 접두사 (시작 시 정리 대상 식별용)
+TEMP_PREFIX = "pdflvl_"
 
 
 def _make_indicator_images():
@@ -357,7 +362,7 @@ class PDFLevelPreviewApp:
         def render_one_page(i):
             if gen != self._thumb_generation:
                 return
-            tmp = tempfile.mktemp(suffix='.png')
+            tmp = tempfile.mktemp(prefix=TEMP_PREFIX, suffix='.png')
             try:
                 script = (
                     "import fitz,sys;"
@@ -561,13 +566,17 @@ class PDFLevelPreviewApp:
     # Rendering
     # ------------------------------------------------------------------ #
     def _get_native_scale(self, page_idx):
-        """내장 이미지의 원본 해상도에 맞는 정확한 스케일 계산"""
+        """페이지에서 가장 해상도가 높은 이미지에 맞는 스케일 계산"""
         page = self.pdf_doc[page_idx]
         images = page.get_images(full=True)
         if images:
-            img_w = images[0][2]
-            page_w = page.rect.width
-            return img_w / page_w
+            # get_images() 순서는 리소스 등록 순이라 첫 항목이 스캔 얼룩 같은
+            # 작은 조각일 수 있다. 가장 큰 이미지를 기준으로 삼는다.
+            max_w = max(img[2] for img in images)
+            scale = max_w / page.rect.width
+            # 페이지 폭(pt)보다 픽셀이 적으면 페이지 전체를 담은 이미지가 아니다
+            if scale >= 1:
+                return scale
         return BASE_SCALE
 
     def _render_page(self, page_idx, zoom=None):
@@ -679,7 +688,9 @@ class PDFLevelPreviewApp:
 
         key = (self.current_page, black, white, zoom_pct)
         if key in self.preview_cache:
-            self.current_img = self.preview_cache[key]
+            # 최근 사용으로 이동 (오래된 것부터 버리기 위해)
+            self.current_img = self.preview_cache.pop(key)
+            self.preview_cache[key] = self.current_img
             self._draw_preview()
             return
 
@@ -692,12 +703,6 @@ class PDFLevelPreviewApp:
             self.base_render_cache[page_idx] = self._render_page(page_idx)
 
         base = self.base_render_cache[page_idx]
-
-        # 디버그: 원본 렌더링 이미지 저장 (첫 렌더링 시)
-        debug_path = os.path.join(tempfile.gettempdir(), f"debug_page_{page_idx}.png")
-        if not os.path.exists(debug_path):
-            base.save(debug_path)
-            print(f"[디버그] 렌더링 이미지 저장: {debug_path} ({base.width}x{base.height})")
 
         # 레벨 적용
         if black == 0 and white == 255:
@@ -715,6 +720,8 @@ class PDFLevelPreviewApp:
             result = leveled.resize((display_w, display_h), Image.LANCZOS)
 
         self.preview_cache[key] = result
+        while len(self.preview_cache) > PREVIEW_CACHE_MAX:
+            self.preview_cache.pop(next(iter(self.preview_cache)))
         self.current_img = result
         self._draw_preview()
         self.render_status.config(text=f"{base.width}x{base.height} ({zoom_pct}%)")
@@ -1054,7 +1061,23 @@ class PDFLevelPreviewApp:
         self.root.destroy()
 
 
+def _cleanup_temp_files():
+    """이전 실행이 임시폴더에 남긴 파일 정리"""
+    tmp_dir = tempfile.gettempdir()
+    patterns = (
+        f"{TEMP_PREFIX}*.png",   # 종료 시 finally를 못 타고 남은 썸네일 임시파일
+        "debug_page_*.png",      # 구버전 디버그 코드 잔존물
+    )
+    for pattern in patterns:
+        for path in glob.glob(os.path.join(tmp_dir, pattern)):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
 def main():
+    _cleanup_temp_files()
     try:
         from tkinterdnd2 import TkinterDnD
         root = TkinterDnD.Tk()
