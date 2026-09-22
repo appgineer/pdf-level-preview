@@ -10,6 +10,9 @@ import subprocess
 import tempfile
 import glob
 import io
+import re
+import queue
+import multiprocessing
 from concurrent.futures import ThreadPoolExecutor
 
 # 100% = 원본 이미지 픽셀 1:1
@@ -27,6 +30,8 @@ INDICATOR_SIZE = 24  # 체크박스/라디오버튼 인디케이터 크기
 BASE_SCALE = 8  # 576 DPI
 # 레벨 적용 결과 캐시 상한. 100% 확대 시 항목당 ~49MB
 PREVIEW_CACHE_MAX = 8
+# 렌더 워커의 원본 해상도 캐시 상한 (현재 + 앞/뒤 페이지). 600dpi A4 RGB 기준 항목당 ~104MB
+BASE_CACHE_MAX = 3
 # 임시폴더에 남기는 파일 접두사 (시작 시 정리 대상 식별용)
 TEMP_PREFIX = "pdflvl_"
 
@@ -68,6 +73,135 @@ def _make_indicator_images():
     return imgs
 
 
+# ---------------------------------------------------------------------- #
+# Rendering (렌더 워커 프로세스에서 사용)
+# ---------------------------------------------------------------------- #
+def _get_native_scale(doc, page_idx):
+    """페이지에서 가장 해상도가 높은 이미지에 맞는 스케일 계산"""
+    page = doc[page_idx]
+    images = page.get_images(full=True)
+    if images:
+        # get_images() 순서는 리소스 등록 순이라 첫 항목이 스캔 얼룩 같은
+        # 작은 조각일 수 있다. 가장 큰 이미지를 기준으로 삼는다.
+        max_w = max(img[2] for img in images)
+        scale = max_w / page.rect.width
+        # 페이지 폭(pt)보다 픽셀이 적으면 페이지 전체를 담은 이미지가 아니다
+        if scale >= 1:
+            return scale
+    return BASE_SCALE
+
+
+def _render_page(doc, page_idx):
+    zoom = _get_native_scale(doc, page_idx)
+    page = doc[page_idx]
+    mat = fitz.Matrix(zoom, zoom)
+    pix = page.get_pixmap(matrix=mat)
+    return Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+
+
+def apply_levels(image, black, white):
+    black = max(0, min(255, int(black)))
+    white = max(0, min(255, int(white)))
+    span = max(1, white - black)
+    lut = [
+        0 if i <= black else
+        255 if i >= white else
+        int((i - black) / span * 255)
+        for i in range(256)
+    ]
+    channels = len(image.getbands())
+    return image.point(lut * channels)
+
+
+def _preview_worker(req_q, res_q):
+    """미리보기 렌더링 전용 프로세스.
+
+    원본 해상도 렌더 → 레벨 → 축소가 무거워서 화면 스레드에서 하면 클릭마다 멈춘다.
+    PyMuPDF는 스레드에서 쓸 수 없으므로 썸네일처럼 별도 프로세스로 돌린다.
+    요청: (pdf_path, key, need). key = (page, black, white, zoom, cw, ch), zoom 0 = 맞춤.
+    응답: (pdf_path, key, mode, size, bytes, 상태문구). 실패 시 mode/size/bytes는 None.
+    """
+    doc = None
+    path = None
+    bases = {}   # page_idx -> 원본 해상도 이미지 (오래된 것부터 버림)
+    sent = set()  # 이미 보낸 key (이웃 미리 렌더 중복 방지)
+
+    def render(key):
+        try:
+            _render(key)
+        except Exception as e:
+            res_q.put((path, key, None, None, None, f"렌더링 실패: {e}"))
+
+    def _render(key):
+        page_idx, black, white, zoom_pct, cw, ch = key
+        if page_idx in bases:
+            base = bases.pop(page_idx)
+        else:
+            base = _render_page(doc, page_idx)
+        bases[page_idx] = base
+        while len(bases) > BASE_CACHE_MAX:
+            bases.pop(next(iter(bases)))
+
+        if zoom_pct == 0:
+            # 맞춤: 캔버스에 페이지가 딱 맞는 zoom 퍼센트
+            zoom_pct = min(cw / base.width, ch / base.height) * 100
+
+        # 레벨 적용
+        if black == 0 and white == 255:
+            leveled = base
+        else:
+            leveled = apply_levels(base, black, white)
+
+        # zoom 적용 (100% = 원본 픽셀 1:1, 축소/확대)
+        if zoom_pct == 100:
+            result = leveled
+        else:
+            scale = zoom_pct / 100.0
+            display_w = int(leveled.width * scale)
+            display_h = int(leveled.height * scale)
+            result = leveled.resize((display_w, display_h), Image.LANCZOS)
+
+        sent.add(key)
+        res_q.put((path, key, result.mode, result.size, result.tobytes(),
+                   f"{base.width}x{base.height} ({zoom_pct}%)"))
+
+    while True:
+        msg = req_q.get()
+        # 밀린 요청은 버리고 가장 최근 것만 처리
+        while True:
+            try:
+                msg = req_q.get_nowait()
+            except queue.Empty:
+                break
+        if msg is None:
+            break
+        pdf_path, key, need = msg
+        if pdf_path != path:
+            try:
+                new_doc = fitz.open(pdf_path)
+            except Exception as e:
+                res_q.put((pdf_path, key, None, None, None, f"렌더링 실패: {e}"))
+                continue
+            if doc is not None:
+                doc.close()
+            doc, path = new_doc, pdf_path
+            bases.clear()
+            sent.clear()
+        if need:
+            render(key)
+        # 한가할 때 다음/이전 페이지를 미리 렌더해 두면 순서대로 넘길 때 바로 보인다
+        for nb in (key[0] + 1, key[0] - 1):
+            nb_key = (nb,) + key[1:]
+            if req_q.empty() and 0 <= nb < len(doc) and nb_key not in sent:
+                render(nb_key)
+
+
+def _normalize_page_ranges(text):
+    """'1-22,  \n23-30 ,\n31-50,' → '1-22,23-30,31-50'. 쉼표·공백·줄바꿈 모두 구분자로 본다."""
+    text = re.sub(r"\s*-\s*", "-", text)  # '1 - 22' → '1-22'
+    return ",".join(p for p in re.split(r"[,\s]+", text) if p)
+
+
 class PDFLevelPreviewApp:
     def __init__(self, root, has_dnd=False):
         self.root = root
@@ -85,8 +219,7 @@ class PDFLevelPreviewApp:
         self.current_page = 0
         self.saved_levels = []
         self.thumbnail_cache = {}
-        self.preview_cache = {}
-        self.base_render_cache = {}  # page_idx -> 600 DPI PIL Image
+        self.preview_cache = {}  # key -> (PIL Image, 상태문구)
         self.thumbnail_photo_refs = {}
         self._drawn_pages = {}
         self._page_count = 0
@@ -104,6 +237,17 @@ class PDFLevelPreviewApp:
         # Async rendering state
         self._thumb_generation = 0
         self._pdf_path = None
+        self._wanted_key = None
+        self._pending_req = None  # 워커에 보낸 마지막 렌더 요청 (결과 대기 중)
+
+        # 미리보기 렌더 워커 (앱 수명 동안 하나)
+        self._render_req_q = multiprocessing.Queue()
+        self._render_res_q = multiprocessing.Queue()
+        self._render_proc = multiprocessing.Process(
+            target=_preview_worker, args=(self._render_req_q, self._render_res_q), daemon=True
+        )
+        self._render_proc.start()
+        threading.Thread(target=self._read_preview_results, daemon=True).start()
 
         # Config variables
         self.selected_level_idx = tk.IntVar(value=-1)
@@ -300,7 +444,8 @@ class PDFLevelPreviewApp:
         self.white_entry.bind("<Down>", lambda e: self._nudge(self.white_var, -1))
         self.black_var.trace_add("write", self._on_var_change)
         self.white_var.trace_add("write", self._on_var_change)
-        self.root.bind("<Return>", lambda e: self.add_level())
+        # 분할 범위 입력칸(Text)의 줄바꿈 Enter는 레벨 추가로 보내지 않는다
+        self.root.bind("<Return>", lambda e: None if isinstance(e.widget, tk.Text) else self.add_level())
 
         ttk.Separator(self.level_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
 
@@ -349,7 +494,6 @@ class PDFLevelPreviewApp:
         self._pdf_path = path
         self.thumbnail_cache.clear()
         self.preview_cache.clear()
-        self.base_render_cache.clear()
         self.current_page = 0
         self.zoom_idx = ZOOM_DEFAULT_IDX
         self._update_zoom_label()
@@ -583,31 +727,6 @@ class PDFLevelPreviewApp:
         self._draw_visible_thumbs()
 
     # ------------------------------------------------------------------ #
-    # Rendering
-    # ------------------------------------------------------------------ #
-    def _get_native_scale(self, page_idx):
-        """페이지에서 가장 해상도가 높은 이미지에 맞는 스케일 계산"""
-        page = self.pdf_doc[page_idx]
-        images = page.get_images(full=True)
-        if images:
-            # get_images() 순서는 리소스 등록 순이라 첫 항목이 스캔 얼룩 같은
-            # 작은 조각일 수 있다. 가장 큰 이미지를 기준으로 삼는다.
-            max_w = max(img[2] for img in images)
-            scale = max_w / page.rect.width
-            # 페이지 폭(pt)보다 픽셀이 적으면 페이지 전체를 담은 이미지가 아니다
-            if scale >= 1:
-                return scale
-        return BASE_SCALE
-
-    def _render_page(self, page_idx, zoom=None):
-        if zoom is None:
-            zoom = self._get_native_scale(page_idx)
-        page = self.pdf_doc[page_idx]
-        mat = fitz.Matrix(zoom, zoom)
-        pix = page.get_pixmap(matrix=mat)
-        return Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-
-    # ------------------------------------------------------------------ #
     # Page selection
     # ------------------------------------------------------------------ #
     def select_page(self, page_idx):
@@ -616,44 +735,11 @@ class PDFLevelPreviewApp:
         self.update_preview()
 
     # ------------------------------------------------------------------ #
-    # Level adjustment
-    # ------------------------------------------------------------------ #
-    def apply_levels(self, image, black, white):
-        black = max(0, min(255, int(black)))
-        white = max(0, min(255, int(white)))
-        span = max(1, white - black)
-        lut = [
-            0 if i <= black else
-            255 if i >= white else
-            int((i - black) / span * 255)
-            for i in range(256)
-        ]
-        channels = len(image.getbands())
-        return image.point(lut * channels)
-
-    # ------------------------------------------------------------------ #
     # Zoom
     # ------------------------------------------------------------------ #
     def _current_zoom_pct(self):
         """0이면 fit 모드, 아니면 고정 퍼센트"""
         return ZOOM_LEVELS[self.zoom_idx]
-
-    def _fit_zoom_pct(self):
-        """캔버스에 페이지가 딱 맞는 zoom 퍼센트 계산"""
-        if self.current_img is None and self.current_page in self.base_render_cache:
-            base = self.base_render_cache[self.current_page]
-        elif self.pdf_doc:
-            page_idx = self.current_page
-            if page_idx not in self.base_render_cache:
-                self.base_render_cache[page_idx] = self._render_page(page_idx)
-            base = self.base_render_cache[page_idx]
-        else:
-            return 25
-        cw = max(1, self.preview_canvas.winfo_width())
-        ch = max(1, self.preview_canvas.winfo_height())
-        scale_w = cw / base.width
-        scale_h = ch / base.height
-        return min(scale_w, scale_h) * 100
 
     def _update_zoom_label(self):
         pct = self._current_zoom_pct()
@@ -703,48 +789,63 @@ class PDFLevelPreviewApp:
 
         black = max(0, min(255, black))
         white = max(0, min(255, white))
-        raw_pct = self._current_zoom_pct()
-        zoom_pct = self._fit_zoom_pct() if raw_pct == 0 else raw_pct
+        zoom_pct = self._current_zoom_pct()
+        # 맞춤 모드는 캔버스 크기에 따라 결과가 달라지므로 키에 포함
+        cw = ch = 0
+        if zoom_pct == 0:
+            cw = max(1, self.preview_canvas.winfo_width())
+            ch = max(1, self.preview_canvas.winfo_height())
 
-        key = (self.current_page, black, white, zoom_pct)
+        key = (self.current_page, black, white, zoom_pct, cw, ch)
+        self._wanted_key = key
         if key in self.preview_cache:
             # 최근 사용으로 이동 (오래된 것부터 버리기 위해)
-            self.current_img = self.preview_cache.pop(key)
-            self.preview_cache[key] = self.current_img
+            self.current_img, status = self.preview_cache.pop(key)
+            self.preview_cache[key] = (self.current_img, status)
             self._draw_preview()
+            self.render_status.config(text=status)
+            # 이웃 페이지 미리 렌더만 시킨다
+            self._pending_req = None
+            self._render_req_q.put((self._pdf_path, key, False))
             return
 
-        page_idx = self.current_page
+        self.render_status.config(text="원본 해상도 렌더링 중...")
+        req = (self._pdf_path, key)
+        if req == self._pending_req:
+            return  # 같은 요청이 이미 렌더 중 (화살표 즉시 갱신 + 지연 갱신 중복 등)
+        # 렌더는 워커가 한다. 결과는 _on_preview_rendered로 들어온다
+        self._pending_req = req
+        self._render_req_q.put((self._pdf_path, key, True))
 
-        # 원본 해상도로 렌더링 (캐시)
-        if page_idx not in self.base_render_cache:
-            self.render_status.config(text="원본 해상도 렌더링 중...")
-            self.root.update_idletasks()
-            self.base_render_cache[page_idx] = self._render_page(page_idx)
+    def _read_preview_results(self):
+        """수신 스레드: 워커 결과를 받아 화면 스레드로 넘긴다"""
+        while True:
+            try:
+                path, key, mode, size, data, status = self._render_res_q.get()
+            except (EOFError, OSError):
+                return
+            img = Image.frombytes(mode, size, data) if data is not None else None
+            try:
+                self.root.after(0, lambda p=path, k=key, i=img, s=status:
+                                self._on_preview_rendered(p, k, i, s))
+            except (RuntimeError, tk.TclError):  # 창이 이미 닫힘
+                return
 
-        base = self.base_render_cache[page_idx]
-
-        # 레벨 적용
-        if black == 0 and white == 255:
-            leveled = base
-        else:
-            leveled = self.apply_levels(base, black, white)
-
-        # zoom 적용 (100% = 원본 픽셀 1:1, 축소/확대)
-        if zoom_pct == 100:
-            result = leveled
-        else:
-            scale = zoom_pct / 100.0
-            display_w = int(leveled.width * scale)
-            display_h = int(leveled.height * scale)
-            result = leveled.resize((display_w, display_h), Image.LANCZOS)
-
-        self.preview_cache[key] = result
-        while len(self.preview_cache) > PREVIEW_CACHE_MAX:
-            self.preview_cache.pop(next(iter(self.preview_cache)))
-        self.current_img = result
-        self._draw_preview()
-        self.render_status.config(text=f"{base.width}x{base.height} ({zoom_pct}%)")
+    def _on_preview_rendered(self, path, key, img, status):
+        if (path, key) == self._pending_req:
+            self._pending_req = None
+        if path != self._pdf_path:
+            return
+        if img is not None:
+            self.preview_cache[key] = (img, status)
+            while len(self.preview_cache) > PREVIEW_CACHE_MAX:
+                self.preview_cache.pop(next(iter(self.preview_cache)))
+        if key != self._wanted_key:
+            return
+        if img is not None:
+            self.current_img = img
+            self._draw_preview()
+        self.render_status.config(text=status)
 
     def _draw_preview(self):
         if self.current_img is None:
@@ -987,7 +1088,7 @@ class PDFLevelPreviewApp:
             "ocr_language": [name for name, var in self.ocr_vars.items() if var.get()],
             "is_split": self.is_split_var.get(),
             "split_method": self.split_method_var.get() if self.is_split_var.get() else "none",
-            "split_page_ranges": self.split_range_text.get("1.0", tk.END).strip() if self.is_split_var.get() and self.split_method_var.get() == "page" and self.split_range_text else "",
+            "split_page_ranges": _normalize_page_ranges(self.split_range_text.get("1.0", tk.END)) if self.is_split_var.get() and self.split_method_var.get() == "page" and self.split_range_text else "",
             "split_size_mb": int(self.split_size_mb_var.get()) if self.is_split_var.get() and self.split_method_var.get() == "size" else 0,
         }
 
@@ -1074,6 +1175,7 @@ class PDFLevelPreviewApp:
 
     def _on_close(self):
         self._thumb_generation += 1
+        self._render_proc.terminate()
         if self.pdf_doc:
             self.pdf_doc.close()
             self.pdf_doc = None
