@@ -362,6 +362,9 @@ class PDFLevelPreviewApp:
         self._rotate_redraw_id = None
         self._rotate_drag_photo = None
         self._syncing_edit = False  # 코드에서 편집 입력칸을 채우는 중 (되먹임 방지)
+        # 현재 페이지의 입력 전 자르기 값. 입력은 바로 현재 페이지에 들어가므로,
+        # [적용] 범위에 현재 페이지가 없으면 이 값으로 되돌린다
+        self._crop_before_edit = [0.0, 0.0, 0.0, 0.0]
 
         # 미리보기 렌더 워커 (앱 수명 동안 하나)
         self._render_req_q = multiprocessing.Queue()
@@ -701,6 +704,7 @@ class PDFLevelPreviewApp:
         self.thumbnail_cache.clear()
         self.preview_cache.clear()
         self.page_edits.clear()
+        self._crop_before_edit = [0.0, 0.0, 0.0, 0.0]
         self._edits_dirty = False
         self._shown_key = None
         self.current_page = 0
@@ -944,6 +948,7 @@ class PDFLevelPreviewApp:
     # ------------------------------------------------------------------ #
     def select_page(self, page_idx):
         self.current_page = page_idx
+        self._crop_before_edit = self._page_edit(page_idx)["crop"]
         self._draw_selection()
         self._sync_edit_panel()
         self.update_preview()
@@ -1224,6 +1229,8 @@ class PDFLevelPreviewApp:
         except ValueError:
             return  # 입력 중인 빈 칸이나 "-"만 친 상태는 무시
         self._set_page_edit(self.current_page, angle=angle)
+        self._set_drag_mode("rotate")  # 각도를 입력하면 미리보기를 끌어서 돌릴 수 있게
+        self._draw_crop_overlay()  # 선 편집이 꺼졌으니 테두리 선은 지운다
         self._redraw_current_thumb()
         self._schedule_quick_rotation()  # 바로 임시 화면을 띄우고
         self._on_var_change()  # 정식 미리보기는 레벨 입력처럼 잠깐 뒤에 갱신
@@ -1338,8 +1345,15 @@ class PDFLevelPreviewApp:
             return  # 입력 중인 빈 칸/잘못된 값은 무시
         w, h = self._page_disp_size(self.current_page)
         self._set_page_edit(self.current_page, crop=_clamp_margins(margins, w, h))
+        self._set_drag_mode("crop")  # 여백을 입력하면 선을 끌어서 맞출 수 있게
         self._leave_crop_view()
         self._draw_crop_overlay()
+
+    def _set_drag_mode(self, mode):
+        """미리보기 드래그 용도: "crop" = 선 편집, "rotate" = 드래그 회전. 둘 중 하나만 켠다"""
+        self.crop_edit_var.set(mode == "crop")
+        self.rotate_drag_var.set(mode == "rotate")
+        self.preview_canvas.config(cursor="")
 
     def _on_crop_edit_toggle(self):
         if self.crop_edit_var.get():
@@ -1384,6 +1398,11 @@ class PDFLevelPreviewApp:
         for idx in pages:
             w, h = self._page_disp_size(idx)
             self._set_page_edit(idx, crop=_clamp_margins(margins, w, h))
+        if self.current_page not in pages:
+            # 예: 짝수 페이지에서 입력하고 "홀수"로 적용 → 보고 있던 짝수 페이지는 잘리지 않게
+            self._set_page_edit(self.current_page, crop=self._crop_before_edit)
+            self._sync_edit_panel()
+        self._crop_before_edit = self._page_edit(self.current_page)["crop"]
         self.crop_edit_var.set(False)
         self._crop_view = True
         self.preview_canvas.config(cursor="")
@@ -1397,6 +1416,7 @@ class PDFLevelPreviewApp:
             return
         for idx in list(self.page_edits):
             self._set_page_edit(idx, crop=[0.0, 0.0, 0.0, 0.0])
+        self._crop_before_edit = [0.0, 0.0, 0.0, 0.0]
         self._sync_edit_panel()
         self._leave_crop_view()
         self._draw_crop_overlay()
