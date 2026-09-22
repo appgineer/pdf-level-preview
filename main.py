@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk, filedialog
+from tkinter import ttk, filedialog, font as tkfont
 from PIL import Image, ImageTk, ImageDraw
 import fitz  # PyMuPDF
 import json
@@ -20,7 +20,8 @@ UI_FONT = ("맑은 고딕", 20)
 UI_FONT_SMALL = ("맑은 고딕", 18)
 UI_FONT_BOLD = ("맑은 고딕", 20, "bold")
 THUMB_W = 280
-THUMB_MARGIN = 6
+THUMB_MARGIN = 16
+THUMB_LABEL_FONT = ("맑은 고딕", 16)
 INDICATOR_SIZE = 24  # 체크박스/라디오버튼 인디케이터 크기
 # 내장 이미지가 없는 페이지(벡터/텍스트)의 렌더 스케일. 1.0 = 72 DPI
 BASE_SCALE = 8  # 576 DPI
@@ -158,7 +159,9 @@ class PDFLevelPreviewApp:
 
         # ── Left: thumbnail panel ──────────────────────────────────────
         left = tk.Frame(paned, bd=1, relief=tk.SUNKEN)
-        paned.add(left, minsize=160, width=320)
+        # 초기 2열. +60 = 스크롤바/테두리 여유
+        paned.add(left, minsize=160, width=2 * (THUMB_W + THUMB_MARGIN * 2) + 60)
+        self._thumb_label_h = tkfont.Font(font=THUMB_LABEL_FONT).metrics("linespace")
 
         self.thumb_canvas = tk.Canvas(left, bg="#f0f0f0")
         thumb_vscroll = ttk.Scrollbar(left, orient=tk.VERTICAL, command=self.thumb_canvas.yview)
@@ -257,22 +260,38 @@ class PDFLevelPreviewApp:
         for evt in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
             canvas.bind(evt, _on_settings_scroll)
 
-        # ── 레벨 조정 ──
-        r_black = tk.Frame(inner)
+        # ── 스캔타입 ──
+        tk.Label(inner, text="스캔타입", font=FNT, anchor=tk.W).pack(fill=tk.X)
+        scan_frame = tk.Frame(inner)
+        scan_frame.pack(anchor=tk.W, pady=(0, 8))
+        for txt in ("일반", "고급"):
+            tk.Radiobutton(scan_frame, text=txt, variable=self.scan_type_var, value=txt,
+                           command=self._toggle_scan_type, cursor="hand2", font=FNT,
+                           image=self._ind_tk['rb_off'], selectimage=self._ind_tk['rb_on'],
+                           indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
+                           selectcolor=self._bg_color).pack(side=tk.LEFT, padx=(0, 12))
+
+        self._scan_sep = ttk.Separator(inner, orient=tk.HORIZONTAL)
+        self._scan_sep.pack(fill=tk.X, pady=10)
+
+        # ── 레벨 조정 (고급 전용, _toggle_scan_type이 표시/숨김) ──
+        self.level_frame = tk.Frame(inner)
+
+        r_black = tk.Frame(self.level_frame)
         r_black.pack(fill=tk.X, pady=(4, 8))
         tk.Label(r_black, text="검은색:", font=FNT, width=6, anchor=tk.E).pack(side=tk.LEFT)
         self.black_var = tk.IntVar(value=0)
         self.black_entry = tk.Entry(r_black, textvariable=self.black_var, width=6, font=FNT)
         self.black_entry.pack(side=tk.LEFT, padx=6)
 
-        r_white = tk.Frame(inner)
+        r_white = tk.Frame(self.level_frame)
         r_white.pack(fill=tk.X, pady=(0, 12))
         tk.Label(r_white, text="흰색:", font=FNT, width=6, anchor=tk.E).pack(side=tk.LEFT)
         self.white_var = tk.IntVar(value=255)
         self.white_entry = tk.Entry(r_white, textvariable=self.white_var, width=6, font=FNT)
         self.white_entry.pack(side=tk.LEFT, padx=6)
 
-        tk.Button(inner, text="저장", command=self.add_level, padx=10, pady=2,
+        tk.Button(self.level_frame, text="확인", command=self.add_level, padx=10, pady=2,
                   cursor="hand2", font=FNT).pack(fill=tk.X)
 
         self.black_entry.bind("<Up>",   lambda e: self._nudge(self.black_var, +1))
@@ -283,16 +302,17 @@ class PDFLevelPreviewApp:
         self.white_var.trace_add("write", self._on_var_change)
         self.root.bind("<Return>", lambda e: self.add_level())
 
-        ttk.Separator(inner, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
+        ttk.Separator(self.level_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
 
         # ── 저장된 레벨 리스트 ──
-        self.saved_frame = tk.Frame(inner)
+        self.saved_frame = tk.Frame(self.level_frame)
         self.saved_frame.pack(fill=tk.X)
 
-        ttk.Separator(inner, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
+        ttk.Separator(self.level_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
 
-        # ── 스캔타입 / 분할 / OCR ──
+        # ── 분할 / OCR ──
         self._build_config_panel(inner)
+        self._toggle_scan_type()
 
         _bind_scroll_recursive(inner)
 
@@ -381,9 +401,9 @@ class PDFLevelPreviewApp:
                     return
                 raw = Image.open(tmp)
                 raw.load()
-                ratio = THUMB_W / raw.width
-                th = int(raw.height * ratio)
-                img = raw.resize((THUMB_W, th), Image.LANCZOS)
+                # 세로로 긴 페이지가 셀 밖으로 넘치지 않도록 박스 안에 맞춘다
+                ratio = min(THUMB_W / raw.width, int(THUMB_W * 1.4) / raw.height)
+                img = raw.resize((int(raw.width * ratio), int(raw.height * ratio)), Image.LANCZOS)
                 self.thumbnail_cache[i] = img
                 if gen != self._thumb_generation:
                     return
@@ -418,7 +438,7 @@ class PDFLevelPreviewApp:
         total_grid_w = self._thumb_cols * col_w
         self._thumb_offset_x = max(0, (canvas_w - total_grid_w) // 2)
 
-        self._thumb_cell_h = int(THUMB_W * 1.4) + 20 + THUMB_MARGIN * 2
+        self._thumb_cell_h = int(THUMB_W * 1.4) + 8 + self._thumb_label_h + THUMB_MARGIN * 2
         rows = (self._page_count + self._thumb_cols - 1) // self._thumb_cols if self._page_count > 0 else 0
         self._thumb_total_height = rows * self._thumb_cell_h
 
@@ -497,13 +517,13 @@ class PDFLevelPreviewApp:
             items.append(rect_id)
             txt_id = self.thumb_canvas.create_text(
                 x + THUMB_W // 2, y + thumb_h // 2,
-                text=f"p.{idx + 1}", font=("맑은 고딕", 16), fill="#888"
+                text=f"p.{idx + 1}", font=THUMB_LABEL_FONT, fill="#888"
             )
             items.append(txt_id)
 
         label_id = self.thumb_canvas.create_text(
-            x + THUMB_W // 2, y + thumb_h + 10,
-            text=f"p.{idx + 1}", font=("맑은 고딕", 16), fill="#000"
+            x + THUMB_W // 2, y + thumb_h + 8, anchor=tk.N,
+            text=f"p.{idx + 1}", font=THUMB_LABEL_FONT, fill="#000"
         )
         items.append(label_id)
 
@@ -533,7 +553,7 @@ class PDFLevelPreviewApp:
 
         for idx in self._drawn_pages:
             x, y = self._get_thumb_pos(idx)
-            if x <= cx <= x + THUMB_W and y <= cy <= y + thumb_h + 20:
+            if x <= cx <= x + THUMB_W and y <= cy <= y + thumb_h + 8 + self._thumb_label_h:
                 self.select_page(idx)
                 return
 
@@ -775,6 +795,9 @@ class PDFLevelPreviewApp:
     # Saved levels
     # ------------------------------------------------------------------ #
     def add_level(self):
+        # 레벨 입력은 고급에서만 보이므로, 일반일 때 Enter로 숨겨진 목록에 쌓이지 않게
+        if self.scan_type_var.get() != "고급":
+            return
         try:
             black = int(self.black_var.get())
             white = int(self.white_var.get())
@@ -827,17 +850,6 @@ class PDFLevelPreviewApp:
     # ------------------------------------------------------------------ #
     def _build_config_panel(self, parent):
         FNT = UI_FONT
-
-        # 스캔타입
-        tk.Label(parent, text="스캔타입", font=FNT, anchor=tk.W).pack(fill=tk.X)
-        scan_frame = tk.Frame(parent)
-        scan_frame.pack(anchor=tk.W, pady=(0, 8))
-        for txt in ("일반", "고급"):
-            tk.Radiobutton(scan_frame, text=txt, variable=self.scan_type_var, value=txt,
-                           cursor="hand2", font=FNT,
-                           image=self._ind_tk['rb_off'], selectimage=self._ind_tk['rb_on'],
-                           indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
-                           selectcolor=self._bg_color).pack(side=tk.LEFT, padx=(0, 12))
 
         # 분할
         tk.Checkbutton(parent, text="분할", variable=self.is_split_var,
@@ -905,6 +917,12 @@ class PDFLevelPreviewApp:
         # 초기 상태: 안함이므로 언어 목록 숨김
         if self.ocr_enabled_var.get():
             self.ocr_grid.pack(fill=tk.X)
+
+    def _toggle_scan_type(self):
+        if self.scan_type_var.get() == "고급":
+            self.level_frame.pack(fill=tk.X, after=self._scan_sep)
+        else:
+            self.level_frame.pack_forget()
 
     def _toggle_ocr(self):
         if self.ocr_enabled_var.get():
@@ -1005,6 +1023,7 @@ class PDFLevelPreviewApp:
         # 구버전 config의 "안함"은 "일반"과 동작이 같으므로 "일반"으로 흡수
         scan_type = cfg.get("scan_type", "일반")
         self.scan_type_var.set("일반" if scan_type == "안함" else scan_type)
+        self._toggle_scan_type()
 
         ocr_val = cfg.get("ocr", False)
         if isinstance(ocr_val, list):
