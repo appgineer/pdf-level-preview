@@ -22,6 +22,9 @@ ZOOM_LEVELS = [0, 50, 75, 100, 125]  # 0 = fit
 ZOOM_DEFAULT_IDX = 0
 # 미리보기에서 페이지 둘레 최소 여백 (px). 맞춤도 이 여백을 뺀 영역에 맞춘다
 PREVIEW_PAD = 20
+# 고정 배율(50%~)은 스캔 해상도 기준이라 맞춤보다 작을 수 있다. 확대/축소 때 맞춤보다
+# 이 비율 이상 큰 고정 배율만 쓴다 (확대는 항상 커지고 축소는 항상 작아지게)
+ZOOM_STEP_MIN = 1.1
 UI_FONT = ("맑은 고딕", 20)
 UI_FONT_SMALL = ("맑은 고딕", 18)
 UI_FONT_BOLD = ("맑은 고딕", 20, "bold")
@@ -972,19 +975,42 @@ class PDFLevelPreviewApp:
         else:
             self.zoom_label.config(text=f"{pct}%")
 
+    def _fit_canvas_size(self):
+        """맞춤이 페이지를 넣을 영역 (캔버스에서 둘레 여백을 뺀 크기)"""
+        return (max(1, self.preview_canvas.winfo_width() - PREVIEW_PAD * 2),
+                max(1, self.preview_canvas.winfo_height() - PREVIEW_PAD * 2))
+
+    def _fit_pct(self):
+        """현재 페이지를 맞춤으로 볼 때의 실제 배율(%, 스캔 원본 픽셀 대비). 워커의 맞춤 계산과 같다"""
+        if self.pdf_doc is None:
+            return 0
+        rect = self.pdf_doc[self.current_page].rect
+        scale = _get_native_scale(self.pdf_doc, self.current_page)
+        cw, ch = self._fit_canvas_size()
+        return min(cw / (rect.width * scale), ch / (rect.height * scale)) * 100
+
+    def _set_zoom_idx(self, idx):
+        if idx == self.zoom_idx:
+            return
+        self.zoom_idx = idx
+        self._update_zoom_label()
+        self.preview_cache.clear()
+        self.update_preview()
+
     def zoom_in(self):
-        if self.zoom_idx < len(ZOOM_LEVELS) - 1:
-            self.zoom_idx += 1
-            self._update_zoom_label()
-            self.preview_cache.clear()
-            self.update_preview()
+        """다음으로 큰 배율. 맞춤과 거의 같거나 작은 고정 배율은 건너뛴다 (예: 맞춤 53% → 75%)"""
+        fit = self._fit_pct()
+        cur = self._current_zoom_pct() or fit
+        for i in range(self.zoom_idx + 1, len(ZOOM_LEVELS)):
+            if ZOOM_LEVELS[i] > cur and ZOOM_LEVELS[i] >= fit * ZOOM_STEP_MIN:
+                self._set_zoom_idx(i)
+                return
 
     def zoom_out(self):
-        if self.zoom_idx > 0:
-            self.zoom_idx -= 1
-            self._update_zoom_label()
-            self.preview_cache.clear()
-            self.update_preview()
+        """다음으로 작은 배율. 맞춤보다 작아지는 고정 배율 대신 맞춤으로 간다"""
+        fit = self._fit_pct()
+        bigger = [i for i in range(1, self.zoom_idx) if ZOOM_LEVELS[i] >= fit * ZOOM_STEP_MIN]
+        self._set_zoom_idx(bigger[-1] if bigger else 0)
 
     def _on_ctrl_wheel(self, event):
         if hasattr(event, "num") and event.num == 5:
@@ -1018,8 +1044,7 @@ class PDFLevelPreviewApp:
         # 둘레 여백을 뺀 영역에 맞춰야 페이지 전체와 위아래 여백이 보이고 스크롤이 안 생긴다
         cw = ch = 0
         if zoom_pct == 0:
-            cw = max(1, self.preview_canvas.winfo_width() - PREVIEW_PAD * 2)
-            ch = max(1, self.preview_canvas.winfo_height() - PREVIEW_PAD * 2)
+            cw, ch = self._fit_canvas_size()
 
         key = (self.current_page, black, white, zoom_pct, cw, ch, self._page_edit(self.current_page)["angle"])
         self._wanted_key = key
