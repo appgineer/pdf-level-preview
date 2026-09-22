@@ -1079,6 +1079,8 @@ class PDFLevelPreviewApp:
         self.preview_canvas.create_image(x, y, anchor=tk.CENTER, image=photo)
         self._img_origin = (x - iw // 2, y - ih // 2)
         self._draw_crop_overlay()
+        # 그사이 각도가 더 바뀌었으면(↑/↓ 연타, 드래그 중) 예전 각도 화면으로 튀지 않게 바로 덮는다
+        self._draw_quick_rotation()
 
     def _on_preview_resize(self, event):
         if self._current_zoom_pct() == 0:
@@ -1242,6 +1244,9 @@ class PDFLevelPreviewApp:
         x = self.preview_canvas.canvasx(event.x)
         y = self.preview_canvas.canvasy(event.y)
         self._rotate_drag = (cx, cy, math.atan2(y - cy, x - cx), self._page_edit(self.current_page)["angle"])
+        # 끄는 도중 정식 렌더가 끼어들지 않게 밀린 갱신은 취소한다 (놓을 때 다시 요청)
+        if hasattr(self, "_var_after_id"):
+            self.root.after_cancel(self._var_after_id)
 
     def _rotate_drag_move(self, event):
         """페이지 가운데를 중심으로 마우스가 돈 만큼 기울기를 바꾼다 (화면은 y가 아래라 atan2 증가 = 시계방향)"""
@@ -1259,14 +1264,17 @@ class PDFLevelPreviewApp:
     def _schedule_quick_rotation(self):
         # 마우스 이벤트나 키 반복마다 그리면 밀리므로 모아서 그린다
         if self._rotate_redraw_id is None:
-            self._rotate_redraw_id = self.root.after(30, self._draw_quick_rotation)
+            self._rotate_redraw_id = self.root.after(30, self._on_quick_rotation_timer)
+
+    def _on_quick_rotation_timer(self):
+        self._rotate_redraw_id = None
+        self._draw_quick_rotation()
 
     def _draw_quick_rotation(self, resample=Image.NEAREST):
         """각도를 바꾸는 동안(숫자/드래그)의 임시 화면. 보이는 페이지 부분만 빠르게 돌려 덮어 그린다.
 
         워커의 정식 렌더가 도착하면 _draw_preview가 통째로 다시 그린다.
         """
-        self._rotate_redraw_id = None
         canvas = self.preview_canvas
         if self.current_img is None or self._shown_key is None or self._shown_key[0] != self.current_page:
             return  # 렌더 대기 중
@@ -1300,6 +1308,7 @@ class PDFLevelPreviewApp:
     def _end_rotate_drag(self):
         if self._rotate_redraw_id is not None:
             self.root.after_cancel(self._rotate_redraw_id)
+            self._rotate_redraw_id = None
         # 놓은 위치는 부드럽게 한 번 그려 두고 정식 렌더를 기다린다
         self._draw_quick_rotation(Image.BILINEAR)
         self._rotate_drag = None
