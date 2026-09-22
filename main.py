@@ -636,10 +636,12 @@ class PDFLevelPreviewApp:
             row, col = divmod(i, 2)
             tk.Label(grid, text=text, font=FNT).grid(row=row, column=col * 2, sticky=tk.E,
                                                      padx=(0 if col == 0 else 12, 4), pady=2)
-            var = tk.StringVar(value="0.0")
+            var = tk.StringVar(value="0")
             entry = tk.Entry(grid, textvariable=var, width=6, font=FNT)
             entry.grid(row=row, column=col * 2 + 1, pady=2)
             var.trace_add("write", self._on_crop_var_change)
+            entry.bind("<Up>",   lambda e, s=side: self._nudge_crop(s, +0.1))
+            entry.bind("<Down>", lambda e, s=side: self._nudge_crop(s, -0.1))
             self.crop_vars[side] = var
             self._edit_entries.append(entry)
         crop_row = tk.Frame(parent)
@@ -1218,7 +1220,7 @@ class PDFLevelPreviewApp:
         self._syncing_edit = True
         self.angle_var.set(f"{e['angle']:g}")
         for side, v in zip(CROP_SIDES, e["crop"]):
-            self.crop_vars[side].set(f"{_pt_to_mm(v):.1f}")
+            self.crop_vars[side].set(f"{round(_pt_to_mm(v), 1):g}")  # 0.1mm 단위, 0은 "0"
         self._syncing_edit = False
         w, h = self._page_disp_size(self.current_page)
         self.edit_page_label.config(
@@ -1237,6 +1239,14 @@ class PDFLevelPreviewApp:
         self._redraw_current_thumb()
         self._schedule_quick_rotation()  # 바로 임시 화면을 띄우고
         self._on_var_change()  # 정식 미리보기는 레벨 입력처럼 잠깐 뒤에 갱신
+
+    def _nudge_crop(self, side, delta):
+        try:
+            mm = float(self.crop_vars[side].get())
+        except ValueError:
+            mm = 0.0
+        self.crop_vars[side].set(f"{max(0.0, round(mm + delta, 1)):g}")
+        return "break"
 
     def _nudge_angle(self, delta):
         try:
