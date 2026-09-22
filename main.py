@@ -349,7 +349,8 @@ class PDFLevelPreviewApp:
         self._wanted_key = None
         self._pending_req = None  # 워커에 보낸 마지막 렌더 요청 (결과 대기 중)
         self._shown_key = None  # 캔버스에 떠 있는 이미지의 렌더 키
-        self._img_origin = (0, 0)  # 캔버스에서 이미지 왼쪽 위 좌표
+        self._img_origin = (0, 0)  # 캔버스에서 (자르기 전 전체) 이미지 왼쪽 위 좌표
+        self._img_clip = (0, 0, 0, 0)  # 캔버스에 실제로 보이는 페이지 영역 (자른 화면이면 자른 부분)
 
         # 편집기. 원본 pdf_doc는 그대로 두고 값만 들고 있다가 '다른 이름으로 저장' 때 적용
         # page_idx -> {"angle": 기울기 보정(°, 시계방향 양수), "crop": [위, 아래, 좌, 우] pt (화면 기준)}
@@ -383,6 +384,8 @@ class PDFLevelPreviewApp:
         self.split_range_text = None
         self.crop_edit_var = tk.BooleanVar(value=False)
         self.rotate_drag_var = tk.BooleanVar(value=False)
+        self.crop_view_var = tk.BooleanVar(value=False)  # 미리보기를 자른 모양으로
+        self.crop_range_var = tk.StringVar(value="전체")
 
         self._build_ui()
         if has_dnd:
@@ -600,7 +603,7 @@ class PDFLevelPreviewApp:
         self.edit_page_label = tk.Label(parent, text="", font=UI_FONT_SMALL, fg="#666", anchor=tk.W)
         self.edit_page_label.pack(fill=tk.X)
 
-        # 회전 (기울기 보정, °). 페이지마다 따로. + 오른쪽 / - 왼쪽, ↑/↓로 1°씩
+        # 회전 (기울기 보정, °). 페이지마다 따로. + 오른쪽 / - 왼쪽, ↑/↓로 0.5°씩
         rot_row = tk.Frame(parent)
         rot_row.pack(fill=tk.X, pady=(8, 0))
         tk.Label(rot_row, text="회전 (°)", font=FNT).pack(side=tk.LEFT)
@@ -608,19 +611,21 @@ class PDFLevelPreviewApp:
         angle_entry = tk.Entry(rot_row, textvariable=self.angle_var, width=6, font=FNT)
         angle_entry.pack(side=tk.LEFT, padx=6)
         self.angle_var.trace_add("write", self._on_angle_var_change)
-        angle_entry.bind("<Up>",   lambda e: self._nudge_angle(+1))
-        angle_entry.bind("<Down>", lambda e: self._nudge_angle(-1))
+        angle_entry.bind("<Up>",   lambda e: self._nudge_angle(+0.5))
+        angle_entry.bind("<Down>", lambda e: self._nudge_angle(-0.5))
         tk.Checkbutton(rot_row, text="드래그", variable=self.rotate_drag_var,
                        command=self._on_rotate_drag_toggle, cursor="hand2", font=FNT,
                        image=self._ind_tk['cb_off'], selectimage=self._ind_tk['cb_on'],
                        indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
                        selectcolor=self._bg_color).pack(side=tk.LEFT)
-        tk.Label(parent, text="+ 오른쪽 / - 왼쪽 회전", font=UI_FONT_SMALL, fg="#666",
-                 anchor=tk.W).pack(fill=tk.X)
         self._edit_entries = [angle_entry]
 
         # 자르기 여백 (mm, 화면 기준)
-        tk.Label(parent, text="자르기 (mm)", font=FNT, anchor=tk.W).pack(fill=tk.X, pady=(8, 0))
+        crop_head = tk.Frame(parent)
+        crop_head.pack(fill=tk.X, pady=(8, 0))
+        tk.Label(crop_head, text="자르기 (mm)", font=FNT).pack(side=tk.LEFT)
+        tk.Button(crop_head, text="초기화", command=self.reset_crop,
+                  cursor="hand2", font=FNT).pack(side=tk.RIGHT)
         grid = tk.Frame(parent)
         grid.pack(anchor=tk.W)
         self.crop_vars = {}
@@ -636,15 +641,22 @@ class PDFLevelPreviewApp:
             self._edit_entries.append(entry)
         crop_row = tk.Frame(parent)
         crop_row.pack(fill=tk.X, pady=(4, 0))
-        tk.Button(crop_row, text="자르기 전체 적용", command=self.apply_crop_all,
-                  cursor="hand2", font=FNT).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
-        tk.Button(crop_row, text="초기화", command=self.reset_crop,
+        range_menu = tk.OptionMenu(crop_row, self.crop_range_var, "현재 페이지", "홀수", "짝수", "전체")
+        range_menu.config(font=FNT, cursor="hand2")
+        range_menu["menu"].config(font=FNT)
+        range_menu.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
+        tk.Button(crop_row, text="적용", command=self.apply_crop_range,
                   cursor="hand2", font=FNT).pack(side=tk.LEFT, padx=(2, 0))
         tk.Checkbutton(parent, text="선 편집 (드래그)", variable=self.crop_edit_var,
                        command=self._on_crop_edit_toggle, cursor="hand2", font=FNT,
                        image=self._ind_tk['cb_off'], selectimage=self._ind_tk['cb_on'],
                        indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
                        selectcolor=self._bg_color).pack(anchor=tk.W, pady=(4, 0))
+        tk.Checkbutton(parent, text="자른 화면 보기", variable=self.crop_view_var,
+                       command=self._on_crop_view_toggle, cursor="hand2", font=FNT,
+                       image=self._ind_tk['cb_off'], selectimage=self._ind_tk['cb_on'],
+                       indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
+                       selectcolor=self._bg_color).pack(anchor=tk.W)
 
         # 크기 맞춤
         tk.Label(parent, text="크기 맞춤", font=FNT, anchor=tk.W).pack(fill=tk.X, pady=(8, 0))
@@ -1059,7 +1071,9 @@ class PDFLevelPreviewApp:
     def _draw_preview(self):
         if self.current_img is None:
             return
-        img = self.current_img
+        # "자른 화면 보기"면 저장될 모양대로 남는 부분만 보여준다 (기울기 보정 뒤 자르기 = 저장 순서)
+        cut = self._preview_cut_box()
+        img = self.current_img.crop(cut) if cut else self.current_img
         photo = ImageTk.PhotoImage(img)
         self.preview_photo = photo
 
@@ -1077,7 +1091,10 @@ class PDFLevelPreviewApp:
         self.preview_canvas.delete("all")
         self.preview_canvas.config(scrollregion=(0, 0, total_w, total_h))
         self.preview_canvas.create_image(x, y, anchor=tk.CENTER, image=photo)
-        self._img_origin = (x - iw // 2, y - ih // 2)
+        x0, y0 = x - iw // 2, y - ih // 2
+        self._img_clip = (x0, y0, x0 + iw, y0 + ih)
+        # 좌표 계산은 자르기 전 전체 이미지 기준이라, 잘라낸 만큼 원점을 왼쪽 위로 옮겨 둔다
+        self._img_origin = (x0 - cut[0], y0 - cut[1]) if cut else (x0, y0)
         self._draw_crop_overlay()
         # 그사이 각도가 더 바뀌었으면(↑/↓ 연타, 드래그 중) 예전 각도 화면으로 튀지 않게 바로 덮는다
         self._draw_quick_rotation()
@@ -1285,11 +1302,13 @@ class PDFLevelPreviewApp:
             return
         img = self.current_img
         ox, oy = self._img_origin
-        # 보이는 영역 ∩ 페이지 영역만 만든다. 저장 결과도 페이지 크기로 잘리고 빈 모서리는 흰색이다
+        # 보이는 영역 ∩ 화면의 페이지 영역(자른 화면이면 자른 부분)만 만든다.
+        # 저장 결과도 그 크기로 잘리고 빈 모서리는 흰색이다
         vx0, vy0 = int(canvas.canvasx(0)), int(canvas.canvasy(0))
-        rx0, ry0 = max(vx0, ox), max(vy0, oy)
-        rx1 = min(vx0 + canvas.winfo_width(), ox + img.width)
-        ry1 = min(vy0 + canvas.winfo_height(), oy + img.height)
+        px0, py0, px1, py1 = self._img_clip
+        rx0, ry0 = max(vx0, px0), max(vy0, py0)
+        rx1 = min(vx0 + canvas.winfo_width(), px1)
+        ry1 = min(vy0 + canvas.winfo_height(), py1)
         if rx1 <= rx0 or ry1 <= ry0:
             return
         cx, cy = ox + img.width / 2, oy + img.height / 2
@@ -1324,28 +1343,71 @@ class PDFLevelPreviewApp:
             return  # 입력 중인 빈 칸/잘못된 값은 무시
         w, h = self._page_disp_size(self.current_page)
         self._set_page_edit(self.current_page, crop=_clamp_margins(margins, w, h))
+        self._leave_crop_view()
         self._draw_crop_overlay()
 
     def _on_crop_edit_toggle(self):
         if self.crop_edit_var.get():
             self.rotate_drag_var.set(False)  # 미리보기 드래그는 한 가지 용도만
+            self._leave_crop_view()  # 선은 자르기 전 전체 화면에서 만진다
         self.preview_canvas.config(cursor="")
         self._draw_crop_overlay()
 
-    def apply_crop_all(self):
+    def _on_crop_view_toggle(self):
+        if self.crop_view_var.get():
+            self.crop_edit_var.set(False)
+            self.preview_canvas.config(cursor="")
+        self._draw_preview()
+
+    def _leave_crop_view(self):
+        """자르기를 다시 만지기 시작하면 선이 보이는 전체 화면으로 돌아간다"""
+        if self.crop_view_var.get():
+            self.crop_view_var.set(False)
+            self._draw_preview()
+
+    def _preview_cut_box(self):
+        """자른 화면 보기일 때 화면 이미지에서 남길 픽셀 영역 (l, t, r, b). 아니면 None"""
+        if not self.crop_view_var.get() or self._shown_key is None or self.pdf_doc is None:
+            return None
+        page = self._shown_key[0]  # 화면 이미지의 페이지 (렌더 대기 중이면 현재 페이지와 다를 수 있다)
+        top, bottom, left, right = self._page_edit(page)["crop"]
+        if not (top or bottom or left or right):
+            return None
+        img = self.current_img
+        s = img.width / self._page_disp_size(page)[0]
+        return (round(left * s), round(top * s), round(img.width - right * s), round(img.height - bottom * s))
+
+    def apply_crop_range(self):
+        """현재 페이지의 여백을 고른 범위에 복사하고 자른 화면으로 보여준다.
+
+        홀수/짝수는 클릭한 페이지와 상관없이 문서 전체의 페이지 번호 기준이다.
+        """
         if self.pdf_doc is None:
             return
+        which = self.crop_range_var.get()
         margins = self._page_edit(self.current_page)["crop"]
-        for idx in range(self._page_count):
+        if which == "현재 페이지":
+            pages = [self.current_page]  # 여백은 입력할 때 이미 반영됨, 자른 화면만 보여준다
+        else:
+            # p.1이 idx 0이므로 홀수 페이지 = 짝수 idx
+            start, step = {"홀수": (0, 2), "짝수": (1, 2), "전체": (0, 1)}[which]
+            pages = range(start, self._page_count, step)
+        for idx in pages:
             w, h = self._page_disp_size(idx)
             self._set_page_edit(idx, crop=_clamp_margins(margins, w, h))
-        self._show_toast("자르기를 전체 페이지에 적용했습니다.")
+        self.crop_edit_var.set(False)
+        self.crop_view_var.set(True)
+        self.preview_canvas.config(cursor="")
+        self._draw_preview()
+        target = which if which == "현재 페이지" else f"{which} 페이지"
+        self._show_toast(f"자르기를 {target}에 적용했습니다.")
 
     def reset_crop(self):
         if self.pdf_doc is None:
             return
         self._set_page_edit(self.current_page, crop=[0.0, 0.0, 0.0, 0.0])
         self._sync_edit_panel()
+        self._leave_crop_view()
         self._draw_crop_overlay()
 
     def save_crop_size(self):
@@ -1370,6 +1432,7 @@ class PDFLevelPreviewApp:
         self._set_page_edit(self.current_page, crop=[top, h - sh - top, left, w - sw - left])
         self.crop_edit_var.set(True)
         self.rotate_drag_var.set(False)
+        self._leave_crop_view()
         self._sync_edit_panel()
         self._draw_crop_overlay()
 
@@ -1415,6 +1478,8 @@ class PDFLevelPreviewApp:
         """자르기 선: 잘릴 영역은 어둡게, 남는 영역은 파란 선. 태그 "crop"만 지우고 다시 그린다"""
         canvas = self.preview_canvas
         canvas.delete("crop")
+        if self.crop_view_var.get():
+            return  # 자른 화면에서는 이미 잘린 모양이 보인다
         res = self._crop_canvas_rect()
         if res is None:
             return
