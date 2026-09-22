@@ -215,15 +215,35 @@ def _preview_worker(req_q, res_q):
     path = None
     bases = {}   # page_idx -> 원본 해상도 이미지 (오래된 것부터 버림)
     sent = set()  # 이미 보낸 key (이웃 미리 렌더 중복 방지)
+    # key[:6] -> (레벨+축소까지 한 이미지, 상태문구). 마지막 요청 한 장만 기억해서
+    # 각도만 바뀌는 요청(↑/↓, 드래그)은 레벨·축소를 건너뛰고 회전만 한다
+    pre_cache = {}
 
-    def render(key):
+    def render(key, remember=True):
         try:
-            _render(key)
+            _render(key, remember)
         except Exception as e:
             res_q.put((path, key, None, None, None, f"렌더링 실패: {e}"))
 
-    def _render(key):
-        page_idx, black, white, zoom_pct, cw, ch, angle = key
+    def _render(key, remember):
+        pre = pre_cache.get(key[:6])
+        if pre is None:
+            pre = _level_and_scale(key)
+            if remember:  # 이웃 미리 렌더가 현재 페이지 것을 밀어내지 않게
+                pre_cache.clear()
+                pre_cache[key[:6]] = pre
+        result, status = pre
+
+        # 기울기 보정은 축소 후에 해야 가볍다
+        angle = key[6]
+        if angle:
+            result = _rotate_image(result, angle)
+
+        sent.add(key)
+        res_q.put((path, key, result.mode, result.size, result.tobytes(), status))
+
+    def _level_and_scale(key):
+        page_idx, black, white, zoom_pct, cw, ch, _ = key
         if page_idx in bases:
             base = bases.pop(page_idx)
         else:
@@ -250,14 +270,7 @@ def _preview_worker(req_q, res_q):
             display_w = int(leveled.width * scale)
             display_h = int(leveled.height * scale)
             result = leveled.resize((display_w, display_h), Image.LANCZOS)
-
-        # 기울기 보정은 축소 후에 해야 가볍다
-        if angle:
-            result = _rotate_image(result, angle)
-
-        sent.add(key)
-        res_q.put((path, key, result.mode, result.size, result.tobytes(),
-                   f"{base.width}x{base.height} ({zoom_pct}%)"))
+        return result, f"{base.width}x{base.height} ({zoom_pct}%)"
 
     while True:
         msg = req_q.get()
@@ -281,6 +294,7 @@ def _preview_worker(req_q, res_q):
             doc, path = new_doc, pdf_path
             bases.clear()
             sent.clear()
+            pre_cache.clear()
         if need:
             render(key)
         # 한가할 때 다음/이전 페이지를 미리 렌더해 두면 순서대로 넘길 때 바로 보인다
@@ -288,7 +302,7 @@ def _preview_worker(req_q, res_q):
         for nb in (key[0] + 1, key[0] - 1):
             nb_key = (nb,) + key[1:6] + (0,)
             if req_q.empty() and 0 <= nb < len(doc) and nb_key not in sent:
-                render(nb_key)
+                render(nb_key, remember=False)
 
 
 def _normalize_page_ranges(text):
@@ -1197,7 +1211,8 @@ class PDFLevelPreviewApp:
             return  # 입력 중인 빈 칸이나 "-"만 친 상태는 무시
         self._set_page_edit(self.current_page, angle=angle)
         self._redraw_current_thumb()
-        self._on_var_change()  # 미리보기는 레벨 입력처럼 잠깐 뒤에 갱신
+        self._schedule_quick_rotation()  # 바로 임시 화면을 띄우고
+        self._on_var_change()  # 정식 미리보기는 레벨 입력처럼 잠깐 뒤에 갱신
 
     def _nudge_angle(self, delta):
         try:
@@ -1239,39 +1254,54 @@ class PDFLevelPreviewApp:
         self._syncing_edit = True
         self.angle_var.set(f"{angle:g}")
         self._syncing_edit = False
-        # 마우스 이벤트마다 그리면 밀리므로 모아서 그린다
-        if self._rotate_redraw_id is None:
-            self._rotate_redraw_id = self.root.after(30, self._draw_rotate_drag)
+        self._schedule_quick_rotation()
 
-    def _draw_rotate_drag(self):
-        """드래그 회전 중 임시 화면: 보이는 부분만 빠르게 돌려 덮어 그린다. 정식 렌더는 놓은 뒤에 한다"""
+    def _schedule_quick_rotation(self):
+        # 마우스 이벤트나 키 반복마다 그리면 밀리므로 모아서 그린다
+        if self._rotate_redraw_id is None:
+            self._rotate_redraw_id = self.root.after(30, self._draw_quick_rotation)
+
+    def _draw_quick_rotation(self, resample=Image.NEAREST):
+        """각도를 바꾸는 동안(숫자/드래그)의 임시 화면. 보이는 페이지 부분만 빠르게 돌려 덮어 그린다.
+
+        워커의 정식 렌더가 도착하면 _draw_preview가 통째로 다시 그린다.
+        """
         self._rotate_redraw_id = None
-        if self._rotate_drag is None or self.current_img is None:
-            return
         canvas = self.preview_canvas
-        vw = max(1, canvas.winfo_width())
-        vh = max(1, canvas.winfo_height())
-        x0, y0 = canvas.canvasx(0), canvas.canvasy(0)
-        cx, cy = self._rotate_drag[0], self._rotate_drag[1]
-        ox, oy = self._img_origin
+        if self.current_img is None or self._shown_key is None or self._shown_key[0] != self.current_page:
+            return  # 렌더 대기 중
         # 화면 이미지는 _shown_key의 각도로 그려져 있으니 그 차이만큼만 더 돌린다
         t = math.radians(self._page_edit(self.current_page)["angle"] - self._shown_key[6])
+        if t == 0:
+            canvas.delete("rotdrag")
+            return
+        img = self.current_img
+        ox, oy = self._img_origin
+        # 보이는 영역 ∩ 페이지 영역만 만든다. 저장 결과도 페이지 크기로 잘리고 빈 모서리는 흰색이다
+        vx0, vy0 = int(canvas.canvasx(0)), int(canvas.canvasy(0))
+        rx0, ry0 = max(vx0, ox), max(vy0, oy)
+        rx1 = min(vx0 + canvas.winfo_width(), ox + img.width)
+        ry1 = min(vy0 + canvas.winfo_height(), oy + img.height)
+        if rx1 <= rx0 or ry1 <= ry0:
+            return
+        cx, cy = ox + img.width / 2, oy + img.height / 2
         cos, sin = math.cos(t), math.sin(t)
         # 출력 픽셀 (u, v) → 원본 이미지 픽셀: 페이지 중심 기준 시계방향 회전의 역변환
-        dx, dy = x0 - cx, y0 - cy
+        dx, dy = rx0 - cx, ry0 - cy
         data = (cos, sin, dx * cos + dy * sin + cx - ox,
                 -sin, cos, -dx * sin + dy * cos + cy - oy)
-        img = self.current_img.transform((vw, vh), Image.AFFINE, data,
-                                         resample=Image.BILINEAR, fillcolor="#666666")
-        self._rotate_drag_photo = ImageTk.PhotoImage(img)
+        quick = img.transform((rx1 - rx0, ry1 - ry0), Image.AFFINE, data,
+                              resample=resample, fillcolor="white")
+        self._rotate_drag_photo = ImageTk.PhotoImage(quick)
         canvas.delete("rotdrag")
-        canvas.create_image(x0, y0, anchor=tk.NW, image=self._rotate_drag_photo, tags="rotdrag")
+        canvas.create_image(rx0, ry0, anchor=tk.NW, image=self._rotate_drag_photo, tags="rotdrag")
         canvas.tag_raise("crop")  # 자르기 선은 수평 기준선으로 그대로 보이게
 
     def _end_rotate_drag(self):
         if self._rotate_redraw_id is not None:
             self.root.after_cancel(self._rotate_redraw_id)
-            self._draw_rotate_drag()  # 마지막 위치까지 그려 두고 정식 렌더를 기다린다
+        # 놓은 위치는 부드럽게 한 번 그려 두고 정식 렌더를 기다린다
+        self._draw_quick_rotation(Image.BILINEAR)
         self._rotate_drag = None
         self._redraw_current_thumb()
         self._on_var_change()
