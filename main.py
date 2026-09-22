@@ -360,7 +360,7 @@ class PDFLevelPreviewApp:
         # 편집기. 원본 pdf_doc는 그대로 두고 값만 들고 있다가 '다른 이름으로 저장' 때 적용
         # page_idx -> {"angle": 기울기 보정(°, 시계방향 양수), "crop": [위, 아래, 좌, 우] pt (화면 기준)}
         self.page_edits = {}
-        self._saved_crop_size = None  # (w, h) pt, 크기 맞춤용. 다른 PDF를 열어도 유지
+        self._saved_crop_box = None  # (위, 좌, 가로, 세로) pt, 크기 맞춤용. 다른 PDF를 열어도 유지
         self._edits_dirty = False
         self._crop_drag = None  # (대상, 시작 x, 시작 y, 시작 여백)
         self._rotate_drag = None  # (페이지 중심 x, y, 시작 마우스 각도 rad, 시작 기울기 °)
@@ -1511,25 +1511,29 @@ class PDFLevelPreviewApp:
         self._show_toast("자르기를 모두 초기화했습니다.")
 
     def save_crop_size(self):
-        """현재 페이지에서 보이는(자른 뒤) 크기를 저장"""
+        """현재 페이지에서 보이는(자른 뒤) 박스의 위치(위·좌)와 크기를 저장"""
         if self.pdf_doc is None:
             return
         w, h = self._page_disp_size(self.current_page)
         top, bottom, left, right = self._page_edit(self.current_page)["crop"]
-        self._saved_crop_size = (w - left - right, h - top - bottom)
-        sw, sh = self._saved_crop_size
-        self.saved_size_label.config(text=f"저장: {_pt_to_mm(sw):.1f} × {_pt_to_mm(sh):.1f} mm")
+        self._saved_crop_box = (top, left, w - left - right, h - top - bottom)
+        sw, sh = self._saved_crop_box[2:]
+        self.saved_size_label.config(
+            text=f"저장: {_pt_to_mm(sw):.1f} × {_pt_to_mm(sh):.1f} mm "
+                 f"(위 {round(_pt_to_mm(top), 1):g} · 좌 {round(_pt_to_mm(left), 1):g})")
 
     def crop_to_saved_size(self):
-        """저장한 크기의 박스를 현재 페이지 가운데에 놓고, 드래그로 위치를 맞출 수 있게 한다"""
-        if self.pdf_doc is None or self._saved_crop_size is None:
+        """저장한 박스를 저장한 페이지와 같은 위치(위·좌)·크기로 놓고, 드래그로 옮길 수 있게 한다"""
+        if self.pdf_doc is None or self._saved_crop_box is None:
             return
+        top0, left0, sw0, sh0 = self._saved_crop_box
         w, h = self._page_disp_size(self.current_page)
-        sw = min(self._saved_crop_size[0], w)
-        sh = min(self._saved_crop_size[1], h)
-        left = (w - sw) / 2
-        top = (h - sh) / 2
+        # 페이지가 더 작으면 페이지 안으로 줄이고 당긴다
+        sw, sh = min(sw0, w), min(sh0, h)
+        top, left = min(top0, h - sh), min(left0, w - sw)
         self._set_page_edit(self.current_page, crop=[top, h - sh - top, left, w - sw - left])
+        # 크기 맞춤은 한 장씩: 이어서 [적용]을 눌러도 다른 페이지를 덮거나 이 페이지가 되돌아가지 않게
+        self.crop_range_var.set("현재 페이지")
         self.crop_edit_var.set(True)
         self.rotate_drag_var.set(False)
         self._leave_crop_view()
