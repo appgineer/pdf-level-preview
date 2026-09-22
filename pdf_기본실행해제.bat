@@ -2,7 +2,7 @@
 chcp 65001 >nul
 setlocal
 
-REM register_pdf.bat 으로 넣은 등록을 지운다.
+REM pdf_기본실행파일.bat 으로 넣은 등록을 지운다.
 
 set "CLS=HKCU\Software\Classes"
 reg delete "%CLS%\PDFLevelPreview.PDF" /f >nul 2>&1
