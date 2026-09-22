@@ -10,3 +10,8 @@ pip install pymupdf
 
 pip install Pillow
 ㅈ
+
+# PDF 더블클릭으로 열기 (Windows)
+
+register_pdf.bat 을 한 번 실행한 뒤, PDF 오른쪽 클릭 → 연결 프로그램 → 다른 앱 선택 → "PDF Level Preview" → "항상"
+(해제: unregister_pdf.bat)

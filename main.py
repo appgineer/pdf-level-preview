@@ -1905,6 +1905,13 @@ def _cleanup_temp_files():
                 pass
 
 
+def _pdf_arg(argv):
+    """실행 인자로 넘어온 PDF 경로 (PDF 더블클릭 / 연결 프로그램 / 오른쪽 클릭 메뉴). 없으면 None"""
+    if len(argv) > 1 and argv[1].lower().endswith(".pdf") and os.path.isfile(argv[1]):
+        return argv[1]
+    return None
+
+
 def main():
     _cleanup_temp_files()
     try:
@@ -1923,6 +1930,11 @@ def main():
         pass
 
     app = PDFLevelPreviewApp(root, has_dnd=has_dnd)
+    # PDF 더블클릭으로 실행되면 넘겨받은 파일을 연다. 창 배치가 끝난 뒤에 열어야
+    # 맞춤 크기와 썸네일 열 수가 제대로 계산된다
+    pdf = _pdf_arg(sys.argv)
+    if pdf:
+        root.after(100, lambda: app._load_pdf(pdf))
     root.mainloop()
 
 
