@@ -39,8 +39,8 @@ TEMP_PREFIX = "pdflvl_"
 CROP_SIDES = ("top", "bottom", "left", "right")
 # 자르고 남는 최소 크기 (pt, 72pt = 25.4mm)
 MIN_CROP_PT = 36
-# 미리보기에서 자르기 선을 잡을 수 있는 거리 (px)
-CROP_GRAB_PX = 10
+# 미리보기에서 자르기 선을 잡을 수 있는 거리 (선 양쪽 px)
+CROP_GRAB_PX = 6
 
 
 def _make_indicator_images():
@@ -627,8 +627,8 @@ class PDFLevelPreviewApp:
         crop_head = tk.Frame(parent)
         crop_head.pack(fill=tk.X, pady=(8, 0))
         tk.Label(crop_head, text="자르기 (mm)", font=FNT).pack(side=tk.LEFT)
-        tk.Button(crop_head, text="초기화", command=self.reset_crop,
-                  cursor="hand2", font=FNT).pack(side=tk.RIGHT)
+        tk.Button(crop_head, text="초기화", command=self.reset_crop, padx=6, pady=0,
+                  cursor="hand2", font=UI_FONT_SMALL).pack(side=tk.RIGHT)
         grid = tk.Frame(parent)
         grid.pack(anchor=tk.W)
         self.crop_vars = {}
@@ -647,10 +647,11 @@ class PDFLevelPreviewApp:
         range_menu = tk.OptionMenu(crop_row, self.crop_range_var, "현재 페이지", "홀수", "짝수", "전체")
         range_menu.config(font=FNT, cursor="hand2")
         range_menu["menu"].config(font=FNT)
-        range_menu.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
+        # 둘 다 줄 높이만큼 늘려서 높이를 맞춘다
+        range_menu.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 2))
         tk.Button(crop_row, text="적용", command=self.apply_crop_range,
-                  cursor="hand2", font=FNT).pack(side=tk.LEFT, padx=(2, 0))
-        tk.Checkbutton(parent, text="선 편집 (드래그)", variable=self.crop_edit_var,
+                  cursor="hand2", font=FNT).pack(side=tk.LEFT, fill=tk.Y, padx=(2, 0))
+        tk.Checkbutton(parent, text="선 편집", variable=self.crop_edit_var,
                        command=self._on_crop_edit_toggle, cursor="hand2", font=FNT,
                        image=self._ind_tk['cb_off'], selectimage=self._ind_tk['cb_on'],
                        indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
@@ -1135,22 +1136,24 @@ class PDFLevelPreviewApp:
             return
         _, s = res
         target, sx, sy, (top, bottom, left, right) = self._crop_drag
-        dx = (self.preview_canvas.canvasx(event.x) - sx) / s
-        dy = (self.preview_canvas.canvasy(event.y) - sy) / s
+        mx = self.preview_canvas.canvasx(event.x)
+        my = self.preview_canvas.canvasy(event.y)
         w, h = self._page_disp_size(self.current_page)
         if target == "move":
             # 크기는 그대로, 페이지 밖으로는 못 나가게
-            dx = max(-left, min(right, dx))
-            dy = max(-top, min(bottom, dy))
+            dx = max(-left, min(right, (mx - sx) / s))
+            dy = max(-top, min(bottom, (my - sy) / s))
             margins = [top + dy, bottom - dy, left + dx, right - dx]
         else:
             margins = [top, bottom, left, right]
             i = CROP_SIDES.index(target)
-            # 위/좌는 끄는 방향이 그대로 여백 증가, 아래/우는 반대
-            d = {"top": dy, "bottom": -dy, "left": dx, "right": -dx}[target]
+            # 변은 마우스 위치로 바로 옮긴다. 선에서 조금 떨어진 곳을 잡아도 선이 포인터 밑으로 따라온다
+            ox, oy = self._img_origin
+            px, py = (mx - ox) / s, (my - oy) / s  # 페이지 왼쪽 위 기준 pt
+            d = {"top": py, "bottom": h - py, "left": px, "right": w - px}[target]
             opposite = margins[i ^ 1]  # 위<->아래, 좌<->우
             span = h if target in ("top", "bottom") else w
-            margins[i] = max(0.0, min(span - MIN_CROP_PT - opposite, margins[i] + d))
+            margins[i] = max(0.0, min(span - MIN_CROP_PT - opposite, d))
         self._set_page_edit(self.current_page, crop=_clamp_margins(margins, w, h))
         self._sync_edit_panel()
         self._draw_crop_overlay()
