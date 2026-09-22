@@ -20,6 +20,8 @@ from concurrent.futures import ThreadPoolExecutor
 # index 0 = "맞춤(Fit)" 모드, 이후 50%,75%,100%,125%
 ZOOM_LEVELS = [0, 50, 75, 100, 125]  # 0 = fit
 ZOOM_DEFAULT_IDX = 0
+# 미리보기에서 페이지 둘레 최소 여백 (px). 맞춤도 이 여백을 뺀 영역에 맞춘다
+PREVIEW_PAD = 20
 UI_FONT = ("맑은 고딕", 20)
 UI_FONT_SMALL = ("맑은 고딕", 18)
 UI_FONT_BOLD = ("맑은 고딕", 20, "bold")
@@ -1012,11 +1014,12 @@ class PDFLevelPreviewApp:
         black = max(0, min(255, black))
         white = max(0, min(255, white))
         zoom_pct = self._current_zoom_pct()
-        # 맞춤 모드는 캔버스 크기에 따라 결과가 달라지므로 키에 포함
+        # 맞춤 모드는 캔버스 크기에 따라 결과가 달라지므로 키에 포함.
+        # 둘레 여백을 뺀 영역에 맞춰야 페이지 전체와 위아래 여백이 보이고 스크롤이 안 생긴다
         cw = ch = 0
         if zoom_pct == 0:
-            cw = max(1, self.preview_canvas.winfo_width())
-            ch = max(1, self.preview_canvas.winfo_height())
+            cw = max(1, self.preview_canvas.winfo_width() - PREVIEW_PAD * 2)
+            ch = max(1, self.preview_canvas.winfo_height() - PREVIEW_PAD * 2)
 
         key = (self.current_page, black, white, zoom_pct, cw, ch, self._page_edit(self.current_page)["angle"])
         self._wanted_key = key
@@ -1084,7 +1087,7 @@ class PDFLevelPreviewApp:
         ch = max(1, self.preview_canvas.winfo_height())
         iw, ih = img.width, img.height
 
-        pad = 20  # 위아래 좌우 최소 여백
+        pad = PREVIEW_PAD  # 위아래 좌우 최소 여백
         x = max(cw // 2, iw // 2 + pad)
         y = max(ch // 2, ih // 2 + pad)
 
