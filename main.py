@@ -361,6 +361,7 @@ class PDFLevelPreviewApp:
         # page_idx -> {"angle": 기울기 보정(°, 시계방향 양수), "crop": [위, 아래, 좌, 우] pt (화면 기준)}
         self.page_edits = {}
         self._saved_crop_box = None  # (위, 좌, 가로, 세로) pt, 크기 맞춤용. 다른 PDF를 열어도 유지
+        self._last_fit_page = None  # 마지막으로 [저장 크기로 자르기]를 누른 페이지 (다음 박스 위치 기준)
         self._edits_dirty = False
         self._crop_drag = None  # (대상, 시작 x, 시작 y, 시작 여백)
         self._rotate_drag = None  # (페이지 중심 x, y, 시작 마우스 각도 rad, 시작 기울기 °)
@@ -759,6 +760,7 @@ class PDFLevelPreviewApp:
         self.thumbnail_cache.clear()
         self.preview_cache.clear()
         self.page_edits.clear()
+        self._last_fit_page = None
         self._crop_before_edit = [0.0, 0.0, 0.0, 0.0]
         self._edits_dirty = False
         self._shown_key = None
@@ -1523,15 +1525,24 @@ class PDFLevelPreviewApp:
                  f"(위 {round(_pt_to_mm(top), 1):g} · 좌 {round(_pt_to_mm(left), 1):g})")
 
     def crop_to_saved_size(self):
-        """저장한 박스를 저장한 페이지와 같은 위치(위·좌)·크기로 놓고, 드래그로 옮길 수 있게 한다"""
+        """저장한 크기의 박스를 놓고, 드래그로 옮길 수 있게 한다.
+
+        위치는 바로 전에 크기 맞춤한 페이지에서 맞춰 둔 위·좌 그대로다. 큰 페이지들은 스캐너의
+        같은 자리에 놓인 경우가 많아서 대부분 거의 안 옮겨도 된다. 처음이거나 그 페이지의
+        자르기가 지워졌으면 저장한 페이지의 위치를 쓴다.
+        """
         if self.pdf_doc is None or self._saved_crop_box is None:
             return
         top0, left0, sw0, sh0 = self._saved_crop_box
+        prev = self._last_fit_page
+        if prev is not None and any(self._page_edit(prev)["crop"]):
+            top0, _, left0, _ = self._page_edit(prev)["crop"]
         w, h = self._page_disp_size(self.current_page)
         # 페이지가 더 작으면 페이지 안으로 줄이고 당긴다
         sw, sh = min(sw0, w), min(sh0, h)
         top, left = min(top0, h - sh), min(left0, w - sw)
         self._set_page_edit(self.current_page, crop=[top, h - sh - top, left, w - sw - left])
+        self._last_fit_page = self.current_page
         # 크기 맞춤은 한 장씩: 이어서 [적용]을 눌러도 다른 페이지를 덮거나 이 페이지가 되돌아가지 않게
         self.crop_range_var.set("현재 페이지")
         self.crop_edit_var.set(True)
