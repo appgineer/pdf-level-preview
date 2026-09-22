@@ -1042,9 +1042,30 @@ class PDFLevelPreviewApp:
             self.zoom_label.config(text=f"{pct}%")
 
     def _fit_canvas_size(self):
-        """맞춤이 페이지를 넣을 영역 (캔버스에서 둘레 여백을 뺀 크기)"""
-        return (max(1, self.preview_canvas.winfo_width() - PREVIEW_PAD * 2),
-                max(1, self.preview_canvas.winfo_height() - PREVIEW_PAD * 2))
+        """맞춤이 페이지를 넣을 영역 (캔버스에서 둘레 여백을 뺀 크기).
+
+        잘린 결과로 볼 때는 남는 부분이 이 영역에 꽉 차도록 페이지 전체 기준으로 그만큼 크게 잡는다.
+        워커는 페이지 전체를 이 크기에 맞춰 그리고, 화면에서 남는 부분만 잘라 보여준다.
+        그래야 자른 페이지가 원래 그 크기였던 페이지와 같은 크기로 보인다.
+        """
+        cw = max(1, self.preview_canvas.winfo_width() - PREVIEW_PAD * 2)
+        ch = max(1, self.preview_canvas.winfo_height() - PREVIEW_PAD * 2)
+        if self.pdf_doc is not None and not self.crop_edit_var.get():
+            top, bottom, left, right = self._page_edit(self.current_page)["crop"]
+            if top or bottom or left or right:
+                w, h = self._page_disp_size(self.current_page)
+                cw = round(cw * w / (w - left - right))
+                ch = round(ch * h / (h - top - bottom))
+        return cw, ch
+
+    def _refresh_preview(self):
+        """표시 방식(선 화면 ↔ 잘린 결과)이나 잘린 크기가 바뀌었을 때.
+
+        지금 이미지로 바로 다시 그리고, 맞춤 보기면 바뀐 크기에 맞춰 다시 렌더한다.
+        """
+        self._draw_preview()
+        if self._current_zoom_pct() == 0:
+            self.update_preview()
 
     def _fit_pct(self):
         """현재 페이지를 맞춤으로 볼 때의 실제 배율(%, 스캔 원본 픽셀 대비). 워커의 맞춤 계산과 같다"""
@@ -1374,7 +1395,7 @@ class PDFLevelPreviewApp:
     def _on_rotate_drag_toggle(self):
         if self.rotate_drag_var.get() and self.crop_edit_var.get():
             self.crop_edit_var.set(False)  # 미리보기 드래그는 한 가지 용도만
-            self._draw_preview()  # 선 화면 → 잘린 결과
+            self._refresh_preview()  # 선 화면 → 잘린 결과
         self.preview_canvas.config(cursor="")
 
     def _start_rotate_drag(self, event):
@@ -1477,13 +1498,13 @@ class PDFLevelPreviewApp:
         self.rotate_drag_var.set(mode == "rotate")
         self.preview_canvas.config(cursor="")
         if was_edit != (mode == "crop"):
-            self._draw_preview()  # 선 화면 ↔ 잘린 결과
+            self._refresh_preview()  # 선 화면 ↔ 잘린 결과
 
     def _on_crop_edit_toggle(self):
         if self.crop_edit_var.get():
             self.rotate_drag_var.set(False)  # 미리보기 드래그는 한 가지 용도만
         self.preview_canvas.config(cursor="")
-        self._draw_preview()  # 켜면 자르기 전 전체 화면 + 선, 끄면 잘린 결과
+        self._refresh_preview()  # 켜면 자르기 전 전체 화면 + 선, 끄면 잘린 결과
 
     def _preview_cut_box(self):
         """미리보기에서 남길 픽셀 영역 (l, t, r, b). "선 편집"이 꺼져 있으면 항상 저장될 모양대로 자른다.
@@ -1520,7 +1541,7 @@ class PDFLevelPreviewApp:
         self._crop_before_edit = self._page_edit(self.current_page)["crop"]
         self.crop_edit_var.set(False)  # 선 편집이 꺼지면 잘린 결과가 보인다
         self.preview_canvas.config(cursor="")
-        self._draw_preview()
+        self._refresh_preview()
         self._show_toast(f"자르기를 {self._range_label(which)}에 적용했습니다.")
 
     def _range_pages(self, which):
@@ -1545,7 +1566,7 @@ class PDFLevelPreviewApp:
         if self.current_page in pages:
             self._crop_before_edit = [0.0, 0.0, 0.0, 0.0]
         self._sync_edit_panel()
-        self._draw_preview()
+        self._refresh_preview()
         self._show_toast(f"자르기를 {self._range_label(which)}에서 초기화했습니다.")
 
     def save_crop_size(self):
