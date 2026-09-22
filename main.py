@@ -383,6 +383,8 @@ class PDFLevelPreviewApp:
         # Config variables
         self.selected_level_idx = tk.IntVar(value=-1)
         self.scan_type_var = tk.StringVar(value="일반")
+        self.crop_cfg_var = tk.StringVar(value="안함")  # 자르기 설정: "안함" / "1" / "2" / "입력"
+        self.crop_cfg_mm_var = tk.StringVar(value="")   # "입력"일 때의 mm
         self.ocr_vars = {}  # name -> BooleanVar
         self.ocr_enabled_var = tk.BooleanVar(value=False)
         self.is_split_var = tk.BooleanVar(value=False)
@@ -545,6 +547,10 @@ class PDFLevelPreviewApp:
         self._build_edit_panel(inner)
         ttk.Separator(inner, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
 
+        # ── 자르기 설정 (config.json, 자동화용) ──
+        self._build_crop_config(inner)
+        ttk.Separator(inner, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
+
         # ── 스캔타입 ──
         tk.Label(inner, text="스캔타입", font=FNT, anchor=tk.W).pack(fill=tk.X)
         scan_frame = tk.Frame(inner)
@@ -585,7 +591,7 @@ class PDFLevelPreviewApp:
         self.white_entry.bind("<Down>", lambda e: self._nudge(self.white_var, -1))
         self.black_var.trace_add("write", self._on_var_change)
         self.white_var.trace_add("write", self._on_var_change)
-        # 분할 범위 입력칸(Text)의 줄바꿈 Enter와 편집 입력칸(각도/여백)의 Enter는 레벨 추가로 보내지 않는다
+        # 분할 범위 입력칸(Text)의 줄바꿈 Enter와 편집/자르기 설정 입력칸의 Enter는 레벨 추가로 보내지 않는다
         self.root.bind("<Return>", lambda e: None if isinstance(e.widget, tk.Text) or e.widget in self._edit_entries
                        else self.add_level())
 
@@ -675,6 +681,47 @@ class PDFLevelPreviewApp:
 
         tk.Button(parent, text="다른 이름으로 저장", command=self.save_edited_pdf,
                   padx=12, pady=4, cursor="hand2", font=FNT).pack(fill=tk.X, pady=(12, 0))
+
+    def _build_crop_config(self, parent):
+        """자르기 설정 (config.json의 crop_mm, 자동화 프로그램용). 편집기의 자르기와는 별개"""
+        FNT = UI_FONT
+        radio = dict(variable=self.crop_cfg_var, cursor="hand2", font=FNT,
+                     image=self._ind_tk['rb_off'], selectimage=self._ind_tk['rb_on'],
+                     indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
+                     selectcolor=self._bg_color)
+        tk.Label(parent, text="자르기", font=FNT, anchor=tk.W).pack(fill=tk.X)
+        row1 = tk.Frame(parent)
+        row1.pack(anchor=tk.W)
+        for txt, val in (("안함", "안함"), ("1mm", "1"), ("2mm", "2")):
+            tk.Radiobutton(row1, text=txt, value=val, **radio).pack(side=tk.LEFT, padx=(0, 12))
+        row2 = tk.Frame(parent)
+        row2.pack(anchor=tk.W, pady=(0, 8))
+        tk.Radiobutton(row2, text="입력", value="입력", **radio).pack(side=tk.LEFT)
+        entry = tk.Entry(row2, textvariable=self.crop_cfg_mm_var, width=6, font=FNT)
+        entry.pack(side=tk.LEFT, padx=6)
+        tk.Label(row2, text="mm", font=FNT).pack(side=tk.LEFT)
+        self.crop_cfg_mm_var.trace_add("write", self._on_crop_cfg_mm_change)
+        self._edit_entries.append(entry)  # 여기서 Enter를 쳐도 레벨이 추가되지 않게
+
+    def _on_crop_cfg_mm_change(self, *_):
+        # 숫자를 치면 "입력"을 고른 것으로 본다
+        if self.crop_cfg_mm_var.get().strip():
+            self.crop_cfg_var.set("입력")
+
+    def _crop_cfg_mm(self):
+        """config.json에 넣을 자르기 값(mm). 안함 = 0. "입력"이 숫자가 아니거나 음수면 None"""
+        choice = self.crop_cfg_var.get()
+        if choice == "안함":
+            return 0
+        if choice != "입력":
+            return int(choice)
+        try:
+            mm = float(self.crop_cfg_mm_var.get())
+        except ValueError:
+            return None
+        if not 0 <= mm < float("inf"):  # 음수, nan, inf
+            return None
+        return int(mm) if mm.is_integer() else mm
 
     # ------------------------------------------------------------------ #
     # Drag & Drop
@@ -1769,6 +1816,10 @@ class PDFLevelPreviewApp:
     def _save_config(self):
         if not self.pdf_doc:
             return
+        crop_mm = self._crop_cfg_mm()
+        if crop_mm is None:
+            messagebox.showwarning("설정 저장", "자르기 값(mm)을 숫자로 입력하세요.", parent=self.root)
+            return
         pdf_dir = os.path.dirname(self.pdf_doc.name)
 
         # 선택된 레벨 프리셋 사용, 없으면 현재 슬라이더 값
@@ -1783,6 +1834,7 @@ class PDFLevelPreviewApp:
                 black, white = 0, 255
 
         config = {
+            "crop_mm": crop_mm,
             "scan_type": self.scan_type_var.get(),
             "black_point": black,
             "white_point": white,
@@ -1825,6 +1877,21 @@ class PDFLevelPreviewApp:
                 cfg = json.load(f)
         except (json.JSONDecodeError, OSError):
             return
+
+        # 자르기 설정: 0/1/2는 해당 버튼, 그 밖의 숫자는 "입력". 없거나 이상한 값은 안함
+        try:
+            crop_mm = float(cfg.get("crop_mm", 0))
+        except (TypeError, ValueError):
+            crop_mm = 0.0
+        if not 0 <= crop_mm < float("inf"):
+            crop_mm = 0.0
+        presets = {0: "안함", 1: "1", 2: "2"}
+        if crop_mm in presets:
+            self.crop_cfg_mm_var.set("")
+            self.crop_cfg_var.set(presets[crop_mm])
+        else:
+            self.crop_cfg_mm_var.set(f"{crop_mm:g}")
+            self.crop_cfg_var.set("입력")
 
         # 구버전 config의 "안함"은 "일반"과 동작이 같으므로 "일반"으로 흡수
         scan_type = cfg.get("scan_type", "일반")
