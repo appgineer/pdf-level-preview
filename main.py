@@ -384,7 +384,7 @@ class PDFLevelPreviewApp:
         self.split_range_text = None
         self.crop_edit_var = tk.BooleanVar(value=False)
         self.rotate_drag_var = tk.BooleanVar(value=False)
-        self.crop_view_var = tk.BooleanVar(value=False)  # 미리보기를 자른 모양으로
+        self._crop_view = False  # [적용] 뒤: 미리보기를 잘린 모양으로 (자르기를 다시 만지면 선 화면으로)
         self.crop_range_var = tk.StringVar(value="전체")
 
         self._build_ui()
@@ -652,11 +652,6 @@ class PDFLevelPreviewApp:
                        image=self._ind_tk['cb_off'], selectimage=self._ind_tk['cb_on'],
                        indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
                        selectcolor=self._bg_color).pack(anchor=tk.W, pady=(4, 0))
-        tk.Checkbutton(parent, text="자른 화면 보기", variable=self.crop_view_var,
-                       command=self._on_crop_view_toggle, cursor="hand2", font=FNT,
-                       image=self._ind_tk['cb_off'], selectimage=self._ind_tk['cb_on'],
-                       indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
-                       selectcolor=self._bg_color).pack(anchor=tk.W)
 
         # 크기 맞춤
         tk.Label(parent, text="크기 맞춤", font=FNT, anchor=tk.W).pack(fill=tk.X, pady=(8, 0))
@@ -1071,7 +1066,7 @@ class PDFLevelPreviewApp:
     def _draw_preview(self):
         if self.current_img is None:
             return
-        # "자른 화면 보기"면 저장될 모양대로 남는 부분만 보여준다 (기울기 보정 뒤 자르기 = 저장 순서)
+        # [적용] 뒤에는 저장될 모양대로 남는 부분만 보여준다 (기울기 보정 뒤 자르기 = 저장 순서)
         cut = self._preview_cut_box()
         img = self.current_img.crop(cut) if cut else self.current_img
         photo = ImageTk.PhotoImage(img)
@@ -1353,21 +1348,15 @@ class PDFLevelPreviewApp:
         self.preview_canvas.config(cursor="")
         self._draw_crop_overlay()
 
-    def _on_crop_view_toggle(self):
-        if self.crop_view_var.get():
-            self.crop_edit_var.set(False)
-            self.preview_canvas.config(cursor="")
-        self._draw_preview()
-
     def _leave_crop_view(self):
         """자르기를 다시 만지기 시작하면 선이 보이는 전체 화면으로 돌아간다"""
-        if self.crop_view_var.get():
-            self.crop_view_var.set(False)
+        if self._crop_view:
+            self._crop_view = False
             self._draw_preview()
 
     def _preview_cut_box(self):
-        """자른 화면 보기일 때 화면 이미지에서 남길 픽셀 영역 (l, t, r, b). 아니면 None"""
-        if not self.crop_view_var.get() or self._shown_key is None or self.pdf_doc is None:
+        """[적용] 뒤 잘린 화면일 때 화면 이미지에서 남길 픽셀 영역 (l, t, r, b). 아니면 None"""
+        if not self._crop_view or self._shown_key is None or self.pdf_doc is None:
             return None
         page = self._shown_key[0]  # 화면 이미지의 페이지 (렌더 대기 중이면 현재 페이지와 다를 수 있다)
         top, bottom, left, right = self._page_edit(page)["crop"]
@@ -1396,19 +1385,22 @@ class PDFLevelPreviewApp:
             w, h = self._page_disp_size(idx)
             self._set_page_edit(idx, crop=_clamp_margins(margins, w, h))
         self.crop_edit_var.set(False)
-        self.crop_view_var.set(True)
+        self._crop_view = True
         self.preview_canvas.config(cursor="")
         self._draw_preview()
         target = which if which == "현재 페이지" else f"{which} 페이지"
         self._show_toast(f"자르기를 {target}에 적용했습니다.")
 
     def reset_crop(self):
+        """모든 페이지의 자르기를 없애 원래대로 되돌린다 (기울기는 그대로)"""
         if self.pdf_doc is None:
             return
-        self._set_page_edit(self.current_page, crop=[0.0, 0.0, 0.0, 0.0])
+        for idx in list(self.page_edits):
+            self._set_page_edit(idx, crop=[0.0, 0.0, 0.0, 0.0])
         self._sync_edit_panel()
         self._leave_crop_view()
         self._draw_crop_overlay()
+        self._show_toast("자르기를 모두 초기화했습니다.")
 
     def save_crop_size(self):
         """현재 페이지에서 보이는(자른 뒤) 크기를 저장"""
@@ -1478,8 +1470,8 @@ class PDFLevelPreviewApp:
         """자르기 선: 잘릴 영역은 어둡게, 남는 영역은 파란 선. 태그 "crop"만 지우고 다시 그린다"""
         canvas = self.preview_canvas
         canvas.delete("crop")
-        if self.crop_view_var.get():
-            return  # 자른 화면에서는 이미 잘린 모양이 보인다
+        if self._crop_view:
+            return  # 잘린 화면에서는 이미 잘린 모양이 보인다
         res = self._crop_canvas_rect()
         if res is None:
             return
