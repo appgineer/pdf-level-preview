@@ -343,6 +343,9 @@ class PDFLevelPreviewApp:
         self._saved_crop_size = None  # (w, h) pt, 크기 맞춤용. 다른 PDF를 열어도 유지
         self._edits_dirty = False
         self._crop_drag = None  # (대상, 시작 x, 시작 y, 시작 여백)
+        self._rotate_drag = None  # (페이지 중심 x, y, 시작 마우스 각도 rad, 시작 기울기 °)
+        self._rotate_redraw_id = None
+        self._rotate_drag_photo = None
         self._syncing_edit = False  # 코드에서 편집 입력칸을 채우는 중 (되먹임 방지)
 
         # 미리보기 렌더 워커 (앱 수명 동안 하나)
@@ -365,6 +368,7 @@ class PDFLevelPreviewApp:
         self.split_size_mb_var = tk.IntVar(value=0)
         self.split_range_text = None
         self.crop_edit_var = tk.BooleanVar(value=False)
+        self.rotate_drag_var = tk.BooleanVar(value=False)
 
         self._build_ui()
         if has_dnd:
@@ -582,23 +586,24 @@ class PDFLevelPreviewApp:
         self.edit_page_label = tk.Label(parent, text="", font=UI_FONT_SMALL, fg="#666", anchor=tk.W)
         self.edit_page_label.pack(fill=tk.X)
 
-        # 회전 (기울기 보정, °). 페이지마다 따로, ↑/↓로 1°씩
-        tk.Label(parent, text="회전 (°)", font=FNT, anchor=tk.W).pack(fill=tk.X, pady=(8, 0))
-        angle_grid = tk.Frame(parent)
-        angle_grid.pack(anchor=tk.W)
-        self.angle_vars = {}
-        self._edit_entries = []
-        for col, (side, text) in enumerate((("left", "왼쪽"), ("right", "오른쪽"))):
-            tk.Label(angle_grid, text=text, font=FNT).grid(row=0, column=col * 2, sticky=tk.E,
-                                                           padx=(0 if col == 0 else 12, 4), pady=2)
-            var = tk.StringVar(value="0")
-            entry = tk.Entry(angle_grid, textvariable=var, width=5, font=FNT)
-            entry.grid(row=0, column=col * 2 + 1, pady=2)
-            var.trace_add("write", lambda *_, s=side: self._on_angle_var_change(s))
-            entry.bind("<Up>",   lambda e, s=side: self._nudge_angle(s, +1))
-            entry.bind("<Down>", lambda e, s=side: self._nudge_angle(s, -1))
-            self.angle_vars[side] = var
-            self._edit_entries.append(entry)
+        # 회전 (기울기 보정, °). 페이지마다 따로. + 오른쪽 / - 왼쪽, ↑/↓로 1°씩
+        rot_row = tk.Frame(parent)
+        rot_row.pack(fill=tk.X, pady=(8, 0))
+        tk.Label(rot_row, text="회전 (°)", font=FNT).pack(side=tk.LEFT)
+        self.angle_var = tk.StringVar(value="0")
+        angle_entry = tk.Entry(rot_row, textvariable=self.angle_var, width=6, font=FNT)
+        angle_entry.pack(side=tk.LEFT, padx=6)
+        self.angle_var.trace_add("write", self._on_angle_var_change)
+        angle_entry.bind("<Up>",   lambda e: self._nudge_angle(+1))
+        angle_entry.bind("<Down>", lambda e: self._nudge_angle(-1))
+        tk.Checkbutton(rot_row, text="드래그", variable=self.rotate_drag_var,
+                       command=self._on_rotate_drag_toggle, cursor="hand2", font=FNT,
+                       image=self._ind_tk['cb_off'], selectimage=self._ind_tk['cb_on'],
+                       indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
+                       selectcolor=self._bg_color).pack(side=tk.LEFT)
+        tk.Label(parent, text="+ 오른쪽 / - 왼쪽 회전", font=UI_FONT_SMALL, fg="#666",
+                 anchor=tk.W).pack(fill=tk.X)
+        self._edit_entries = [angle_entry]
 
         # 자르기 여백 (mm, 화면 기준)
         tk.Label(parent, text="자르기 (mm)", font=FNT, anchor=tk.W).pack(fill=tk.X, pady=(8, 0))
@@ -1071,6 +1076,10 @@ class PDFLevelPreviewApp:
 
     def _on_drag_start(self, event):
         self._crop_drag = None
+        self._rotate_drag = None
+        if self.rotate_drag_var.get():
+            self._start_rotate_drag(event)
+            return
         if self.crop_edit_var.get():
             target = self._crop_hit(event)
             if target:
@@ -1081,6 +1090,10 @@ class PDFLevelPreviewApp:
         self.preview_canvas.scan_mark(event.x, event.y)
 
     def _on_drag_move(self, event):
+        if self.rotate_drag_var.get():
+            if self._rotate_drag is not None:
+                self._rotate_drag_move(event)
+            return
         if self._crop_drag is None:
             self.preview_canvas.scan_dragto(event.x, event.y, gain=1)
             return
@@ -1111,10 +1124,14 @@ class PDFLevelPreviewApp:
 
     def _on_drag_end(self, event):
         self._crop_drag = None
+        if self._rotate_drag is not None:
+            self._end_rotate_drag()
 
     def _on_preview_hover(self, event):
         cursor = ""
-        if self.crop_edit_var.get():
+        if self.rotate_drag_var.get():
+            cursor = "exchange"
+        elif self.crop_edit_var.get():
             cursor = {"top": "sb_v_double_arrow", "bottom": "sb_v_double_arrow",
                       "left": "sb_h_double_arrow", "right": "sb_h_double_arrow",
                       "move": "fleur"}.get(self._crop_hit(event), "")
@@ -1163,9 +1180,7 @@ class PDFLevelPreviewApp:
             return
         e = self._page_edit(self.current_page)
         self._syncing_edit = True
-        a = e["angle"]
-        self.angle_vars["right"].set(f"{a:g}" if a > 0 else "0")
-        self.angle_vars["left"].set(f"{-a:g}" if a < 0 else "0")
+        self.angle_var.set(f"{e['angle']:g}")
         for side, v in zip(CROP_SIDES, e["crop"]):
             self.crop_vars[side].set(f"{_pt_to_mm(v):.1f}")
         self._syncing_edit = False
@@ -1173,33 +1188,93 @@ class PDFLevelPreviewApp:
         self.edit_page_label.config(
             text=f"p.{self.current_page + 1}  {_pt_to_mm(w):.1f} × {_pt_to_mm(h):.1f} mm")
 
-    def _angle_var(self, side):
-        try:
-            return float(self.angle_vars[side].get())
-        except ValueError:
-            return 0.0
-
-    def _on_angle_var_change(self, side):
+    def _on_angle_var_change(self, *_):
         if self._syncing_edit or self.pdf_doc is None:
             return
         try:
-            value = float(self.angle_vars[side].get())
+            angle = float(self.angle_var.get())
         except ValueError:
-            return  # 입력 중인 빈 칸/잘못된 값은 무시
-        if value:
-            # 왼쪽/오른쪽은 한 칸만 쓴다
-            self._syncing_edit = True
-            self.angle_vars["left" if side == "right" else "right"].set("0")
-            self._syncing_edit = False
-        self._set_page_edit(self.current_page, angle=self._angle_var("right") - self._angle_var("left"))
+            return  # 입력 중인 빈 칸이나 "-"만 친 상태는 무시
+        self._set_page_edit(self.current_page, angle=angle)
+        self._redraw_current_thumb()
+        self._on_var_change()  # 미리보기는 레벨 입력처럼 잠깐 뒤에 갱신
+
+    def _nudge_angle(self, delta):
+        try:
+            angle = float(self.angle_var.get())
+        except ValueError:
+            angle = 0.0
+        self.angle_var.set(f"{angle + delta:g}")
+        return "break"
+
+    def _redraw_current_thumb(self):
         if self.current_page in self._drawn_pages:
             self._draw_thumb_page(self.current_page)
             self._draw_selection()
-        self._on_var_change()  # 미리보기는 레벨 입력처럼 잠깐 뒤에 갱신
 
-    def _nudge_angle(self, side, delta):
-        self.angle_vars[side].set(f"{max(0.0, self._angle_var(side) + delta):g}")
-        return "break"
+    def _on_rotate_drag_toggle(self):
+        if self.rotate_drag_var.get():
+            self.crop_edit_var.set(False)  # 미리보기 드래그는 한 가지 용도만
+        self.preview_canvas.config(cursor="")
+        self._draw_crop_overlay()
+
+    def _start_rotate_drag(self, event):
+        if self.current_img is None or self._shown_key is None or self._shown_key[0] != self.current_page:
+            return  # 렌더 대기 중
+        ox, oy = self._img_origin
+        cx = ox + self.current_img.width / 2
+        cy = oy + self.current_img.height / 2
+        x = self.preview_canvas.canvasx(event.x)
+        y = self.preview_canvas.canvasy(event.y)
+        self._rotate_drag = (cx, cy, math.atan2(y - cy, x - cx), self._page_edit(self.current_page)["angle"])
+
+    def _rotate_drag_move(self, event):
+        """페이지 가운데를 중심으로 마우스가 돈 만큼 기울기를 바꾼다 (화면은 y가 아래라 atan2 증가 = 시계방향)"""
+        cx, cy, t0, a0 = self._rotate_drag
+        x = self.preview_canvas.canvasx(event.x)
+        y = self.preview_canvas.canvasy(event.y)
+        delta = math.degrees(math.atan2(y - cy, x - cx) - t0)
+        angle = round((a0 + delta + 180) % 360 - 180, 1) + 0.0  # ±180 안, 0.1° 단위, -0 방지
+        self._set_page_edit(self.current_page, angle=angle)
+        self._syncing_edit = True
+        self.angle_var.set(f"{angle:g}")
+        self._syncing_edit = False
+        # 마우스 이벤트마다 그리면 밀리므로 모아서 그린다
+        if self._rotate_redraw_id is None:
+            self._rotate_redraw_id = self.root.after(30, self._draw_rotate_drag)
+
+    def _draw_rotate_drag(self):
+        """드래그 회전 중 임시 화면: 보이는 부분만 빠르게 돌려 덮어 그린다. 정식 렌더는 놓은 뒤에 한다"""
+        self._rotate_redraw_id = None
+        if self._rotate_drag is None or self.current_img is None:
+            return
+        canvas = self.preview_canvas
+        vw = max(1, canvas.winfo_width())
+        vh = max(1, canvas.winfo_height())
+        x0, y0 = canvas.canvasx(0), canvas.canvasy(0)
+        cx, cy = self._rotate_drag[0], self._rotate_drag[1]
+        ox, oy = self._img_origin
+        # 화면 이미지는 _shown_key의 각도로 그려져 있으니 그 차이만큼만 더 돌린다
+        t = math.radians(self._page_edit(self.current_page)["angle"] - self._shown_key[6])
+        cos, sin = math.cos(t), math.sin(t)
+        # 출력 픽셀 (u, v) → 원본 이미지 픽셀: 페이지 중심 기준 시계방향 회전의 역변환
+        dx, dy = x0 - cx, y0 - cy
+        data = (cos, sin, dx * cos + dy * sin + cx - ox,
+                -sin, cos, -dx * sin + dy * cos + cy - oy)
+        img = self.current_img.transform((vw, vh), Image.AFFINE, data,
+                                         resample=Image.BILINEAR, fillcolor="#666666")
+        self._rotate_drag_photo = ImageTk.PhotoImage(img)
+        canvas.delete("rotdrag")
+        canvas.create_image(x0, y0, anchor=tk.NW, image=self._rotate_drag_photo, tags="rotdrag")
+        canvas.tag_raise("crop")  # 자르기 선은 수평 기준선으로 그대로 보이게
+
+    def _end_rotate_drag(self):
+        if self._rotate_redraw_id is not None:
+            self.root.after_cancel(self._rotate_redraw_id)
+            self._draw_rotate_drag()  # 마지막 위치까지 그려 두고 정식 렌더를 기다린다
+        self._rotate_drag = None
+        self._redraw_current_thumb()
+        self._on_var_change()
 
     def _on_crop_var_change(self, *_):
         if self._syncing_edit or self.pdf_doc is None:
@@ -1213,8 +1288,9 @@ class PDFLevelPreviewApp:
         self._draw_crop_overlay()
 
     def _on_crop_edit_toggle(self):
-        if not self.crop_edit_var.get():
-            self.preview_canvas.config(cursor="")
+        if self.crop_edit_var.get():
+            self.rotate_drag_var.set(False)  # 미리보기 드래그는 한 가지 용도만
+        self.preview_canvas.config(cursor="")
         self._draw_crop_overlay()
 
     def apply_crop_all(self):
@@ -1254,18 +1330,20 @@ class PDFLevelPreviewApp:
         top = (h - sh) / 2
         self._set_page_edit(self.current_page, crop=[top, h - sh - top, left, w - sw - left])
         self.crop_edit_var.set(True)
+        self.rotate_drag_var.set(False)
         self._sync_edit_panel()
         self._draw_crop_overlay()
 
     def _crop_canvas_rect(self):
         """현재 페이지 자르기 박스의 캔버스 좌표와 배율(px/pt).
 
-        캔버스에 떠 있는 이미지가 현재 페이지/회전이 아니면(렌더 대기 중) None.
+        캔버스에 떠 있는 이미지가 현재 페이지가 아니면(렌더 대기 중) None.
+        기울기 보정은 페이지 크기를 바꾸지 않으므로 각도와는 상관없다.
         """
         if self.pdf_doc is None or self.current_img is None or self._shown_key is None:
             return None
         e = self._page_edit(self.current_page)
-        if self._shown_key[0] != self.current_page or self._shown_key[6] != e["angle"]:
+        if self._shown_key[0] != self.current_page:
             return None
         w, h = self._page_disp_size(self.current_page)
         s = self.current_img.width / w
