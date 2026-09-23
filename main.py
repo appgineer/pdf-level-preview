@@ -36,7 +36,9 @@ INDICATOR_MARK = "#e00000"  # 선택 표시(체크마크/라디오 점) 색. 검
 # 오른쪽 패널 구간 색: 편집(PDF 직접 수정) / 설정 파일(config.json)
 SECTION_EDIT_BG, SECTION_EDIT_HEAD = "#eaf2fb", "#b6d3f2"
 SECTION_CONFIG_BG, SECTION_CONFIG_HEAD = "#f7f1e6", "#e4d4b5"
-# 눈에 띄어야 하는 버튼 (다른 이름으로 저장)
+# 드래그 회전: 마우스를 위아래로 이 픽셀만큼 끌 때마다 0.1°씩 (아래로 = 오른쪽/시계방향)
+ROTATE_DRAG_PX = 4
+# 눈에 띄어야 하는 버튼 (적용 / 다른 이름으로 저장)
 SAVE_BTN_BG, SAVE_BTN_ACTIVE = "#1f6fd0", "#17559f"
 # 내장 이미지가 없는 페이지(벡터/텍스트)의 렌더 스케일. 1.0 = 72 DPI
 BASE_SCALE = 8  # 576 DPI
@@ -373,7 +375,7 @@ class PDFLevelPreviewApp:
         self._thumb_redraw_id = None
         self._edits_dirty = False
         self._crop_drag = None  # (대상, 시작 x, 시작 y, 시작 여백)
-        self._rotate_drag = None  # (페이지 중심 x, y, 시작 마우스 각도 rad, 시작 기울기 °)
+        self._rotate_drag = None  # (시작 마우스 y, 시작 기울기 °)
         self._rotate_redraw_id = None
         self._rotate_drag_photo = None
         self._syncing_edit = False  # 코드에서 편집 입력칸을 채우는 중 (되먹임 방지)
@@ -714,7 +716,9 @@ class PDFLevelPreviewApp:
         tk.Button(apply_row, text="초기화", command=self.reset_crop,
                   cursor="hand2", font=FNT).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
         tk.Button(apply_row, text="적용", command=self.apply_crop_range,
-                  cursor="hand2", font=FNT).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0))
+                  cursor="hand2", font=FNT, bg=SAVE_BTN_BG, fg="white",
+                  activebackground=SAVE_BTN_ACTIVE, activeforeground="white"
+                  ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0))
 
         tk.Button(parent, text="다른 이름으로 저장", command=self.save_edited_pdf,
                   padx=12, pady=6, cursor="hand2", font=FNT,
@@ -1437,23 +1441,17 @@ class PDFLevelPreviewApp:
     def _start_rotate_drag(self, event):
         if self.current_img is None or self._shown_key is None or self._shown_key[0] != self.current_page:
             return  # 렌더 대기 중
-        ox, oy = self._img_origin
-        cx = ox + self.current_img.width / 2
-        cy = oy + self.current_img.height / 2
-        x = self.preview_canvas.canvasx(event.x)
         y = self.preview_canvas.canvasy(event.y)
-        self._rotate_drag = (cx, cy, math.atan2(y - cy, x - cx), self._page_edit(self.current_page)["angle"])
+        self._rotate_drag = (y, self._page_edit(self.current_page)["angle"])
         # 끄는 도중 정식 렌더가 끼어들지 않게 밀린 갱신은 취소한다 (놓을 때 다시 요청)
         if hasattr(self, "_var_after_id"):
             self.root.after_cancel(self._var_after_id)
 
     def _rotate_drag_move(self, event):
-        """페이지 가운데를 중심으로 마우스가 돈 만큼 기울기를 바꾼다 (화면은 y가 아래라 atan2 증가 = 시계방향)"""
-        cx, cy, t0, a0 = self._rotate_drag
-        x = self.preview_canvas.canvasx(event.x)
-        y = self.preview_canvas.canvasy(event.y)
-        delta = math.degrees(math.atan2(y - cy, x - cx) - t0)
-        angle = round((a0 + delta + 180) % 360 - 180, 1) + 0.0  # ±180 안, 0.1° 단위, -0 방지
+        """마우스를 위아래로 끌면 0.1°씩 바뀐다 (아래로 끌면 오른쪽/시계방향)"""
+        sy, a0 = self._rotate_drag
+        steps = int((self.preview_canvas.canvasy(event.y) - sy) / ROTATE_DRAG_PX)
+        angle = round((a0 + steps * 0.1 + 180) % 360 - 180, 1) + 0.0  # ±180 안, 0.1° 단위, -0 방지
         self._set_page_edit(self.current_page, angle=angle)
         self._syncing_edit = True
         self.angle_var.set(f"{angle:g}")
