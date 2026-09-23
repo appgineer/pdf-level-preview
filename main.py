@@ -334,8 +334,9 @@ class PDFLevelPreviewApp:
         # 화면의 75% 크기 (최소 2400x1500 보장), 가운데 배치
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
-        win_w = max(2400, int(screen_w * 0.75))
-        win_h = max(1800, int(screen_h * 0.75) + 300)
+        # 화면보다 크면 아래쪽이 잘려서 스크롤해도 안 보이므로 화면 안으로 맞춘다
+        win_w = min(max(2400, int(screen_w * 0.75)), screen_w)
+        win_h = min(max(1800, int(screen_h * 0.75) + 300), screen_h - 60)
         x = max(0, (screen_w - win_w) // 2)
         y = max(0, (screen_h - win_h) // 2)
         self.root.geometry(f"{win_w}x{win_h}+{x}+{y}")
@@ -536,6 +537,7 @@ class PDFLevelPreviewApp:
             _sync_scroll_region()
 
         canvas.bind("<Configure>", _on_canvas_configure)
+        self._sync_settings_scroll = _sync_scroll_region  # 목록을 펼칠 때 스크롤 범위 갱신용
         inner.bind("<Configure>", _sync_scroll_region)
 
         def _on_settings_scroll(event):
@@ -616,8 +618,6 @@ class PDFLevelPreviewApp:
         # 분할 범위 입력칸(Text)의 줄바꿈 Enter와 편집/자르기 설정 입력칸의 Enter는 레벨 추가로 보내지 않는다
         self.root.bind("<Return>", lambda e: None if isinstance(e.widget, tk.Text) or e.widget in self._edit_entries
                        else self.add_level())
-
-        ttk.Separator(self.level_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
 
         # ── 저장된 레벨 리스트 ──
         self.saved_frame = tk.Frame(self.level_frame)
@@ -1914,12 +1914,20 @@ class PDFLevelPreviewApp:
             self.level_frame.pack(fill=tk.X, after=self._scan_sep)
         else:
             self.level_frame.pack_forget()
+        self._refresh_settings_scroll()
 
     def _toggle_ocr(self):
         if self.ocr_enabled_var.get():
             self.ocr_grid.pack(fill=tk.X)
         else:
             self.ocr_grid.pack_forget()
+        self._refresh_settings_scroll()
+
+    def _refresh_settings_scroll(self):
+        """목록을 펼치거나 접은 뒤 스크롤 범위를 다시 잡는다 (끝까지 내려갈 수 있게)"""
+        if hasattr(self, "_sync_settings_scroll"):
+            self.root.update_idletasks()
+            self._sync_settings_scroll()
 
     def _toggle_split(self):
         if self.is_split_var.get():
@@ -1954,6 +1962,7 @@ class PDFLevelPreviewApp:
         self.split_detail_frame.pack(fill=tk.X, before=self._split_bottom)
         self._tint(self.split_detail_frame, SECTION_CONFIG_BG)
         self._bind_settings_scroll(self.split_detail_frame)
+        self._refresh_settings_scroll()
 
     def _save_config(self):
         if not self.pdf_doc:
