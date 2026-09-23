@@ -33,6 +33,11 @@ THUMB_MARGIN = 16
 THUMB_LABEL_FONT = ("맑은 고딕", 16)
 INDICATOR_SIZE = 24  # 체크박스/라디오버튼 인디케이터 크기
 INDICATOR_MARK = "#e00000"  # 선택 표시(체크마크/라디오 점) 색. 검은색은 눈에 잘 안 띈다
+# 오른쪽 패널 구간 색: 편집(PDF 직접 수정) / 설정 파일(config.json)
+SECTION_EDIT_BG, SECTION_EDIT_HEAD = "#eaf2fb", "#b6d3f2"
+SECTION_CONFIG_BG, SECTION_CONFIG_HEAD = "#f7f1e6", "#e4d4b5"
+# 눈에 띄어야 하는 버튼 (다른 이름으로 저장)
+SAVE_BTN_BG, SAVE_BTN_ACTIVE = "#1f6fd0", "#17559f"
 # 내장 이미지가 없는 페이지(벡터/텍스트)의 렌더 스케일. 1.0 = 72 DPI
 BASE_SCALE = 8  # 576 DPI
 # 레벨 적용 결과 캐시 상한. 100% 확대 시 항목당 ~49MB
@@ -401,6 +406,7 @@ class PDFLevelPreviewApp:
         self.rotate_drag_var = tk.BooleanVar(value=False)
         self.crop_range_var = tk.StringVar(value="전체")
 
+        self._section_heads = []  # (머리말 라벨, 색) — 구간 색칠 때 제 색을 지킨다
         self._build_ui()
         if has_dnd:
             self._bind_dnd()
@@ -548,19 +554,23 @@ class PDFLevelPreviewApp:
             canvas.bind(evt, _on_settings_scroll)
 
         # ── 구간 1: 편집 (이 PDF를 직접 고쳐 새 파일로 저장) ──
-        self._section_header(inner, "편집 — 이 PDF 고치기", first=True)
-        self._build_edit_panel(inner)
+        edit_box = tk.Frame(inner)
+        edit_box.pack(fill=tk.X)
+        self._section_header(edit_box, "편집 — 이 PDF 고치기", SECTION_EDIT_HEAD, first=True)
+        self._build_edit_panel(edit_box)
 
         # ── 구간 2: 설정 파일 (config.json, 자동화 프로그램이 읽는다) ──
-        self._section_header(inner, "설정 파일 — config.json 만들기")
+        config_box = tk.Frame(inner)
+        config_box.pack(fill=tk.X, pady=(16, 0))
+        self._section_header(config_box, "설정 파일 — config.json 만들기", SECTION_CONFIG_HEAD)
 
         # ── 자르기 설정 ──
-        self._build_crop_config(inner)
-        ttk.Separator(inner, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
+        self._build_crop_config(config_box)
+        ttk.Separator(config_box, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
 
         # ── 스캔타입 ──
-        tk.Label(inner, text="스캔타입", font=FNT, anchor=tk.W).pack(fill=tk.X)
-        scan_frame = tk.Frame(inner)
+        tk.Label(config_box, text="스캔타입", font=FNT, anchor=tk.W).pack(fill=tk.X)
+        scan_frame = tk.Frame(config_box)
         scan_frame.pack(anchor=tk.W, pady=(0, 8))
         for txt in ("일반", "고급"):
             tk.Radiobutton(scan_frame, text=txt, variable=self.scan_type_var, value=txt,
@@ -569,11 +579,11 @@ class PDFLevelPreviewApp:
                            indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
                            selectcolor=self._bg_color).pack(side=tk.LEFT, padx=(0, 12))
 
-        self._scan_sep = ttk.Separator(inner, orient=tk.HORIZONTAL)
+        self._scan_sep = ttk.Separator(config_box, orient=tk.HORIZONTAL)
         self._scan_sep.pack(fill=tk.X, pady=10)
 
         # ── 레벨 조정 (고급 전용, _toggle_scan_type이 표시/숨김) ──
-        self.level_frame = tk.Frame(inner)
+        self.level_frame = tk.Frame(config_box)
 
         r_black = tk.Frame(self.level_frame)
         r_black.pack(fill=tk.X, pady=(4, 8))
@@ -611,15 +621,34 @@ class PDFLevelPreviewApp:
         ttk.Separator(self.level_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
 
         # ── 분할 / OCR ──
-        self._build_config_panel(inner)
+        self._build_config_panel(config_box)
         self._toggle_scan_type()
 
+        # 구간별 배경색으로 한눈에 구분되게
+        self._tint(edit_box, SECTION_EDIT_BG)
+        self._tint(config_box, SECTION_CONFIG_BG)
         _bind_scroll_recursive(inner)
 
-    def _section_header(self, parent, text, first=False):
+    def _section_header(self, parent, text, color, first=False):
         """오른쪽 패널을 구간으로 나누는 머리말 (편집 / 설정 파일)"""
-        tk.Label(parent, text=text, font=UI_FONT_BOLD, bg="#c8c8c8", fg="#111",
-                 anchor=tk.W, padx=8, pady=4).pack(fill=tk.X, pady=(0 if first else 16, 8))
+        head = tk.Label(parent, text=text, font=UI_FONT_BOLD, bg=color, fg="#111",
+                        anchor=tk.W, padx=8, pady=4)
+        head.pack(fill=tk.X, pady=(0, 8))
+        self._section_heads.append((head, color))
+
+    def _tint(self, widget, color):
+        """구간 배경색 칠하기. 버튼·입력칸은 그대로 두고 틀·글씨·체크만 배경을 맞춘다"""
+        todo = [widget]
+        while todo:
+            w = todo.pop()
+            todo.extend(w.winfo_children())
+            cls = w.winfo_class()
+            if cls in ("Frame", "Label"):
+                w.config(bg=color)
+            elif cls in ("Checkbutton", "Radiobutton"):
+                w.config(bg=color, activebackground=color, selectcolor=color)
+        for head, head_color in self._section_heads:  # 머리말은 제 색 유지
+            head.config(bg=head_color)
 
     def _build_edit_panel(self, parent):
         """편집 구간: 회전, 자르기(여백 숫자 / 미리보기 선), 크기 저장·불러오기, 다른 이름으로 저장"""
@@ -676,19 +705,21 @@ class PDFLevelPreviewApp:
         range_menu.pack(fill=tk.X, pady=(4, 0))
         tk.Button(parent, text="현재 크기 저장", command=self.save_crop_size,
                   cursor="hand2", font=FNT).pack(fill=tk.X, pady=(4, 0))
-        self.saved_size_label = tk.Label(parent, text="저장: 없음", font=UI_FONT_SMALL, fg="#666", anchor=tk.W)
+        self.saved_size_label = tk.Label(parent, text="", font=UI_FONT_SMALL, fg="#666", anchor=tk.W)
         self.saved_size_label.pack(fill=tk.X)
         tk.Button(parent, text="저장 크기 불러오기", command=self.crop_to_saved_size,
                   cursor="hand2", font=FNT).pack(fill=tk.X)
         apply_row = tk.Frame(parent)
         apply_row.pack(fill=tk.X, pady=(4, 0))
+        tk.Button(apply_row, text="초기화", command=self.reset_crop,
+                  cursor="hand2", font=FNT).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
         tk.Button(apply_row, text="적용", command=self.apply_crop_range,
-                  cursor="hand2", font=FNT).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        tk.Button(apply_row, text="초기화", command=self.reset_crop, padx=6, pady=0,
-                  cursor="hand2", font=UI_FONT_SMALL).pack(side=tk.RIGHT, padx=(6, 0))
+                  cursor="hand2", font=FNT).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0))
 
         tk.Button(parent, text="다른 이름으로 저장", command=self.save_edited_pdf,
-                  padx=12, pady=4, cursor="hand2", font=FNT).pack(fill=tk.X, pady=(12, 0))
+                  padx=12, pady=6, cursor="hand2", font=FNT,
+                  bg=SAVE_BTN_BG, fg="white", activebackground=SAVE_BTN_ACTIVE,
+                  activeforeground="white").pack(fill=tk.X, pady=(28, 4))
 
     def _build_crop_config(self, parent):
         """자르기 설정 (config.json의 crop_mm, 자동화 프로그램용). 편집기의 자르기와는 별개"""
@@ -1583,7 +1614,7 @@ class PDFLevelPreviewApp:
         self._saved_crop_box = (top, left, w - left - right, h - top - bottom)
         sw, sh = self._saved_crop_box[2:]
         self.saved_size_label.config(
-            text=f"저장: {_pt_to_mm(sw):.1f} × {_pt_to_mm(sh):.1f} mm "
+            text=f"저장한 크기: {_pt_to_mm(sw):.1f} × {_pt_to_mm(sh):.1f} mm "
                  f"(위 {round(_pt_to_mm(top), 1):g} · 좌 {round(_pt_to_mm(left), 1):g})")
 
     def crop_to_saved_size(self):
@@ -1755,6 +1786,7 @@ class PDFLevelPreviewApp:
         )
         btn.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
+        self._tint(row, SECTION_CONFIG_BG)
         self._bind_settings_scroll(row)
 
     def _select_level(self, idx, black, white):
@@ -1882,6 +1914,7 @@ class PDFLevelPreviewApp:
             tk.Entry(inner, textvariable=self.split_size_mb_var,
                      width=8, font=FNT).pack(side=tk.LEFT, padx=6)
         self.split_detail_frame.pack(fill=tk.X, before=self._split_bottom)
+        self._tint(self.split_detail_frame, SECTION_CONFIG_BG)
         self._bind_settings_scroll(self.split_detail_frame)
 
     def _save_config(self):
