@@ -477,6 +477,9 @@ class PDFLevelPreviewApp:
         self.filename_label = tk.Label(toolbar, text="열린 파일 없음", anchor=tk.W, font=UI_FONT_SMALL)
         self.filename_label.pack(side=tk.LEFT, padx=6)
 
+        self.page_label = tk.Label(toolbar, text="", fg=CFG_CROP_LINE, anchor=tk.W, font=UI_FONT_BOLD)
+        self.page_label.pack(side=tk.LEFT, padx=12)
+
         self.render_status = tk.Label(toolbar, text="", fg="#999", anchor=tk.W, font=UI_FONT_SMALL)
         self.render_status.pack(side=tk.LEFT, padx=6)
 
@@ -956,6 +959,7 @@ class PDFLevelPreviewApp:
         self._update_zoom_label()
         self.filename_label.config(text=path.replace("\\", "/").split("/")[-1])
         self._build_thumbnails()
+        self._update_page_label()
         self._load_config(path)
         self.update_preview()
 
@@ -1216,6 +1220,7 @@ class PDFLevelPreviewApp:
     # ------------------------------------------------------------------ #
     def select_page(self, page_idx):
         self.current_page = page_idx
+        self._update_page_label()
         self._crop_before_edit = self._page_edit(page_idx)["crop"]
         if self.crop_edit_var.get():
             # 다른 페이지는 저장될 모양(잘린 결과)으로 본다. 다시 만지면 선 편집이 켜진다
@@ -1341,7 +1346,7 @@ class PDFLevelPreviewApp:
             self.preview_cache[key] = (self.current_img, status)
             self._shown_key = key
             self._draw_preview()
-            self.render_status.config(text=status)
+            self.render_status.config(text="")
             # 이웃 페이지 미리 렌더만 시킨다
             self._pending_req = None
             self._render_req_q.put((self._pdf_path, key, False))
@@ -1384,7 +1389,8 @@ class PDFLevelPreviewApp:
             self.current_img = img
             self._shown_key = key
             self._draw_preview()
-        self.render_status.config(text=status)
+        # 해상도는 보여주지 않는다. 실패했을 때만 알린다
+        self.render_status.config(text="" if img is not None else status)
 
     def _draw_preview(self):
         if self.current_img is None:
@@ -1546,6 +1552,10 @@ class PDFLevelPreviewApp:
             self._draw_thumb_page(idx)
         if drawn:
             self._draw_selection()
+
+    def _update_page_label(self):
+        """툴바의 "선택 페이지 / 총 페이지" 표시"""
+        self.page_label.config(text=f"{self.current_page + 1} / {self._page_count}" if self._page_count else "")
 
     def _page_disp_size(self, idx):
         """화면 기준 페이지 크기 (pt). 90° 회전이면 가로세로가 바뀌고, 기울기는 크기를 안 바꾼다"""
