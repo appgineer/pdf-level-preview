@@ -36,8 +36,11 @@ INDICATOR_MARK = "#e00000"  # 선택 표시(체크마크/라디오 점) 색. 검
 # 오른쪽 패널 구간 색: 편집(PDF 직접 수정) / 설정 파일(config.json)
 SECTION_EDIT_BG, SECTION_EDIT_HEAD = "#eaf2fb", "#b6d3f2"
 SECTION_CONFIG_BG, SECTION_CONFIG_HEAD = "#f7f1e6", "#e4d4b5"
-# 드래그 회전: 마우스를 위아래로 이 픽셀만큼 끌 때마다 0.1°씩 (아래로 = 오른쪽/시계방향)
-ROTATE_DRAG_PX = 4
+# 드래그 회전: 마우스를 위아래로 이 픽셀만큼 끌 때마다 0.1°씩 (아래로 = 오른쪽/시계방향).
+# 값이 작을수록 빨리 돈다 (2 = 1°에 20px)
+ROTATE_DRAG_PX = 2
+# 설정 파일의 자르기(mm) 자리를 보여주는 선 색 (미리보기 / 썸네일)
+CFG_CROP_LINE = "#e00000"
 # 눈에 띄어야 하는 버튼 (적용 / 다른 이름으로 저장)
 SAVE_BTN_BG, SAVE_BTN_ACTIVE = "#1f6fd0", "#17559f"
 # 내장 이미지가 없는 페이지(벡터/텍스트)의 렌더 스케일. 1.0 = 72 DPI
@@ -659,7 +662,7 @@ class PDFLevelPreviewApp:
         self.edit_page_label = tk.Label(parent, text="", font=UI_FONT_SMALL, fg="#666", anchor=tk.W)
         self.edit_page_label.pack(fill=tk.X)
 
-        # 회전 (기울기 보정, °). 페이지마다 따로. + 오른쪽 / - 왼쪽, ↑/↓로 0.5°씩
+        # 회전 (기울기 보정, °). 페이지마다 따로. + 오른쪽 / - 왼쪽, ←/→로 0.5°씩
         rot_row = tk.Frame(parent)
         rot_row.pack(fill=tk.X, pady=(8, 0))
         tk.Label(rot_row, text="회전 (°)", font=FNT).pack(side=tk.LEFT)
@@ -667,8 +670,9 @@ class PDFLevelPreviewApp:
         angle_entry = tk.Entry(rot_row, textvariable=self.angle_var, width=6, font=FNT)
         angle_entry.pack(side=tk.LEFT, padx=6)
         self.angle_var.trace_add("write", self._on_angle_var_change)
-        angle_entry.bind("<Up>",   lambda e: self._nudge_angle(+0.5))
-        angle_entry.bind("<Down>", lambda e: self._nudge_angle(-0.5))
+        # 좌/우 화살표로 0.5°씩 (오른쪽 = +, 시계방향)
+        angle_entry.bind("<Right>", lambda e: self._nudge_angle(+0.5))
+        angle_entry.bind("<Left>",  lambda e: self._nudge_angle(-0.5))
         tk.Checkbutton(rot_row, text="드래그", variable=self.rotate_drag_var,
                        command=self._on_rotate_drag_toggle, cursor="hand2", font=FNT,
                        image=self._ind_tk['cb_off'], selectimage=self._ind_tk['cb_on'],
@@ -696,8 +700,8 @@ class PDFLevelPreviewApp:
             entry = tk.Entry(grid, textvariable=var, width=6, font=FNT)
             entry.grid(row=row, column=col * 2 + 1, pady=2)
             var.trace_add("write", self._on_crop_var_change)
-            entry.bind("<Up>",   lambda e, s=side: self._nudge_crop(s, +0.1))
-            entry.bind("<Down>", lambda e, s=side: self._nudge_crop(s, -0.1))
+            entry.bind("<Right>", lambda e, s=side: self._nudge_crop(s, +0.1))
+            entry.bind("<Left>",  lambda e, s=side: self._nudge_crop(s, -0.1))
             self.crop_vars[side] = var
             self._edit_entries.append(entry)
         # 적용 범위 → 크기 저장/불러오기 → 적용 순서
@@ -728,7 +732,8 @@ class PDFLevelPreviewApp:
     def _build_crop_config(self, parent):
         """자르기 설정 (config.json의 crop_mm, 자동화 프로그램용). 편집기의 자르기와는 별개"""
         FNT = UI_FONT
-        radio = dict(variable=self.crop_cfg_var, cursor="hand2", font=FNT,
+        radio = dict(variable=self.crop_cfg_var, command=self._on_crop_cfg_change,
+                     cursor="hand2", font=FNT,
                      image=self._ind_tk['rb_off'], selectimage=self._ind_tk['rb_on'],
                      indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
                      selectcolor=self._bg_color)
@@ -750,6 +755,29 @@ class PDFLevelPreviewApp:
         # 숫자를 치면 "입력"을 고른 것으로 본다
         if self.crop_cfg_mm_var.get().strip():
             self.crop_cfg_var.set("입력")
+        self._on_crop_cfg_change()
+
+    def _on_crop_cfg_change(self, *_):
+        """설정 자르기 값이 바뀌면 미리보기와 썸네일의 빨간 선을 다시 그린다"""
+        self._draw_cfg_crop_lines()
+        if self._drawn_pages:
+            self._thumb_dirty.update(self._drawn_pages)
+            self._schedule_thumb_redraw()
+
+    def _draw_cfg_crop_lines(self):
+        """설정 파일의 자르기(mm)만큼 안쪽에 빨간 선. 자동화가 잘라낼 자리를 보여준다"""
+        canvas = self.preview_canvas
+        canvas.delete("cfgcrop")
+        mm = self._crop_cfg_mm()
+        res = self._crop_canvas_rect()
+        if not mm or res is None:
+            return
+        (x0, y0, x1, y1), s = res
+        d = _mm_to_pt(mm) * s
+        if x1 - x0 <= 2 * d or y1 - y0 <= 2 * d:
+            return  # 페이지보다 크게 잘라내는 값
+        canvas.create_rectangle(x0 + d, y0 + d, x1 - d, y1 - d,
+                                outline=CFG_CROP_LINE, width=2, tags="cfgcrop")
 
     def _crop_cfg_mm(self):
         """config.json에 넣을 자르기 값(mm). 안함 = 0. "입력"이 숫자가 아니거나 음수면 None"""
@@ -979,6 +1007,17 @@ class PDFLevelPreviewApp:
                 image=photo, anchor=tk.CENTER
             )
             items.append(img_id)
+            # 설정 파일의 자르기(mm) 자리를 빨간 선으로 (미리보기와 같은 표시)
+            cfg_mm = self._crop_cfg_mm()
+            if cfg_mm:
+                page_w = self._page_disp_size(idx)[0] - left - right
+                d = _mm_to_pt(cfg_mm) * img.width / page_w
+                ix0 = x + THUMB_W // 2 - img.width // 2
+                iy0 = y + thumb_h // 2 - img.height // 2
+                if img.width > 2 * d and img.height > 2 * d:
+                    items.append(self.thumb_canvas.create_rectangle(
+                        ix0 + d, iy0 + d, ix0 + img.width - d, iy0 + img.height - d,
+                        outline=CFG_CROP_LINE, width=2))
         else:
             rect_id = self.thumb_canvas.create_rectangle(
                 x, y, x + THUMB_W, y + thumb_h,
@@ -1254,7 +1293,8 @@ class PDFLevelPreviewApp:
         # 좌표 계산은 자르기 전 전체 이미지 기준이라, 잘라낸 만큼 원점을 왼쪽 위로 옮겨 둔다
         self._img_origin = (x0 - cut[0], y0 - cut[1]) if cut else (x0, y0)
         self._draw_crop_overlay()
-        # 그사이 각도가 더 바뀌었으면(↑/↓ 연타, 드래그 중) 예전 각도 화면으로 튀지 않게 바로 덮는다
+        self._draw_cfg_crop_lines()
+        # 그사이 각도가 더 바뀌었으면(←/→ 연타, 드래그 중) 예전 각도 화면으로 튀지 않게 바로 덮는다
         self._draw_quick_rotation()
 
     def _on_preview_resize(self, event):
