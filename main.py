@@ -1483,14 +1483,22 @@ class PDFLevelPreviewApp:
         return r.width, r.height
 
     def rotate_90(self, delta):
-        """90° 단위 회전. 자르기 여백도 페이지와 함께 돈다"""
+        """90° 단위 회전. 목록 범위(현재 페이지/홀수/짝수/전체)에 적용하고, 자르기 여백도 함께 돈다.
+
+        페이지마다 지금 각도에서 90°씩 더 돌린다. 이미 다르게 돌려 둔 페이지도 관계가 유지된다.
+        """
         if self.pdf_doc is None:
             return
-        e = self._page_edit(self.current_page)
-        self._set_page_edit(self.current_page, rot=(e["rot"] + delta) % 360,
-                            crop=_rotate_margins(e["crop"], delta))
+        which = self.crop_range_var.get()
+        for idx in self._range_pages(which):
+            e = self._page_edit(idx)
+            self._set_page_edit(idx, rot=(e["rot"] + delta) % 360,
+                                crop=_rotate_margins(e["crop"], delta))
         self._sync_edit_panel()
         self._refresh_preview()
+        if which != "현재 페이지":
+            way = "오른쪽" if delta > 0 else "왼쪽"
+            self._show_toast(f"{self._range_label(which)}를 {way}으로 90° 돌렸습니다.")
 
     def _sync_edit_panel(self):
         """편집 패널의 각도/여백 입력칸과 페이지 크기 표시를 현재 페이지 값으로 맞춘다"""
