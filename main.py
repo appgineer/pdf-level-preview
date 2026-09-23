@@ -56,6 +56,12 @@ PREVIEW_CACHE_MAX = 8
 BASE_CACHE_MAX = 3
 # 임시폴더에 남기는 파일 접두사 (시작 시 정리 대상 식별용)
 TEMP_PREFIX = "pdflvl_"
+# 덮어쓰기 저장용 임시 파일 확장자. 저장 도중 강제 종료되면 PDF 폴더에 남는다
+SAVE_TMP_EXT = ".pdflvl_tmp"
+# 찌꺼기를 찾아볼 폴더 목록 (PDF를 열거나 저장한 곳). 다음 실행 때 청소한다
+USED_DIRS_MAX = 20
+# 방금 만들어진 임시 파일은 다른 창이 저장 중일 수 있으므로 건드리지 않는다 (초)
+SAVE_TMP_GRACE = 60
 # 편집기 자르기 여백 순서 (화면 기준)
 CROP_SIDES = ("top", "bottom", "left", "right")
 # 자르고 남는 최소 크기 (pt, 72pt = 25.4mm)
@@ -945,6 +951,7 @@ class PDFLevelPreviewApp:
             self.pdf_doc.close()
         self.pdf_doc = fitz.open(path)
         self._pdf_path = path
+        _remember_dir(path)  # 저장 도중 강제 종료로 남는 임시 파일을 다음 실행 때 지우려고
         self.thumbnail_cache.clear()
         self.preview_cache.clear()
         self.page_edits.clear()
@@ -1935,7 +1942,7 @@ class PDFLevelPreviewApp:
 
         열어 둔 문서와 미리보기 워커가 파일을 잡고 있으면 Windows에서 교체가 막히므로 먼저 놓아 준다.
         """
-        tmp = src + ".pdflvl_tmp"
+        tmp = src + SAVE_TMP_EXT
         out.save(tmp)
         out.close()
         self.pdf_doc.close()
@@ -2311,6 +2318,64 @@ class PDFLevelPreviewApp:
         self.root.destroy()
 
 
+def _used_dirs_path():
+    """PDF를 열었던 폴더 목록 파일 경로"""
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    return os.path.join(base, "pdf-level-preview", "used_dirs.txt")
+
+
+def _read_used_dirs():
+    try:
+        with open(_used_dirs_path(), encoding="utf-8") as f:
+            return [line.strip() for line in f if line.strip()]
+    except (OSError, UnicodeDecodeError):
+        return []
+
+
+def _write_used_dirs(dirs):
+    try:
+        path = _used_dirs_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(dirs) + "\n")
+    except OSError:
+        pass
+
+
+def _remember_dir(pdf_path):
+    """PDF를 연 폴더를 목록에 적어 둔다. 다음 실행 때 이 폴더들에서 찌꺼기를 찾는다"""
+    folder = os.path.dirname(os.path.abspath(pdf_path))
+    if not folder:
+        return
+    dirs = [d for d in _read_used_dirs() if d != folder] + [folder]
+    _write_used_dirs(dirs[-USED_DIRS_MAX:])
+
+
+def _cleanup_save_dirs():
+    """PDF 폴더에 남은 덮어쓰기용 임시 파일 정리 (저장 도중 강제 종료된 경우).
+
+    os.replace는 같은 드라이브 안에서만 되므로 임시 파일을 원본 옆에 만든다. 그래서
+    임시폴더 청소로는 안 지워져, 열어 본 폴더를 기억해 두고 실행할 때 훑는다.
+    갓 만들어진 파일은 다른 창이 지금 저장 중일 수 있으므로 남겨 둔다.
+    """
+    dirs = _read_used_dirs()
+    alive = []
+    now = time.time()
+    for folder in dirs:
+        if not os.path.isdir(folder):
+            continue  # 폴더가 사라졌으면 목록에서도 뺀다
+        alive.append(folder)
+        for path in glob.glob(os.path.join(glob.escape(folder), "*" + SAVE_TMP_EXT)):
+            try:
+                if now - os.path.getmtime(path) < SAVE_TMP_GRACE:
+                    continue
+                os.unlink(path)
+            except OSError:
+                pass
+    if alive != dirs:
+        _write_used_dirs(alive)
+
+
 def _cleanup_temp_files():
     """임시폴더에 남은 찌꺼기 파일 정리 (이전 실행 + ABBYY)"""
     tmp_dir = tempfile.gettempdir()
@@ -2336,6 +2401,7 @@ def _pdf_arg(argv):
 
 def main():
     _cleanup_temp_files()
+    _cleanup_save_dirs()
     try:
         from tkinterdnd2 import TkinterDnD
         root = TkinterDnD.Tk()
