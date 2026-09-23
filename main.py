@@ -167,6 +167,23 @@ def _clamp_margins(margins, w, h):
     return [top, bottom, left, right]
 
 
+# PDF 회전(시계방향) → PIL transpose (PIL은 반시계방향 기준)
+ROTATE_TRANSPOSE = {
+    90: Image.Transpose.ROTATE_270,
+    180: Image.Transpose.ROTATE_180,
+    270: Image.Transpose.ROTATE_90,
+}
+
+
+def _rotate_margins(margins, delta):
+    """화면 기준 여백 [위, 아래, 좌, 우]를 페이지와 함께 돌린다. delta는 시계방향 90의 배수"""
+    top, bottom, left, right = margins
+    for _ in range((delta // 90) % 4):
+        # 시계방향 90°: 왼쪽이 위로, 위가 오른쪽으로, 오른쪽이 아래로, 아래가 왼쪽으로
+        top, bottom, left, right = left, right, bottom, top
+    return [top, bottom, left, right]
+
+
 def _rotate_image(img, angle):
     """미리보기/썸네일용 기울기 보정. angle은 시계방향 양수(°), 크기 유지, 빈 모서리는 흰색"""
     # PIL은 반시계방향이 양수
@@ -202,11 +219,14 @@ def _deskew_page(page, angle):
     doc.xref_set_key(page.xref, "Contents", f"[{refs}]")
 
 
-def _apply_page_edit(page, angle, margins):
-    """화면에서 본 모양(기울기 보정 + 화면 기준 여백 pt)을 PDF 페이지에 반영한다.
+def _apply_page_edit(page, angle, rot, margins):
+    """화면에서 본 모양(90° 회전 + 기울기 보정 + 화면 기준 여백 pt)을 PDF 페이지에 반영한다.
 
+    90°는 페이지 회전(/Rotate)이라 가로세로가 바뀌고, 기울기는 내용만 돌려 크기를 유지한다.
     자르기는 Acrobat처럼 CropBox만 바꾼다. 이미지 데이터는 그대로 남는다.
     """
+    if rot:
+        page.set_rotation((page.rotation + rot) % 360)
     if angle:
         _deskew_page(page, angle)
     r = page.rect  # 화면 기준
@@ -226,8 +246,8 @@ def _preview_worker(req_q, res_q):
 
     원본 해상도 렌더 → 레벨 → 축소가 무거워서 화면 스레드에서 하면 클릭마다 멈춘다.
     PyMuPDF는 스레드에서 쓸 수 없으므로 썸네일처럼 별도 프로세스로 돌린다.
-    요청: (pdf_path, key, need). key = (page, black, white, zoom, cw, ch, angle), zoom 0 = 맞춤,
-    angle = 편집기 기울기 보정(°, 시계방향 양수).
+    요청: (pdf_path, key, need). key = (page, black, white, zoom, cw, ch, rot, angle), zoom 0 = 맞춤,
+    rot = 90° 단위 회전, angle = 기울기 보정(°, 시계방향 양수). pdf_path가 None이면 파일을 놓는다.
     응답: (pdf_path, key, mode, size, bytes, 상태문구). 실패 시 mode/size/bytes는 None.
     """
     doc = None
@@ -245,16 +265,17 @@ def _preview_worker(req_q, res_q):
             res_q.put((path, key, None, None, None, f"렌더링 실패: {e}"))
 
     def _render(key, remember):
-        pre = pre_cache.get(key[:6])
+        # 레벨·축소·90° 회전까지는 각도와 무관하므로 그대로 재사용한다
+        pre = pre_cache.get(key[:7])
         if pre is None:
             pre = _level_and_scale(key)
             if remember:  # 이웃 미리 렌더가 현재 페이지 것을 밀어내지 않게
                 pre_cache.clear()
-                pre_cache[key[:6]] = pre
+                pre_cache[key[:7]] = pre
         result, status = pre
 
         # 기울기 보정은 축소 후에 해야 가볍다
-        angle = key[6]
+        angle = key[7]
         if angle:
             result = _rotate_image(result, angle)
 
@@ -262,7 +283,7 @@ def _preview_worker(req_q, res_q):
         res_q.put((path, key, result.mode, result.size, result.tobytes(), status))
 
     def _level_and_scale(key):
-        page_idx, black, white, zoom_pct, cw, ch, _ = key
+        page_idx, black, white, zoom_pct, cw, ch, rot, _ = key
         if page_idx in bases:
             base = bases.pop(page_idx)
         else:
@@ -272,8 +293,9 @@ def _preview_worker(req_q, res_q):
             bases.pop(next(iter(bases)))
 
         if zoom_pct == 0:
-            # 맞춤: 캔버스에 페이지가 딱 맞는 zoom 퍼센트
-            zoom_pct = min(cw / base.width, ch / base.height) * 100
+            # 맞춤: 캔버스에 페이지가 딱 맞는 zoom 퍼센트 (90/270 회전이면 가로세로가 바뀐다)
+            bw, bh = (base.height, base.width) if rot in (90, 270) else (base.width, base.height)
+            zoom_pct = min(cw / bw, ch / bh) * 100
 
         # 레벨 적용
         if black == 0 and white == 255:
@@ -289,6 +311,8 @@ def _preview_worker(req_q, res_q):
             display_w = int(leveled.width * scale)
             display_h = int(leveled.height * scale)
             result = leveled.resize((display_w, display_h), Image.LANCZOS)
+        if rot:
+            result = result.transpose(ROTATE_TRANSPOSE[rot])
         return result, f"{base.width}x{base.height} ({zoom_pct}%)"
 
     while True:
@@ -328,7 +352,7 @@ def _preview_worker(req_q, res_q):
         # 한가할 때 다음/이전 페이지를 미리 렌더해 두면 순서대로 넘길 때 바로 보인다
         # 기울기는 페이지마다 따로라 이웃은 대부분 0°로 본다
         for nb in (key[0] + 1, key[0] - 1):
-            nb_key = (nb,) + key[1:6] + (0,)
+            nb_key = (nb,) + key[1:6] + (0, 0)
             if req_q.empty() and 0 <= nb < len(doc) and nb_key not in sent:
                 render(nb_key, remember=False)
 
@@ -691,6 +715,12 @@ class PDFLevelPreviewApp:
                        indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
                        selectcolor=self._bg_color).pack(side=tk.LEFT)
         self._edit_entries = [angle_entry]
+        rot90_row = tk.Frame(parent)
+        rot90_row.pack(fill=tk.X, pady=(4, 0))
+        tk.Button(rot90_row, text="왼쪽 90°", command=lambda: self.rotate_90(-90),
+                  cursor="hand2", font=FNT).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
+        tk.Button(rot90_row, text="오른쪽 90°", command=lambda: self.rotate_90(90),
+                  cursor="hand2", font=FNT).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0))
 
         # 자르기 여백 (mm, 화면 기준). 제목 줄 오른쪽에 "선 편집"
         crop_head = tk.Frame(parent)
@@ -1006,6 +1036,8 @@ class PDFLevelPreviewApp:
             img = self.thumbnail_cache[idx]
             # 썸네일도 저장될 모양 그대로: 기울기 보정 → 자르기 → 셀에 맞추기
             e = self._page_edit(idx)
+            if e["rot"]:
+                img = img.transpose(ROTATE_TRANSPOSE[e["rot"]])
             if e["angle"]:
                 img = _rotate_image(img, e["angle"])
             top, bottom, left, right = e["crop"]
@@ -1228,7 +1260,8 @@ class PDFLevelPreviewApp:
         if zoom_pct == 0:
             cw, ch = self._fit_canvas_size()
 
-        key = (self.current_page, black, white, zoom_pct, cw, ch, self._page_edit(self.current_page)["angle"])
+        e = self._page_edit(self.current_page)
+        key = (self.current_page, black, white, zoom_pct, cw, ch, e["rot"], e["angle"])
         self._wanted_key = key
         if key in self.preview_cache:
             # 최근 사용으로 이동 (오래된 것부터 버리기 위해)
@@ -1405,16 +1438,17 @@ class PDFLevelPreviewApp:
         """페이지 편집값 복사본. 편집 안 한 페이지는 기본값"""
         e = self.page_edits.get(idx)
         if e is None:
-            return {"angle": 0.0, "crop": [0.0, 0.0, 0.0, 0.0]}
-        return {"angle": e["angle"], "crop": list(e["crop"])}
+            return {"angle": 0.0, "rot": 0, "crop": [0.0, 0.0, 0.0, 0.0]}
+        return {"angle": e["angle"], "rot": e["rot"], "crop": list(e["crop"])}
 
-    def _set_page_edit(self, idx, angle=None, crop=None):
+    def _set_page_edit(self, idx, angle=None, rot=None, crop=None):
         old = self._page_edit(idx)
         new = {"angle": old["angle"] if angle is None else angle,
+               "rot": old["rot"] if rot is None else rot,
                "crop": old["crop"] if crop is None else list(crop)}
         if new == old:
             return
-        if new["angle"] == 0 and not any(new["crop"]):
+        if new["angle"] == 0 and new["rot"] == 0 and not any(new["crop"]):
             self.page_edits.pop(idx, None)
         else:
             self.page_edits[idx] = new
@@ -1442,9 +1476,21 @@ class PDFLevelPreviewApp:
             self._draw_selection()
 
     def _page_disp_size(self, idx):
-        """화면 기준 페이지 크기 (pt). 기울기 보정은 크기를 바꾸지 않는다"""
+        """화면 기준 페이지 크기 (pt). 90° 회전이면 가로세로가 바뀌고, 기울기는 크기를 안 바꾼다"""
         r = self.pdf_doc[idx].rect
+        if self._page_edit(idx)["rot"] in (90, 270):
+            return r.height, r.width
         return r.width, r.height
+
+    def rotate_90(self, delta):
+        """90° 단위 회전. 자르기 여백도 페이지와 함께 돈다"""
+        if self.pdf_doc is None:
+            return
+        e = self._page_edit(self.current_page)
+        self._set_page_edit(self.current_page, rot=(e["rot"] + delta) % 360,
+                            crop=_rotate_margins(e["crop"], delta))
+        self._sync_edit_panel()
+        self._refresh_preview()
 
     def _sync_edit_panel(self):
         """편집 패널의 각도/여백 입력칸과 페이지 크기 표시를 현재 페이지 값으로 맞춘다"""
@@ -1532,7 +1578,9 @@ class PDFLevelPreviewApp:
         if self.current_img is None or self._shown_key is None or self._shown_key[0] != self.current_page:
             return  # 렌더 대기 중
         # 화면 이미지는 _shown_key의 각도로 그려져 있으니 그 차이만큼만 더 돌린다
-        t = math.radians(self._page_edit(self.current_page)["angle"] - self._shown_key[6])
+        if self._shown_key[6] != self._page_edit(self.current_page)["rot"]:
+            return  # 90° 회전 렌더 대기 중
+        t = math.radians(self._page_edit(self.current_page)["angle"] - self._shown_key[7])
         if t == 0:
             canvas.delete("rotdrag")
             return
@@ -1604,7 +1652,10 @@ class PDFLevelPreviewApp:
         if self.crop_edit_var.get() or self._shown_key is None or self.pdf_doc is None:
             return None
         page = self._shown_key[0]  # 화면 이미지의 페이지 (렌더 대기 중이면 현재 페이지와 다를 수 있다)
-        top, bottom, left, right = self._page_edit(page)["crop"]
+        e = self._page_edit(page)
+        if self._shown_key[6] != e["rot"]:
+            return None  # 90° 회전 렌더 대기 중
+        top, bottom, left, right = e["crop"]
         if not (top or bottom or left or right):
             return None
         img = self.current_img
@@ -1697,13 +1748,13 @@ class PDFLevelPreviewApp:
     def _crop_canvas_rect(self):
         """현재 페이지 자르기 박스의 캔버스 좌표와 배율(px/pt).
 
-        캔버스에 떠 있는 이미지가 현재 페이지가 아니면(렌더 대기 중) None.
+        캔버스에 떠 있는 이미지가 현재 페이지/90° 회전 상태가 아니면(렌더 대기 중) None.
         기울기 보정은 페이지 크기를 바꾸지 않으므로 각도와는 상관없다.
         """
         if self.pdf_doc is None or self.current_img is None or self._shown_key is None:
             return None
         e = self._page_edit(self.current_page)
-        if self._shown_key[0] != self.current_page:
+        if self._shown_key[0] != self.current_page or self._shown_key[6] != e["rot"]:
             return None
         w, h = self._page_disp_size(self.current_page)
         s = self.current_img.width / w
@@ -1774,7 +1825,7 @@ class PDFLevelPreviewApp:
             out = fitz.open(src)
             try:
                 for idx, e in self.page_edits.items():
-                    _apply_page_edit(out[idx], e["angle"], e["crop"])
+                    _apply_page_edit(out[idx], e["angle"], e["rot"], e["crop"])
                 if same:
                     self._overwrite_original(src, out)
                 else:
