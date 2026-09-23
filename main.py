@@ -32,6 +32,7 @@ THUMB_W = 280
 THUMB_MARGIN = 16
 THUMB_LABEL_FONT = ("맑은 고딕", 16)
 INDICATOR_SIZE = 24  # 체크박스/라디오버튼 인디케이터 크기
+INDICATOR_MARK = "#e00000"  # 선택 표시(체크마크/라디오 점) 색. 검은색은 눈에 잘 안 띈다
 # 내장 이미지가 없는 페이지(벡터/텍스트)의 렌더 스케일. 1.0 = 72 DPI
 BASE_SCALE = 8  # 576 DPI
 # 레벨 적용 결과 캐시 상한. 100% 확대 시 항목당 ~49MB
@@ -65,7 +66,7 @@ def _make_indicator_images():
     d.rectangle([0, 0, s-1, s-1], outline='#666666', width=2, fill='white')
     # 체크마크
     pts = [(int(s*0.2), int(s*0.5)), (int(s*0.4), int(s*0.75)), (int(s*0.8), int(s*0.25))]
-    d.line(pts, fill='#333333', width=3)
+    d.line(pts, fill=INDICATOR_MARK, width=3)
     imgs['cb_on'] = img
 
     # 라디오 - 미선택
@@ -79,7 +80,7 @@ def _make_indicator_images():
     d = ImageDraw.Draw(img)
     d.ellipse([1, 1, s-2, s-2], outline='#666666', width=2, fill='white')
     m = int(s * 0.28)
-    d.ellipse([m, m, s-m, s-m], fill='#333333')
+    d.ellipse([m, m, s-m, s-m], fill=INDICATOR_MARK)
     imgs['rb_on'] = img
 
     return imgs
