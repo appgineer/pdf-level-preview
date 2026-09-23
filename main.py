@@ -37,7 +37,7 @@ INDICATOR_MARK = "#e00000"  # 선택 표시(체크마크/라디오 점) 색. 검
 # 오른쪽 패널 구간 색: 편집(PDF 직접 수정) / 설정 파일(config.json)
 SECTION_EDIT_BG, SECTION_EDIT_HEAD = "#eaf2fb", "#b6d3f2"
 SECTION_CONFIG_BG, SECTION_CONFIG_HEAD = "#f7f1e6", "#e4d4b5"
-# 드래그 회전: 마우스를 위아래로 이 픽셀만큼 끌 때마다 0.1°씩 (아래로 = 오른쪽/시계방향).
+# 드래그 회전: 마우스를 좌우로 이 픽셀만큼 끌 때마다 0.1°씩 (오른쪽으로 = 오른쪽/시계방향).
 # 값이 작을수록 빨리 돈다 (2 = 1°에 20px)
 ROTATE_DRAG_PX = 2
 # 설정 파일의 자르기(mm) 자리를 보여주는 선 색 (미리보기 / 썸네일)
@@ -415,7 +415,7 @@ class PDFLevelPreviewApp:
         self._thumb_redraw_id = None
         self._edits_dirty = False
         self._crop_drag = None  # (대상, 시작 x, 시작 y, 시작 여백)
-        self._rotate_drag = None  # (시작 마우스 y, 시작 기울기 °)
+        self._rotate_drag = None  # (시작 마우스 x, 시작 기울기 °)
         self._rotate_redraw_id = None
         self._rotate_drag_photo = None
         self._syncing_edit = False  # 코드에서 편집 입력칸을 채우는 중 (되먹임 방지)
@@ -1045,7 +1045,9 @@ class PDFLevelPreviewApp:
                 s = img.width / self._page_disp_size(idx)[0]
                 img = img.crop((round(left * s), round(top * s),
                                 round(img.width - right * s), round(img.height - bottom * s)))
-                ratio = min(THUMB_W / img.width, thumb_h / img.height)
+            # 90° 돌리면 가로로 길어져 칸을 넘으므로 항상 칸 안에 맞춘다 (겹침 방지)
+            ratio = min(THUMB_W / img.width, thumb_h / img.height)
+            if abs(ratio - 1) > 0.01:
                 img = img.resize((max(1, int(img.width * ratio)), max(1, int(img.height * ratio))),
                                  Image.LANCZOS)
             photo = ImageTk.PhotoImage(img)
@@ -1551,16 +1553,16 @@ class PDFLevelPreviewApp:
     def _start_rotate_drag(self, event):
         if self.current_img is None or self._shown_key is None or self._shown_key[0] != self.current_page:
             return  # 렌더 대기 중
-        y = self.preview_canvas.canvasy(event.y)
-        self._rotate_drag = (y, self._page_edit(self.current_page)["angle"])
+        x = self.preview_canvas.canvasx(event.x)
+        self._rotate_drag = (x, self._page_edit(self.current_page)["angle"])
         # 끄는 도중 정식 렌더가 끼어들지 않게 밀린 갱신은 취소한다 (놓을 때 다시 요청)
         if hasattr(self, "_var_after_id"):
             self.root.after_cancel(self._var_after_id)
 
     def _rotate_drag_move(self, event):
-        """마우스를 위아래로 끌면 0.1°씩 바뀐다 (아래로 끌면 오른쪽/시계방향)"""
-        sy, a0 = self._rotate_drag
-        steps = int((self.preview_canvas.canvasy(event.y) - sy) / ROTATE_DRAG_PX)
+        """마우스를 좌우로 끌면 0.1°씩 바뀐다 (오른쪽으로 끌면 오른쪽/시계방향)"""
+        sx, a0 = self._rotate_drag
+        steps = int((self.preview_canvas.canvasx(event.x) - sx) / ROTATE_DRAG_PX)
         angle = round((a0 + steps * 0.1 + 180) % 360 - 180, 1) + 0.0  # ±180 안, 0.1° 단위, -0 방지
         self._set_page_edit(self.current_page, angle=angle)
         self._syncing_edit = True
