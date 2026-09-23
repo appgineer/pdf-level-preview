@@ -763,7 +763,7 @@ class PDFLevelPreviewApp:
                   activebackground=LOAD_BTN_ACTIVE).pack(fill=tk.X)
         apply_row = tk.Frame(parent)
         apply_row.pack(fill=tk.X, pady=(4, 0))
-        tk.Button(apply_row, text="초기화", command=self.reset_crop,
+        tk.Button(apply_row, text="초기화", command=self.reset_edits,
                   cursor="hand2", font=FNT).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
         tk.Button(apply_row, text="적용", command=self.apply_crop_range,
                   cursor="hand2", font=FNT, bg=SAVE_BTN_BG, fg="white",
@@ -1704,19 +1704,19 @@ class PDFLevelPreviewApp:
     def _range_label(which):
         return which if which == "현재 페이지" else f"{which} 페이지"
 
-    def reset_crop(self):
-        """목록 범위(현재 페이지/홀수/짝수/전체)의 자르기를 없앤다 (기울기는 그대로)"""
+    def reset_edits(self):
+        """목록 범위(현재 페이지/홀수/짝수/전체)의 편집을 모두 되돌린다 (자르기·기울기·90° 회전)"""
         if self.pdf_doc is None:
             return
         which = self.crop_range_var.get()
         pages = self._range_pages(which)
         for idx in pages:
-            self._set_page_edit(idx, crop=[0.0, 0.0, 0.0, 0.0])
+            self._set_page_edit(idx, angle=0.0, rot=0, crop=[0.0, 0.0, 0.0, 0.0])
         if self.current_page in pages:
             self._crop_before_edit = [0.0, 0.0, 0.0, 0.0]
         self._sync_edit_panel()
         self._refresh_preview()
-        self._show_toast(f"자르기를 {self._range_label(which)}에서 초기화했습니다.")
+        self._show_toast(f"{self._range_label(which)}의 편집을 초기화했습니다.")
 
     def save_crop_size(self):
         """현재 페이지에서 보이는(자른 뒤) 박스의 위치(위·좌)와 크기를 저장"""
