@@ -547,11 +547,14 @@ class PDFLevelPreviewApp:
         for evt in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
             canvas.bind(evt, _on_settings_scroll)
 
-        # ── 편집 ──
+        # ── 구간 1: 편집 (이 PDF를 직접 고쳐 새 파일로 저장) ──
+        self._section_header(inner, "편집 — 이 PDF 고치기", first=True)
         self._build_edit_panel(inner)
-        ttk.Separator(inner, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
 
-        # ── 자르기 설정 (config.json, 자동화용) ──
+        # ── 구간 2: 설정 파일 (config.json, 자동화 프로그램이 읽는다) ──
+        self._section_header(inner, "설정 파일 — config.json 만들기")
+
+        # ── 자르기 설정 ──
         self._build_crop_config(inner)
         ttk.Separator(inner, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
 
@@ -613,11 +616,15 @@ class PDFLevelPreviewApp:
 
         _bind_scroll_recursive(inner)
 
+    def _section_header(self, parent, text, first=False):
+        """오른쪽 패널을 구간으로 나누는 머리말 (편집 / 설정 파일)"""
+        tk.Label(parent, text=text, font=UI_FONT_BOLD, bg="#c8c8c8", fg="#111",
+                 anchor=tk.W, padx=8, pady=4).pack(fill=tk.X, pady=(0 if first else 16, 8))
+
     def _build_edit_panel(self, parent):
-        """편집기: 회전, 자르기(여백 숫자 / 미리보기 선), 크기 맞춤, 다른 이름으로 저장"""
+        """편집 구간: 회전, 자르기(여백 숫자 / 미리보기 선), 크기 저장·불러오기, 다른 이름으로 저장"""
         FNT = UI_FONT
 
-        tk.Label(parent, text="편집", font=FNT, anchor=tk.W).pack(fill=tk.X)
         self.edit_page_label = tk.Label(parent, text="", font=UI_FONT_SMALL, fg="#666", anchor=tk.W)
         self.edit_page_label.pack(fill=tk.X)
 
@@ -638,12 +645,15 @@ class PDFLevelPreviewApp:
                        selectcolor=self._bg_color).pack(side=tk.LEFT)
         self._edit_entries = [angle_entry]
 
-        # 자르기 여백 (mm, 화면 기준)
+        # 자르기 여백 (mm, 화면 기준). 제목 줄 오른쪽에 "선 편집"
         crop_head = tk.Frame(parent)
         crop_head.pack(fill=tk.X, pady=(8, 0))
         tk.Label(crop_head, text="자르기 (mm)", font=FNT).pack(side=tk.LEFT)
-        tk.Button(crop_head, text="초기화", command=self.reset_crop, padx=6, pady=0,
-                  cursor="hand2", font=UI_FONT_SMALL).pack(side=tk.RIGHT)
+        tk.Checkbutton(crop_head, text="선 편집", variable=self.crop_edit_var,
+                       command=self._on_crop_edit_toggle, cursor="hand2", font=FNT,
+                       image=self._ind_tk['cb_off'], selectimage=self._ind_tk['cb_on'],
+                       indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
+                       selectcolor=self._bg_color).pack(side=tk.RIGHT)
         grid = tk.Frame(parent)
         grid.pack(anchor=tk.W)
         self.crop_vars = {}
@@ -659,29 +669,23 @@ class PDFLevelPreviewApp:
             entry.bind("<Down>", lambda e, s=side: self._nudge_crop(s, -0.1))
             self.crop_vars[side] = var
             self._edit_entries.append(entry)
-        crop_row = tk.Frame(parent)
-        crop_row.pack(fill=tk.X, pady=(4, 0))
-        range_menu = tk.OptionMenu(crop_row, self.crop_range_var, "현재 페이지", "홀수", "짝수", "전체")
+        # 적용 범위 → 크기 저장/불러오기 → 적용 순서
+        range_menu = tk.OptionMenu(parent, self.crop_range_var, "현재 페이지", "홀수", "짝수", "전체")
         range_menu.config(font=FNT, cursor="hand2")
         range_menu["menu"].config(font=FNT)
-        # 둘 다 줄 높이만큼 늘려서 높이를 맞춘다
-        range_menu.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 2))
-        tk.Button(crop_row, text="적용", command=self.apply_crop_range,
-                  cursor="hand2", font=FNT).pack(side=tk.LEFT, fill=tk.Y, padx=(2, 0))
-        tk.Checkbutton(parent, text="선 편집", variable=self.crop_edit_var,
-                       command=self._on_crop_edit_toggle, cursor="hand2", font=FNT,
-                       image=self._ind_tk['cb_off'], selectimage=self._ind_tk['cb_on'],
-                       indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
-                       selectcolor=self._bg_color).pack(anchor=tk.W, pady=(4, 0))
-
-        # 크기 맞춤
-        tk.Label(parent, text="크기 맞춤", font=FNT, anchor=tk.W).pack(fill=tk.X, pady=(8, 0))
+        range_menu.pack(fill=tk.X, pady=(4, 0))
+        tk.Button(parent, text="현재 크기 저장", command=self.save_crop_size,
+                  cursor="hand2", font=FNT).pack(fill=tk.X, pady=(4, 0))
         self.saved_size_label = tk.Label(parent, text="저장: 없음", font=UI_FONT_SMALL, fg="#666", anchor=tk.W)
         self.saved_size_label.pack(fill=tk.X)
-        tk.Button(parent, text="현재 크기 저장", command=self.save_crop_size,
+        tk.Button(parent, text="저장 크기 불러오기", command=self.crop_to_saved_size,
                   cursor="hand2", font=FNT).pack(fill=tk.X)
-        tk.Button(parent, text="저장 크기로 자르기", command=self.crop_to_saved_size,
-                  cursor="hand2", font=FNT).pack(fill=tk.X, pady=(4, 0))
+        apply_row = tk.Frame(parent)
+        apply_row.pack(fill=tk.X, pady=(4, 0))
+        tk.Button(apply_row, text="적용", command=self.apply_crop_range,
+                  cursor="hand2", font=FNT).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Button(apply_row, text="초기화", command=self.reset_crop, padx=6, pady=0,
+                  cursor="hand2", font=UI_FONT_SMALL).pack(side=tk.RIGHT, padx=(6, 0))
 
         tk.Button(parent, text="다른 이름으로 저장", command=self.save_edited_pdf,
                   padx=12, pady=4, cursor="hand2", font=FNT).pack(fill=tk.X, pady=(12, 0))
