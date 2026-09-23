@@ -710,7 +710,7 @@ class PDFLevelPreviewApp:
 
         # 회전 (기울기 보정, °). 페이지마다 따로. + 오른쪽 / - 왼쪽, ←/→로 0.1°씩
         rot_row = tk.Frame(parent)
-        rot_row.pack(fill=tk.X, pady=(8, 0))
+        rot_row.pack(fill=tk.X, pady=(16, 0))
         tk.Label(rot_row, text="회전 (°)", font=FNT).pack(side=tk.LEFT)
         self.angle_var = tk.StringVar(value="0")
         angle_entry = tk.Entry(rot_row, textvariable=self.angle_var, width=6, font=FNT)
@@ -726,7 +726,7 @@ class PDFLevelPreviewApp:
                        selectcolor=self._bg_color).pack(side=tk.LEFT)
         self._edit_entries = [angle_entry]
         rot90_row = tk.Frame(parent)
-        rot90_row.pack(fill=tk.X, pady=(4, 0))
+        rot90_row.pack(fill=tk.X, pady=(4, 12))
         tk.Button(rot90_row, text="왼쪽 90°", command=lambda: self.rotate_90(-90), pady=BTN_PADY,
                   cursor="hand2", font=FNT).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
         ref_btn = tk.Button(rot90_row, text="오른쪽 90°", command=lambda: self.rotate_90(90), pady=BTN_PADY,
@@ -2080,9 +2080,13 @@ class PDFLevelPreviewApp:
                            indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
                            selectcolor=self._bg_color).pack(anchor=tk.W)
 
+        # 목록 끝(C/C++) 아래 여백. 목록은 항상 이 위에 붙인다
+        self._ocr_bottom_pad = tk.Frame(parent, height=16)
+        self._ocr_bottom_pad.pack(fill=tk.X)
+
         # 초기 상태: 안함이므로 언어 목록 숨김
         if self.ocr_enabled_var.get():
-            self.ocr_grid.pack(fill=tk.X)
+            self.ocr_grid.pack(fill=tk.X, before=self._ocr_bottom_pad)
 
     def _toggle_scan_type(self):
         if self.scan_type_var.get() == "고급":
@@ -2093,7 +2097,7 @@ class PDFLevelPreviewApp:
 
     def _toggle_ocr(self):
         if self.ocr_enabled_var.get():
-            self.ocr_grid.pack(fill=tk.X)
+            self.ocr_grid.pack(fill=tk.X, before=self._ocr_bottom_pad)
         else:
             self.ocr_grid.pack_forget()
         self._refresh_settings_scroll()
