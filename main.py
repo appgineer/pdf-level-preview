@@ -706,7 +706,7 @@ class PDFLevelPreviewApp:
                                   activebackground=RANGE_ACTIVE, activeforeground="white")
         range_menu.pack(fill=tk.X)
 
-        # 회전 (기울기 보정, °). 페이지마다 따로. + 오른쪽 / - 왼쪽, ←/→로 0.5°씩
+        # 회전 (기울기 보정, °). 페이지마다 따로. + 오른쪽 / - 왼쪽, ←/→로 0.1°씩
         rot_row = tk.Frame(parent)
         rot_row.pack(fill=tk.X, pady=(8, 0))
         tk.Label(rot_row, text="회전 (°)", font=FNT).pack(side=tk.LEFT)
@@ -714,9 +714,9 @@ class PDFLevelPreviewApp:
         angle_entry = tk.Entry(rot_row, textvariable=self.angle_var, width=6, font=FNT)
         angle_entry.pack(side=tk.LEFT, padx=6)
         self.angle_var.trace_add("write", self._on_angle_var_change)
-        # 좌/우 화살표로 0.5°씩 (오른쪽 = +, 시계방향)
-        angle_entry.bind("<Right>", lambda e: self._nudge_angle(+0.5))
-        angle_entry.bind("<Left>",  lambda e: self._nudge_angle(-0.5))
+        # 좌/우 화살표로 0.1°씩 (오른쪽 = +, 시계방향)
+        angle_entry.bind("<Right>", lambda e: self._nudge_angle(+0.1))
+        angle_entry.bind("<Left>",  lambda e: self._nudge_angle(-0.1))
         tk.Checkbutton(rot_row, text="드래그", variable=self.rotate_drag_var,
                        command=self._on_rotate_drag_toggle, cursor="hand2", font=FNT,
                        image=self._ind_tk['cb_off'], selectimage=self._ind_tk['cb_on'],
@@ -750,8 +750,8 @@ class PDFLevelPreviewApp:
             entry = tk.Entry(grid, textvariable=var, width=6, font=FNT)
             entry.grid(row=row, column=col * 2 + 1, pady=2)
             var.trace_add("write", self._on_crop_var_change)
-            entry.bind("<Right>", lambda e, s=side: self._nudge_crop(s, +0.1))
-            entry.bind("<Left>",  lambda e, s=side: self._nudge_crop(s, -0.1))
+            entry.bind("<Right>", lambda e, s=side: self._nudge_crop(s, +1))
+            entry.bind("<Left>",  lambda e, s=side: self._nudge_crop(s, -1))
             self.crop_vars[side] = var
             self._edit_entries.append(entry)
         tk.Button(parent, text="현재 크기 저장", command=self.save_crop_size,
@@ -814,6 +814,8 @@ class PDFLevelPreviewApp:
             side_entry = tk.Entry(self.crop_cfg_side_frame, textvariable=self.crop_cfg_side_vars[side],
                                   width=5, font=FNT)
             side_entry.grid(row=row, column=col * 3 + 1, pady=2)
+            side_entry.bind("<Right>", lambda e, s=side: self._nudge_cfg_crop(s, +1))
+            side_entry.bind("<Left>",  lambda e, s=side: self._nudge_cfg_crop(s, -1))
             tk.Label(self.crop_cfg_side_frame, text="mm", font=FNT).grid(
                 row=row, column=col * 3 + 2, sticky=tk.W, padx=(4, 0))
             self.crop_cfg_side_vars[side].trace_add("write", self._on_crop_cfg_change)
@@ -822,6 +824,13 @@ class PDFLevelPreviewApp:
         self._pad_after_crop_cfg = tk.Frame(parent, height=8)
         self._pad_after_crop_cfg.pack(fill=tk.X)
         self._toggle_crop_cfg_mode()
+
+    def _nudge_cfg_crop(self, side, delta):
+        """설정 파일 자르기(각각)의 값을 1mm씩 (0 아래로는 안 내려간다)"""
+        var = self.crop_cfg_side_vars[side]
+        mm = self._parse_mm(var.get())
+        var.set(f"{max(0.0, round((mm if mm is not None else 0) + delta, 1)):g}")
+        return "break"
 
     def _toggle_crop_cfg_mode(self):
         """"전체"면 값 하나, "각각"이면 위/아래/좌/우 입력칸을 보여준다"""
@@ -1591,7 +1600,7 @@ class PDFLevelPreviewApp:
             angle = float(self.angle_var.get())
         except ValueError:
             angle = 0.0
-        self.angle_var.set(f"{angle + delta:g}")
+        self.angle_var.set(f"{round(angle + delta, 1):g}")
         return "break"
 
     def _on_rotate_drag_toggle(self):
