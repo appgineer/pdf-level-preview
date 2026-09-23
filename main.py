@@ -41,8 +41,10 @@ SECTION_CONFIG_BG, SECTION_CONFIG_HEAD = "#f7f1e6", "#e4d4b5"
 ROTATE_DRAG_PX = 2
 # 설정 파일의 자르기(mm) 자리를 보여주는 선 색 (미리보기 / 썸네일)
 CFG_CROP_LINE = "#e00000"
-# 눈에 띄어야 하는 버튼 (적용 / 다른 이름으로 저장)
-SAVE_BTN_BG, SAVE_BTN_ACTIVE = "#1f6fd0", "#17559f"
+# 눈에 띄어야 하는 버튼/선택창 색
+SAVE_BTN_BG, SAVE_BTN_ACTIVE = "#1f6fd0", "#17559f"      # 적용 / 다른 이름으로 저장 (파랑)
+RANGE_BG, RANGE_ACTIVE = "#3a9d5d", "#2f7f4c"            # 적용 범위 선택창 (초록)
+LOAD_BTN_BG, LOAD_BTN_ACTIVE = "#ef8fb5", "#e0789f"      # 저장 크기 불러오기 (분홍)
 # 내장 이미지가 없는 페이지(벡터/텍스트)의 렌더 스케일. 1.0 = 72 DPI
 BASE_SCALE = 8  # 576 DPI
 # 레벨 적용 결과 캐시 상한. 100% 확대 시 항목당 ~49MB
@@ -706,15 +708,19 @@ class PDFLevelPreviewApp:
             self._edit_entries.append(entry)
         # 적용 범위 → 크기 저장/불러오기 → 적용 순서
         range_menu = tk.OptionMenu(parent, self.crop_range_var, "현재 페이지", "홀수", "짝수", "전체")
-        range_menu.config(font=FNT, cursor="hand2")
-        range_menu["menu"].config(font=FNT)
+        range_menu.config(font=FNT, cursor="hand2", bg=RANGE_BG, fg="white",
+                          activebackground=RANGE_ACTIVE, activeforeground="white",
+                          highlightthickness=0)
+        range_menu["menu"].config(font=FNT, bg=RANGE_BG, fg="white",
+                                  activebackground=RANGE_ACTIVE, activeforeground="white")
         range_menu.pack(fill=tk.X, pady=(4, 0))
         tk.Button(parent, text="현재 크기 저장", command=self.save_crop_size,
                   cursor="hand2", font=FNT).pack(fill=tk.X, pady=(4, 0))
         self.saved_size_label = tk.Label(parent, text="", font=UI_FONT_SMALL, fg="#666", anchor=tk.W)
         self.saved_size_label.pack(fill=tk.X)
         tk.Button(parent, text="저장 크기 불러오기", command=self.crop_to_saved_size,
-                  cursor="hand2", font=FNT).pack(fill=tk.X)
+                  cursor="hand2", font=FNT, bg=LOAD_BTN_BG, fg="#111",
+                  activebackground=LOAD_BTN_ACTIVE).pack(fill=tk.X)
         apply_row = tk.Frame(parent)
         apply_row.pack(fill=tk.X, pady=(4, 0))
         tk.Button(apply_row, text="초기화", command=self.reset_crop,
