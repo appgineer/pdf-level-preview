@@ -46,6 +46,8 @@ CFG_CROP_LINE = "#e00000"
 SAVE_BTN_BG, SAVE_BTN_ACTIVE = "#1f6fd0", "#17559f"      # 적용 / 다른 이름으로 저장 (파랑)
 RANGE_BG, RANGE_ACTIVE = "#3a9d5d", "#2f7f4c"            # 적용 범위 선택창 (초록)
 LOAD_BTN_BG, LOAD_BTN_ACTIVE = "#ef8fb5", "#e0789f"      # 저장 크기 불러오기 (분홍)
+CFG_SAVE_BG, CFG_SAVE_ACTIVE = "#7b4fc0", "#653da8"      # 설정 저장 (보라)
+BTN_PADY = 4  # 버튼·선택창 높이를 맞추는 세로 여백
 # 내장 이미지가 없는 페이지(벡터/텍스트)의 렌더 스케일. 1.0 = 72 DPI
 BASE_SCALE = 8  # 576 DPI
 # 레벨 적용 결과 캐시 상한. 100% 확대 시 항목당 ~49MB
@@ -601,13 +603,13 @@ class PDFLevelPreviewApp:
         # ── 구간 1: 편집 (이 PDF를 직접 고쳐 새 파일로 저장) ──
         edit_box = tk.Frame(inner)
         edit_box.pack(fill=tk.X)
-        self._section_header(edit_box, "편집 — 이 PDF 고치기", SECTION_EDIT_HEAD, first=True)
+        self._section_header(edit_box, "편집", SECTION_EDIT_HEAD, first=True)
         self._build_edit_panel(edit_box)
 
         # ── 구간 2: 설정 파일 (config.json, 자동화 프로그램이 읽는다) ──
         config_box = tk.Frame(inner)
         config_box.pack(fill=tk.X, pady=(16, 0))
-        self._section_header(config_box, "설정 파일 — config.json 만들기", SECTION_CONFIG_HEAD)
+        self._section_header(config_box, "설정 파일 만들기", SECTION_CONFIG_HEAD)
 
         # ── 자르기 설정 ──
         self._build_crop_config(config_box)
@@ -701,7 +703,7 @@ class PDFLevelPreviewApp:
         range_menu = tk.OptionMenu(parent, self.crop_range_var, "현재 페이지", "홀수", "짝수", "전체")
         range_menu.config(font=FNT, cursor="hand2", bg=RANGE_BG, fg="white",
                           activebackground=RANGE_ACTIVE, activeforeground="white",
-                          highlightthickness=0)
+                          highlightthickness=0, pady=BTN_PADY)  # 다른 버튼과 높이 맞춤
         range_menu["menu"].config(font=FNT, bg=RANGE_BG, fg="white",
                                   activebackground=RANGE_ACTIVE, activeforeground="white")
         range_menu.pack(fill=tk.X)
@@ -725,9 +727,9 @@ class PDFLevelPreviewApp:
         self._edit_entries = [angle_entry]
         rot90_row = tk.Frame(parent)
         rot90_row.pack(fill=tk.X, pady=(4, 0))
-        tk.Button(rot90_row, text="왼쪽 90°", command=lambda: self.rotate_90(-90),
+        tk.Button(rot90_row, text="왼쪽 90°", command=lambda: self.rotate_90(-90), pady=BTN_PADY,
                   cursor="hand2", font=FNT).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
-        tk.Button(rot90_row, text="오른쪽 90°", command=lambda: self.rotate_90(90),
+        tk.Button(rot90_row, text="오른쪽 90°", command=lambda: self.rotate_90(90), pady=BTN_PADY,
                   cursor="hand2", font=FNT).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0))
 
         # 자르기 여백 (mm, 화면 기준). 제목 줄 오른쪽에 "선 편집"
@@ -754,24 +756,24 @@ class PDFLevelPreviewApp:
             entry.bind("<Left>",  lambda e, s=side: self._nudge_crop(s, -1))
             self.crop_vars[side] = var
             self._edit_entries.append(entry)
-        tk.Button(parent, text="현재 크기 저장", command=self.save_crop_size,
+        tk.Button(parent, text="현재 크기 저장", command=self.save_crop_size, pady=BTN_PADY,
                   cursor="hand2", font=FNT).pack(fill=tk.X, pady=(4, 0))
         self.saved_size_label = tk.Label(parent, text="", font=UI_FONT_SMALL, fg="#666", anchor=tk.W)
         self.saved_size_label.pack(fill=tk.X)
-        tk.Button(parent, text="저장 크기 불러오기", command=self.crop_to_saved_size,
+        tk.Button(parent, text="저장 크기 불러오기", command=self.crop_to_saved_size, pady=BTN_PADY,
                   cursor="hand2", font=FNT, bg=LOAD_BTN_BG, fg="#111",
                   activebackground=LOAD_BTN_ACTIVE).pack(fill=tk.X)
         apply_row = tk.Frame(parent)
         apply_row.pack(fill=tk.X, pady=(4, 0))
-        tk.Button(apply_row, text="초기화", command=self.reset_edits,
+        tk.Button(apply_row, text="초기화", command=self.reset_edits, pady=BTN_PADY,
                   cursor="hand2", font=FNT).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
-        tk.Button(apply_row, text="적용", command=self.apply_crop_range,
+        tk.Button(apply_row, text="적용", command=self.apply_crop_range, pady=BTN_PADY,
                   cursor="hand2", font=FNT, bg=SAVE_BTN_BG, fg="white",
                   activebackground=SAVE_BTN_ACTIVE, activeforeground="white"
                   ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0))
 
         tk.Button(parent, text="다른 이름으로 저장", command=self.save_edited_pdf,
-                  padx=12, pady=6, cursor="hand2", font=FNT,
+                  padx=12, pady=BTN_PADY, cursor="hand2", font=FNT,
                   bg=SAVE_BTN_BG, fg="white", activebackground=SAVE_BTN_ACTIVE,
                   activeforeground="white").pack(fill=tk.X, pady=(28, 4))
 
@@ -2029,7 +2031,9 @@ class PDFLevelPreviewApp:
         self._split_bottom = tk.Frame(parent)
         self._split_bottom.pack(fill=tk.X)
         tk.Button(self._split_bottom, text="설정 저장", command=self._save_config,
-                  padx=12, pady=4, cursor="hand2", font=FNT).pack(fill=tk.X, pady=(12, 0))
+                  padx=12, pady=BTN_PADY, cursor="hand2", font=FNT,
+                  bg=CFG_SAVE_BG, fg="white", activebackground=CFG_SAVE_ACTIVE,
+                  activeforeground="white").pack(fill=tk.X, pady=(12, 0))
 
         self._toggle_split_detail()
 
