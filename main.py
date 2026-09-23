@@ -13,6 +13,7 @@ import io
 import math
 import re
 import queue
+import time
 import multiprocessing
 from concurrent.futures import ThreadPoolExecutor
 
@@ -301,6 +302,15 @@ def _preview_worker(req_q, res_q):
         if msg is None:
             break
         pdf_path, key, need = msg
+        if pdf_path is None:
+            # 원본 덮어쓰기 전에 파일을 놓아 준다. 다음 요청 때 다시 연다
+            if doc is not None:
+                doc.close()
+            doc, path = None, None
+            bases.clear()
+            sent.clear()
+            pre_cache.clear()
+            continue
         if pdf_path != path:
             try:
                 new_doc = fitz.open(pdf_path)
@@ -1744,21 +1754,17 @@ class PDFLevelPreviewApp:
         canvas.create_rectangle(x0, y0, x1, y1, outline="#1e90ff", width=2, tags="crop")
 
     def save_edited_pdf(self):
-        """회전/자르기를 반영한 새 PDF로 저장. 원본에는 덮어쓰지 않는다"""
+        """회전/자르기를 반영해 저장. 같은 이름을 고르면 원본에 덮어쓴다"""
         if self.pdf_doc is None:
             return
         src = self._pdf_path
-        stem = os.path.splitext(os.path.basename(src))[0]
         path = filedialog.asksaveasfilename(
             parent=self.root, title="다른 이름으로 저장", defaultextension=".pdf",
             filetypes=[("PDF 파일", "*.pdf")],
-            initialdir=os.path.dirname(src), initialfile=f"{stem}_편집.pdf")
+            initialdir=os.path.dirname(src), initialfile=os.path.basename(src))
         if not path:
             return
-        if os.path.normcase(os.path.abspath(path)) == os.path.normcase(os.path.abspath(src)):
-            messagebox.showwarning("다른 이름으로 저장",
-                                   "원본 파일에는 저장할 수 없습니다.\n다른 이름을 입력하세요.", parent=self.root)
-            return
+        same = os.path.normcase(os.path.abspath(path)) == os.path.normcase(os.path.abspath(src))
 
         prev_status = self.render_status.cget("text")
         self.render_status.config(text="저장 중...")
@@ -1769,16 +1775,49 @@ class PDFLevelPreviewApp:
             try:
                 for idx, e in self.page_edits.items():
                     _apply_page_edit(out[idx], e["angle"], e["crop"])
-                out.save(path)
+                if same:
+                    self._overwrite_original(src, out)
+                else:
+                    out.save(path)
             finally:
-                out.close()
+                if not out.is_closed:  # 덮어쓰기는 교체 전에 이미 닫는다
+                    out.close()
         except Exception as e:
             self.render_status.config(text=prev_status)
-            messagebox.showerror("다른 이름으로 저장", f"저장 실패: {e}", parent=self.root)
+            messagebox.showerror("저장", f"저장 실패: {e}", parent=self.root)
             return
         self.render_status.config(text=prev_status)
         self._edits_dirty = False
+        if same:
+            self._load_pdf(src)  # 편집값은 파일에 들어갔으니 새로 연다 (썸네일·미리보기도 새로)
         self._show_toast("편집한 PDF를 저장했습니다.")
+
+    def _overwrite_original(self, src, out):
+        """원본에 덮어쓰기: 임시 파일로 저장한 뒤 바꿔치기.
+
+        열어 둔 문서와 미리보기 워커가 파일을 잡고 있으면 Windows에서 교체가 막히므로 먼저 놓아 준다.
+        """
+        tmp = src + ".pdflvl_tmp"
+        out.save(tmp)
+        out.close()
+        self.pdf_doc.close()
+        self.pdf_doc = None
+        self._render_req_q.put((None, None, False))  # 워커도 파일에서 손 떼게
+        last = None
+        for _ in range(25):  # 워커가 렌더를 마치고 닫을 때까지 (최대 5초)
+            try:
+                os.replace(tmp, src)
+                return
+            except OSError as e:
+                last = e
+                self.root.update_idletasks()
+                time.sleep(0.2)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        self.pdf_doc = fitz.open(src)  # 못 바꿨으면 원래대로 되돌린다
+        raise RuntimeError(f"원본을 바꾸지 못했습니다. 다른 프로그램이 파일을 쓰고 있는지 확인하세요 ({last})")
 
     def _confirm_discard_edits(self):
         """저장하지 않은 편집이 있으면 버릴지 묻는다. 계속해도 되면 True"""
