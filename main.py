@@ -1969,11 +1969,9 @@ class PDFLevelPreviewApp:
             self.render_status.config(text=prev_status)
             messagebox.showerror("저장", f"저장 실패: {e}", parent=self.root)
             return
-        self.render_status.config(text=prev_status)
         self._edits_dirty = False
-        if same:
-            self._load_pdf(src)  # 편집값은 파일에 들어갔으니 새로 연다 (썸네일·미리보기도 새로)
-        self._show_toast("편집한 PDF를 저장했습니다.")
+        # 창을 닫아 프로세스가 PDF와 폴더를 놓게 한다. 켜 둔 채면 폴더를 옮길 때 "사용 중"이 난다
+        self._on_close()
 
     def _overwrite_original(self, src, out):
         """원본에 덮어쓰기: 임시 파일로 저장한 뒤 바꿔치기.
@@ -1983,6 +1981,7 @@ class PDFLevelPreviewApp:
         tmp = src + SAVE_TMP_EXT
         out.save(tmp)
         out.close()
+        self._stop_thumbnails()  # 썸네일 프로세스도 원본을 열고 있다
         self.pdf_doc.close()
         self.pdf_doc = None
         self._render_req_q.put((None, None, False))  # 워커도 파일에서 손 떼게
@@ -2000,6 +1999,7 @@ class PDFLevelPreviewApp:
         except OSError:
             pass
         self.pdf_doc = fitz.open(src)  # 못 바꿨으면 원래대로 되돌린다
+        self._build_thumbnails()
         raise RuntimeError(f"원본을 바꾸지 못했습니다. 다른 프로그램이 파일을 쓰고 있는지 확인하세요 ({last})")
 
     def _confirm_discard_edits(self):
@@ -2345,16 +2345,20 @@ class PDFLevelPreviewApp:
         self.update_preview()
         return "break"
 
-    def _on_close(self):
-        if not self._confirm_discard_edits():
-            return
+    def _stop_thumbnails(self):
+        """만들고 있는 썸네일을 멈추고 돌고 있는 썸네일 프로세스를 끝낸다 (PDF를 놓게)"""
         self._thumb_generation += 1
-        # 남은 프로세스가 PDF를 쥐고 있으면 창을 닫아도 파일이 "사용 중"으로 남는다
         for proc in list(self._thumb_procs):
             try:
                 proc.kill()
             except OSError:
                 pass
+
+    def _on_close(self):
+        if not self._confirm_discard_edits():
+            return
+        # 남은 프로세스가 PDF를 쥐고 있으면 창을 닫아도 파일이 "사용 중"으로 남는다
+        self._stop_thumbnails()
         self._render_proc.terminate()
         self._render_proc.join(timeout=2)
         if self._render_proc.is_alive():
