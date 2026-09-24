@@ -41,7 +41,7 @@ SECTION_CONFIG_BG, SECTION_CONFIG_HEAD = "#f7f1e6", "#e4d4b5"
 # 값이 작을수록 빨리 돈다 (2 = 1°에 20px)
 ROTATE_DRAG_PX = 2
 # 드래그 회전 중 미리보기에 겹쳐 그리는 바둑판 격자 (화면 px 간격, 색). 글줄이 격자와 나란하면 수평
-ROTATE_GRID_PX = 40
+ROTATE_GRID_PX = 20
 ROTATE_GRID_COLOR = "#00a0e0"
 # 설정 파일의 자르기(mm) 자리를 보여주는 선 색 (미리보기 / 썸네일)
 CFG_CROP_LINE = "#e00000"
