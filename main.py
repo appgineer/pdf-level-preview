@@ -459,7 +459,7 @@ class PDFLevelPreviewApp:
         self.split_size_mb_var = tk.IntVar(value=0)
         self.split_range_text = None
         self.crop_edit_var = tk.BooleanVar(value=False)
-        self.rotate_drag_var = tk.BooleanVar(value=False)
+        self.rotate_drag_var = tk.BooleanVar(value=True)
         self.crop_range_var = tk.StringVar(value="전체")
 
         self._section_heads = []  # (머리말 라벨, 색) — 구간 색칠 때 제 색을 지킨다
@@ -671,6 +671,9 @@ class PDFLevelPreviewApp:
         # 분할 범위 입력칸(Text)의 줄바꿈 Enter와 편집/자르기 설정 입력칸의 Enter는 레벨 추가로 보내지 않는다
         self.root.bind("<Return>", lambda e: None if isinstance(e.widget, tk.Text) or e.widget in self._edit_entries
                        else self.add_level())
+        # "드래그"(회전)가 켜져 있으면 입력칸 밖에서도 ←/→로 0.1°씩 돌린다 (입력칸 안에서는 글자 커서 이동)
+        self.root.bind("<Left>",  lambda e: self._nudge_angle_key(e, -0.1))
+        self.root.bind("<Right>", lambda e: self._nudge_angle_key(e, +0.1))
 
         # ── 저장된 레벨 리스트 ──
         self.saved_frame = tk.Frame(self.level_frame)
@@ -1456,6 +1459,7 @@ class PDFLevelPreviewApp:
         self._crop_drag = None
         self._rotate_drag = None
         if self.rotate_drag_var.get():
+            self.preview_canvas.focus_set()  # 입력칸에서 포커스를 빼야 ←/→가 회전으로 간다
             self._start_rotate_drag(event)
             return
         if self.crop_edit_var.get():
@@ -1640,6 +1644,11 @@ class PDFLevelPreviewApp:
             angle = 0.0
         self.angle_var.set(f"{round(angle + delta, 1):g}")
         return "break"
+
+    def _nudge_angle_key(self, event, delta):
+        if not self.rotate_drag_var.get() or event.widget.winfo_class() in ("Entry", "TEntry", "Text", "TCombobox", "Spinbox"):
+            return None
+        return self._nudge_angle(delta)
 
     def _on_rotate_drag_toggle(self):
         if self.rotate_drag_var.get() and self.crop_edit_var.get():
