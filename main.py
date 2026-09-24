@@ -40,6 +40,9 @@ SECTION_CONFIG_BG, SECTION_CONFIG_HEAD = "#f7f1e6", "#e4d4b5"
 # 드래그 회전: 마우스를 좌우로 이 픽셀만큼 끌 때마다 0.1°씩 (오른쪽으로 = 오른쪽/시계방향).
 # 값이 작을수록 빨리 돈다 (2 = 1°에 20px)
 ROTATE_DRAG_PX = 2
+# 드래그 회전 중 미리보기에 겹쳐 그리는 바둑판 격자 (화면 px 간격, 색). 글줄이 격자와 나란하면 수평
+ROTATE_GRID_PX = 40
+ROTATE_GRID_COLOR = "#00a0e0"
 # 설정 파일의 자르기(mm) 자리를 보여주는 선 색 (미리보기 / 썸네일)
 CFG_CROP_LINE = "#e00000"
 # 눈에 띄어야 하는 버튼/선택창 색
@@ -406,6 +409,7 @@ class PDFLevelPreviewApp:
 
         # Async rendering state
         self._thumb_generation = 0
+        self._thumb_procs = set()  # 돌고 있는 썸네일 프로세스 (닫을 때 끝내야 PDF를 놓는다)
         self._pdf_path = None
         self._wanted_key = None
         self._pending_req = None  # 워커에 보낸 마지막 렌더 요청 (결과 대기 중)
@@ -1005,11 +1009,19 @@ class PDFLevelPreviewApp:
                     "x.save(sys.argv[3]);"
                     "d.close()"
                 )
-                result = subprocess.run(
+                proc = subprocess.Popen(
                     [sys.executable, '-c', script, pdf_path, str(i), tmp],
-                    timeout=30, capture_output=True
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE
                 )
-                if result.returncode != 0 or gen != self._thumb_generation:
+                self._thumb_procs.add(proc)
+                try:
+                    proc.communicate(timeout=30)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.communicate()
+                finally:
+                    self._thumb_procs.discard(proc)
+                if proc.returncode != 0 or gen != self._thumb_generation:
                     return
                 raw = Image.open(tmp)
                 raw.load()
@@ -1428,6 +1440,7 @@ class PDFLevelPreviewApp:
         self._img_origin = (x0 - cut[0], y0 - cut[1]) if cut else (x0, y0)
         self._draw_crop_overlay()
         self._draw_cfg_crop_lines()
+        self._draw_rotate_grid()
         # 그사이 각도가 더 바뀌었으면(←/→ 연타, 드래그 중) 예전 각도 화면으로 튀지 않게 바로 덮는다
         self._draw_quick_rotation()
 
@@ -1633,6 +1646,19 @@ class PDFLevelPreviewApp:
             self.crop_edit_var.set(False)  # 미리보기 드래그는 한 가지 용도만
             self._refresh_preview()  # 선 화면 → 잘린 결과
         self.preview_canvas.config(cursor="")
+        self._draw_rotate_grid()
+
+    def _draw_rotate_grid(self):
+        """"드래그"(회전)가 켜져 있으면 페이지 위에 가로세로 격자. 돌지 않는 기준선이라 기울기를 맞춰 볼 수 있다"""
+        canvas = self.preview_canvas
+        canvas.delete("grid")
+        if not self.rotate_drag_var.get() or self.current_img is None:
+            return
+        x0, y0, x1, y1 = self._img_clip
+        for x in range(x0 + ROTATE_GRID_PX, x1, ROTATE_GRID_PX):
+            canvas.create_line(x, y0, x, y1, fill=ROTATE_GRID_COLOR, tags="grid")
+        for y in range(y0 + ROTATE_GRID_PX, y1, ROTATE_GRID_PX):
+            canvas.create_line(x0, y, x1, y, fill=ROTATE_GRID_COLOR, tags="grid")
 
     def _start_rotate_drag(self, event):
         if self.current_img is None or self._shown_key is None or self._shown_key[0] != self.current_page:
@@ -1701,6 +1727,7 @@ class PDFLevelPreviewApp:
         canvas.delete("rotdrag")
         canvas.create_image(rx0, ry0, anchor=tk.NW, image=self._rotate_drag_photo, tags="rotdrag")
         canvas.tag_raise("crop")  # 자르기 선은 수평 기준선으로 그대로 보이게
+        canvas.tag_raise("grid")
 
     def _end_rotate_drag(self):
         if self._rotate_redraw_id is not None:
@@ -1731,10 +1758,12 @@ class PDFLevelPreviewApp:
         self.preview_canvas.config(cursor="")
         if was_edit != (mode == "crop"):
             self._refresh_preview()  # 선 화면 ↔ 잘린 결과
+        self._draw_rotate_grid()
 
     def _on_crop_edit_toggle(self):
         if self.crop_edit_var.get():
             self.rotate_drag_var.set(False)  # 미리보기 드래그는 한 가지 용도만
+            self._draw_rotate_grid()
         self.preview_canvas.config(cursor="")
         self._refresh_preview()  # 켜면 자르기 전 전체 화면 + 선, 끄면 잘린 결과
 
@@ -2311,7 +2340,16 @@ class PDFLevelPreviewApp:
         if not self._confirm_discard_edits():
             return
         self._thumb_generation += 1
+        # 남은 프로세스가 PDF를 쥐고 있으면 창을 닫아도 파일이 "사용 중"으로 남는다
+        for proc in list(self._thumb_procs):
+            try:
+                proc.kill()
+            except OSError:
+                pass
         self._render_proc.terminate()
+        self._render_proc.join(timeout=2)
+        if self._render_proc.is_alive():
+            self._render_proc.kill()
         if self.pdf_doc:
             self.pdf_doc.close()
             self.pdf_doc = None
@@ -2424,6 +2462,9 @@ def main():
     if pdf:
         root.after(100, lambda: app._load_pdf(pdf))
     root.mainloop()
+    # 남은 스레드(썸네일, 워커 결과 수신, Queue)를 기다리지 않고 바로 끝낸다.
+    # 기다리다 멈추면 보이지 않는 프로세스가 남아 PDF를 계속 쥐고 있다
+    os._exit(0)
 
 
 if __name__ == "__main__":
