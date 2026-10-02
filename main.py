@@ -15,6 +15,7 @@ import re
 import queue
 import time
 import multiprocessing
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 # 100% = 원본 이미지 픽셀 1:1
@@ -71,6 +72,17 @@ CROP_SIDES = ("top", "bottom", "left", "right")
 MIN_CROP_PT = 36
 # 미리보기에서 자르기 선을 잡을 수 있는 거리 (선 양쪽 px)
 CROP_GRAB_PX = 6
+# 썸네일: 선택된 칸 배경색 / 드래그로 옮길 때 끼워 넣을 자리 선 색
+THUMB_SEL_BG = "#cce4f7"
+THUMB_DROP_LINE = "#0078d7"
+# 썸네일을 누른 뒤 이만큼(px) 움직여야 드래그(순서 바꾸기)로 본다
+THUMB_DRAG_PX = 6
+# 드래그 중 썸네일 패널 위/아래 끝에서 이 거리(px) 안이면 자동 스크롤
+THUMB_AUTOSCROLL_PX = 40
+# 되돌리기(Ctrl+Z) 단계 수
+UNDO_MAX = 50
+# 복사한 페이지(클립보드 PDF)를 남겨 두는 기간 (초). 지난 것은 다음 실행 때 지운다
+CLIPBOARD_KEEP = 24 * 3600
 
 
 def _make_indicator_images():
@@ -257,29 +269,31 @@ def _preview_worker(req_q, res_q):
 
     원본 해상도 렌더 → 레벨 → 축소가 무거워서 화면 스레드에서 하면 클릭마다 멈춘다.
     PyMuPDF는 스레드에서 쓸 수 없으므로 썸네일처럼 별도 프로세스로 돌린다.
-    요청: (pdf_path, key, need). key = (page, black, white, zoom, cw, ch, rot, angle), zoom 0 = 맞춤,
-    rot = 90° 단위 회전, angle = 기울기 보정(°, 시계방향 양수). pdf_path가 None이면 파일을 놓는다.
+    요청: (pdf_path, src_idx, key, need, neighbors). 페이지는 pdf_path 파일의 src_idx 페이지.
+    key = (uid, black, white, zoom, cw, ch, rot, angle), uid = 화면 페이지 고유 번호, zoom 0 = 맞춤,
+    rot = 90° 단위 회전, angle = 기울기 보정(°, 시계방향 양수).
+    neighbors = 한가할 때 미리 렌더할 이웃 페이지 [(pdf_path, src_idx, key), ...].
+    pdf_path가 None이면 열어 둔 파일을 모두 놓는다.
     응답: (pdf_path, key, mode, size, bytes, 상태문구). 실패 시 mode/size/bytes는 None.
     """
-    doc = None
-    path = None
-    bases = {}   # page_idx -> 원본 해상도 이미지 (오래된 것부터 버림)
+    docs = {}    # pdf_path -> 열어 둔 문서 (원본 + 붙여넣은 클립보드 PDF)
+    bases = {}   # (pdf_path, src_idx) -> 원본 해상도 이미지 (오래된 것부터 버림)
     sent = set()  # 이미 보낸 key (이웃 미리 렌더 중복 방지)
-    # key[:6] -> (레벨+축소까지 한 이미지, 상태문구). 마지막 요청 한 장만 기억해서
+    # key[:7] -> (레벨+축소까지 한 이미지, 상태문구). 마지막 요청 한 장만 기억해서
     # 각도만 바뀌는 요청(↑/↓, 드래그)은 레벨·축소를 건너뛰고 회전만 한다
     pre_cache = {}
 
-    def render(key, remember=True):
+    def render(path, src, key, remember=True):
         try:
-            _render(key, remember)
+            _render(path, src, key, remember)
         except Exception as e:
             res_q.put((path, key, None, None, None, f"렌더링 실패: {e}"))
 
-    def _render(key, remember):
+    def _render(path, src, key, remember):
         # 레벨·축소·90° 회전까지는 각도와 무관하므로 그대로 재사용한다
         pre = pre_cache.get(key[:7])
         if pre is None:
-            pre = _level_and_scale(key)
+            pre = _level_and_scale(path, src, key)
             if remember:  # 이웃 미리 렌더가 현재 페이지 것을 밀어내지 않게
                 pre_cache.clear()
                 pre_cache[key[:7]] = pre
@@ -293,13 +307,15 @@ def _preview_worker(req_q, res_q):
         sent.add(key)
         res_q.put((path, key, result.mode, result.size, result.tobytes(), status))
 
-    def _level_and_scale(key):
-        page_idx, black, white, zoom_pct, cw, ch, rot, _ = key
-        if page_idx in bases:
-            base = bases.pop(page_idx)
+    def _level_and_scale(path, src, key):
+        _, black, white, zoom_pct, cw, ch, rot, _ = key
+        if (path, src) in bases:
+            base = bases.pop((path, src))
         else:
-            base = _render_page(doc, page_idx)
-        bases[page_idx] = base
+            if path not in docs:
+                docs[path] = fitz.open(path)
+            base = _render_page(docs[path], src)
+        bases[(path, src)] = base
         while len(bases) > BASE_CACHE_MAX:
             bases.pop(next(iter(bases)))
 
@@ -336,36 +352,22 @@ def _preview_worker(req_q, res_q):
                 break
         if msg is None:
             break
-        pdf_path, key, need = msg
+        pdf_path, src, key, need, neighbors = msg
         if pdf_path is None:
             # 원본 덮어쓰기 전에 파일을 놓아 준다. 다음 요청 때 다시 연다
-            if doc is not None:
-                doc.close()
-            doc, path = None, None
+            for d in docs.values():
+                d.close()
+            docs.clear()
             bases.clear()
             sent.clear()
             pre_cache.clear()
             continue
-        if pdf_path != path:
-            try:
-                new_doc = fitz.open(pdf_path)
-            except Exception as e:
-                res_q.put((pdf_path, key, None, None, None, f"렌더링 실패: {e}"))
-                continue
-            if doc is not None:
-                doc.close()
-            doc, path = new_doc, pdf_path
-            bases.clear()
-            sent.clear()
-            pre_cache.clear()
         if need:
-            render(key)
+            render(pdf_path, src, key)
         # 한가할 때 다음/이전 페이지를 미리 렌더해 두면 순서대로 넘길 때 바로 보인다
-        # 기울기는 페이지마다 따로라 이웃은 대부분 0°로 본다
-        for nb in (key[0] + 1, key[0] - 1):
-            nb_key = (nb,) + key[1:6] + (0, 0)
-            if req_q.empty() and 0 <= nb < len(doc) and nb_key not in sent:
-                render(nb_key, remember=False)
+        for nb_path, nb_src, nb_key in neighbors:
+            if req_q.empty() and nb_key not in sent:
+                render(nb_path, nb_src, nb_key, remember=False)
 
 
 def _normalize_page_ranges(text):
@@ -390,6 +392,16 @@ class PDFLevelPreviewApp:
 
         self.pdf_doc = None
         self.current_page = 0
+        # 화면 순서대로의 페이지 목록 [(uid, 파일 경로, 그 파일의 페이지 번호)].
+        # 삭제·붙여넣기·순서 바꾸기는 이 목록만 바꾸고 파일은 저장 때 만든다
+        self.slots = []
+        self._next_uid = 0
+        self._src_docs = {}  # 파일 경로 -> 열어 둔 문서 (원본 pdf_doc + 붙여넣은 클립보드 PDF)
+        self._selected = set()  # 썸네일에서 선택한 페이지 (화면 위치). 현재 페이지는 항상 들어 있다
+        self._sel_anchor = 0    # Shift+클릭 범위의 시작
+        self._thumb_press = None  # 썸네일을 누른 상태 {"idx", "x", "y", "shrink", "drag"}
+        self._thumb_scroll_id = None  # 드래그 중 자동 스크롤 타이머
+        self._undo_stack = []  # [(slots, current_page, selected)] 페이지 구조를 바꾸기 전 상태
         self.saved_levels = []
         self.thumbnail_cache = {}
         self.preview_cache = {}  # key -> (PIL Image, 상태문구)
@@ -418,7 +430,8 @@ class PDFLevelPreviewApp:
         self._img_clip = (0, 0, 0, 0)  # 캔버스에 실제로 보이는 페이지 영역 (자른 화면이면 자른 부분)
 
         # 편집기. 원본 pdf_doc는 그대로 두고 값만 들고 있다가 '다른 이름으로 저장' 때 적용
-        # page_idx -> {"angle": 기울기 보정(°, 시계방향 양수), "crop": [위, 아래, 좌, 우] pt (화면 기준)}
+        # 페이지 uid -> {"angle": 기울기 보정(°, 시계방향 양수), "rot": 90° 회전, "crop": [위, 아래, 좌, 우] pt (화면 기준)}.
+        # uid 키라 순서를 바꾸거나 지워도 편집값이 페이지를 따라다닌다
         self.page_edits = {}
         self._saved_crop_box = None  # (위, 좌, 가로, 세로) pt, 크기 맞춤용. 다른 PDF를 열어도 유지
         self._last_fit_page = None  # 마지막으로 [저장 크기로 자르기]를 누른 페이지
@@ -523,7 +536,26 @@ class PDFLevelPreviewApp:
         self.thumb_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         self.thumb_canvas.bind("<Configure>", self._on_thumb_canvas_resize)
-        self.thumb_canvas.bind("<Button-1>", self._on_thumb_click)
+        # 클릭 / Shift+클릭(범위) / Ctrl+클릭(하나씩) 선택, 끌어서 순서 바꾸기
+        self.thumb_canvas.bind("<ButtonPress-1>", self._on_thumb_press)
+        self.thumb_canvas.bind("<B1-Motion>", self._on_thumb_motion)
+        self.thumb_canvas.bind("<ButtonRelease-1>", self._on_thumb_release)
+        self.thumb_canvas.bind("<Button-3>", self._on_thumb_menu)
+        # 단축키는 썸네일 패널에 포커스가 있을 때만 (입력칸의 Ctrl+C/V와 안 겹치게)
+        self.thumb_canvas.bind("<Control-KeyPress>", self._on_thumb_ctrl_key)
+        self.thumb_canvas.bind("<Delete>", lambda e: self.delete_selected())
+        self._thumb_menu = tk.Menu(self.root, tearoff=0, font=UI_FONT_SMALL)
+        for label, accel, cmd in (("복사", "Ctrl+C", self.copy_selected),
+                                  ("잘라내기", "Ctrl+X", self.cut_selected),
+                                  ("붙여넣기", "Ctrl+V", self.paste_pages),
+                                  ("삭제", "Delete", self.delete_selected),
+                                  (None, None, None),
+                                  ("전체 선택", "Ctrl+A", self.select_all),
+                                  ("되돌리기", "Ctrl+Z", self.undo)):
+            if label is None:
+                self._thumb_menu.add_separator()
+            else:
+                self._thumb_menu.add_command(label=label, accelerator=accel, command=cmd)
 
         # Mouse wheel scrolling on left panel
         self.thumb_canvas.bind("<MouseWheel>", self._on_thumb_scroll)
@@ -716,7 +748,8 @@ class PDFLevelPreviewApp:
         FNT = UI_FONT
 
         # 적용 범위: 회전과 자르기 [적용]·[초기화]가 모두 이 범위를 따른다
-        range_menu = tk.OptionMenu(parent, self.crop_range_var, "현재 페이지", "홀수", "짝수", "전체")
+        range_menu = tk.OptionMenu(parent, self.crop_range_var, "현재 페이지", "선택한 페이지",
+                                   "홀수", "짝수", "전체")
         range_menu.config(font=FNT, cursor="hand2", bg=RANGE_BG, fg="white",
                           activebackground=RANGE_ACTIVE, activeforeground="white",
                           highlightthickness=0, pady=BTN_PADY)  # 다른 버튼과 높이 맞춤
@@ -954,10 +987,14 @@ class PDFLevelPreviewApp:
     def _load_pdf(self, path):
         if not self._confirm_discard_edits():
             return
-        if self.pdf_doc:
-            self.pdf_doc.close()
+        self._close_src_docs()
         self.pdf_doc = fitz.open(path)
         self._pdf_path = path
+        self._src_docs = {path: self.pdf_doc}
+        self.slots = [(self._new_uid(), path, i) for i in range(len(self.pdf_doc))]
+        self._selected = {0}
+        self._sel_anchor = 0
+        self._undo_stack.clear()
         _remember_dir(path)  # 저장 도중 강제 종료로 남는 임시 파일을 다음 실행 때 지우려고
         self.thumbnail_cache.clear()
         self.preview_cache.clear()
@@ -987,20 +1024,22 @@ class PDFLevelPreviewApp:
         self._selection_rect_id = None
 
         self._thumb_generation += 1
-        gen = self._thumb_generation
-        self._page_count = len(self.pdf_doc)
+        self._page_count = len(self.slots)
 
         self._compute_thumb_layout()
         self._draw_visible_thumbs()
+        # 같은 페이지를 여러 번 붙여넣었어도 한 번만 그린다
+        self._render_thumbs(list(dict.fromkeys((path, src) for _, path, src in self.slots)))
 
-        # Phase 2: 병렬 프로세스로 썸네일 렌더링
-        pdf_path = self._pdf_path
-        page_count = self._page_count
+    def _render_thumbs(self, pages):
+        """[(파일 경로, 페이지 번호)]의 썸네일을 병렬 프로세스로 그려 thumbnail_cache에 넣는다"""
+        gen = self._thumb_generation
         workers = max(1, ((os.cpu_count() or 4) * 3) // 4)
 
-        def render_one_page(i):
+        def render_one_page(page):
             if gen != self._thumb_generation:
                 return
+            pdf_path, i = page
             tmp = tempfile.mktemp(prefix=TEMP_PREFIX, suffix='.png')
             try:
                 script = (
@@ -1031,10 +1070,10 @@ class PDFLevelPreviewApp:
                 # 세로로 긴 페이지가 셀 밖으로 넘치지 않도록 박스 안에 맞춘다
                 ratio = min(THUMB_W / raw.width, int(THUMB_W * 1.4) / raw.height)
                 img = raw.resize((int(raw.width * ratio), int(raw.height * ratio)), Image.LANCZOS)
-                self.thumbnail_cache[i] = img
+                self.thumbnail_cache[page] = img
                 if gen != self._thumb_generation:
                     return
-                self.root.after(0, lambda idx=i: self._on_thumb_rendered(idx, gen))
+                self.root.after(0, lambda pg=page: self._on_thumb_rendered(pg, gen))
             except Exception:
                 pass
             finally:
@@ -1045,15 +1084,16 @@ class PDFLevelPreviewApp:
 
         def render_all():
             with ThreadPoolExecutor(max_workers=workers) as pool:
-                pool.map(render_one_page, range(page_count))
+                pool.map(render_one_page, pages)
 
         threading.Thread(target=render_all, daemon=True).start()
 
-    def _on_thumb_rendered(self, idx, gen):
+    def _on_thumb_rendered(self, page, gen):
         if gen != self._thumb_generation:
             return
-        if idx in self._drawn_pages:
-            self._draw_thumb_page(idx)
+        for idx in list(self._drawn_pages):
+            if self.slots[idx][1:] == page:
+                self._draw_thumb_page(idx)
 
     def _compute_thumb_layout(self):
         canvas_w = self.thumb_canvas.winfo_width()
@@ -1127,8 +1167,9 @@ class PDFLevelPreviewApp:
         thumb_h = int(THUMB_W * 1.4)
         items = []
 
-        if idx in self.thumbnail_cache:
-            img = self.thumbnail_cache[idx]
+        page = self.slots[idx][1:]
+        if page in self.thumbnail_cache:
+            img = self.thumbnail_cache[page]
             # 썸네일도 저장될 모양 그대로: 기울기 보정 → 자르기 → 셀에 맞추기
             e = self._page_edit(idx)
             if e["rot"]:
@@ -1185,32 +1226,182 @@ class PDFLevelPreviewApp:
         self._drawn_pages[idx] = items
 
     def _draw_selection(self):
+        """선택한 페이지는 연한 파란 바탕, 현재 페이지는 진한 파란 테두리"""
+        self.thumb_canvas.delete("thumbsel")
         if self._selection_rect_id is not None:
             self.thumb_canvas.delete(self._selection_rect_id)
             self._selection_rect_id = None
 
-        if self._page_count == 0 or self.current_page not in self._drawn_pages:
+        if self._page_count == 0:
             return
 
-        x, y = self._get_thumb_pos(self.current_page)
         thumb_h = int(THUMB_W * 1.4)
+        pad = THUMB_MARGIN // 2
+        for idx in self._selected:
+            if idx in self._drawn_pages:
+                x, y = self._get_thumb_pos(idx)
+                self.thumb_canvas.create_rectangle(
+                    x - pad, y - pad, x + THUMB_W + pad, y + thumb_h + 8 + self._thumb_label_h + pad,
+                    fill=THUMB_SEL_BG, outline="", tags="thumbsel")
+        self.thumb_canvas.tag_lower("thumbsel")  # 썸네일 그림 밑으로
+
+        if self.current_page not in self._drawn_pages:
+            return
+        x, y = self._get_thumb_pos(self.current_page)
         self._selection_rect_id = self.thumb_canvas.create_rectangle(
             x - 2, y - 2, x + THUMB_W + 2, y + thumb_h + 2,
             outline="#0078d7", width=3
         )
 
-    def _on_thumb_click(self, event):
-        if self._page_count == 0:
-            return
+    def _thumb_hit(self, event):
+        """마우스 아래 썸네일의 화면 위치. 없으면 None"""
         cx = self.thumb_canvas.canvasx(event.x)
         cy = self.thumb_canvas.canvasy(event.y)
         thumb_h = int(THUMB_W * 1.4)
-
         for idx in self._drawn_pages:
             x, y = self._get_thumb_pos(idx)
             if x <= cx <= x + THUMB_W and y <= cy <= y + thumb_h + 8 + self._thumb_label_h:
-                self.select_page(idx)
+                return idx
+        return None
+
+    def _on_thumb_press(self, event):
+        """클릭: 그 페이지만 / Shift+클릭: 범위 / Ctrl+클릭: 하나씩 넣고 빼기"""
+        self.thumb_canvas.focus_set()  # Ctrl+C/V, Delete를 받으려면
+        self._thumb_press = None
+        if self._page_count == 0:
+            return
+        idx = self._thumb_hit(event)
+        if idx is None:
+            return
+        shift = event.state & 0x0001
+        ctrl = event.state & 0x0004
+        shrink = False
+        if shift:
+            a, b = sorted((self._sel_anchor, idx))
+            self._selected = set(range(a, b + 1))
+        elif ctrl:
+            self._sel_anchor = idx
+            if idx not in self._selected:
+                self._selected.add(idx)
+            elif len(self._selected) > 1:
+                self._selected.discard(idx)
+                if idx == self.current_page:  # 현재 페이지를 뺐으면 가까운 선택 페이지로
+                    self.select_page(min(self._selected, key=lambda i: abs(i - idx)))
+                else:
+                    self._draw_selection()
+                return  # 뺀 페이지는 끌어 옮기지 않는다
+        elif idx in self._selected and len(self._selected) > 1:
+            # 여러 장을 끌어 옮길 수 있게 선택은 놓을 때(드래그가 아니면) 줄인다
+            self._sel_anchor = idx
+            shrink = True
+        else:
+            self._selected = {idx}
+            self._sel_anchor = idx
+        self._thumb_press = {"idx": idx, "x": event.x, "y": event.y, "shrink": shrink, "drag": False}
+        if idx != self.current_page:
+            self.select_page(idx)
+        else:
+            self._draw_selection()
+
+    def _on_thumb_motion(self, event):
+        press = self._thumb_press
+        if press is None or press["idx"] not in self._selected:
+            return
+        if not press["drag"]:
+            if abs(event.x - press["x"]) < THUMB_DRAG_PX and abs(event.y - press["y"]) < THUMB_DRAG_PX:
                 return
+            press["drag"] = True
+            self.thumb_canvas.config(cursor="hand2")
+        press["x"], press["y"] = event.x, event.y
+        self._draw_drop_line()
+        if self._thumb_scroll_id is None:
+            self._thumb_autoscroll()
+
+    def _on_thumb_release(self, event):
+        press, self._thumb_press = self._thumb_press, None
+        if self._thumb_scroll_id is not None:
+            self.root.after_cancel(self._thumb_scroll_id)
+            self._thumb_scroll_id = None
+        if press is None:
+            return
+        if press["drag"]:
+            self.thumb_canvas.delete("dropline")
+            self.thumb_canvas.config(cursor="")
+            self._move_selected(self._drop_pos(event.x, event.y)[0])
+        elif press["shrink"]:
+            self._selected = {press["idx"]}
+            self._draw_selection()
+
+    def _drop_pos(self, ex, ey):
+        """드래그를 놓을 자리 (끼워 넣을 화면 위치, 선 x, 선 y). 칸 왼쪽 절반이면 그 앞, 오른쪽 절반이면 그 뒤"""
+        cx = self.thumb_canvas.canvasx(ex)
+        cy = self.thumb_canvas.canvasy(ey)
+        col_w = THUMB_W + THUMB_MARGIN * 2
+        col = max(0, min(self._thumb_cols - 1, int((cx - self._thumb_offset_x) // col_w)))
+        row = max(0, int(cy // self._thumb_cell_h))
+        idx = row * self._thumb_cols + col
+        if idx >= self._page_count:  # 마지막 줄 빈 칸 → 맨 뒤
+            idx = self._page_count - 1
+            after = True
+        else:
+            x, _ = self._get_thumb_pos(idx)
+            after = cx > x + THUMB_W / 2
+        x, y = self._get_thumb_pos(idx)
+        line_x = x + THUMB_W + THUMB_MARGIN if after else x - THUMB_MARGIN
+        return idx + (1 if after else 0), line_x, y
+
+    def _draw_drop_line(self):
+        press = self._thumb_press
+        self.thumb_canvas.delete("dropline")
+        _, x, y = self._drop_pos(press["x"], press["y"])
+        self.thumb_canvas.create_line(x, y, x, y + int(THUMB_W * 1.4),
+                                      fill=THUMB_DROP_LINE, width=6, tags="dropline")
+
+    def _thumb_autoscroll(self):
+        """드래그 중 패널 위/아래 끝 근처면 계속 스크롤한다"""
+        self._thumb_scroll_id = None
+        press = self._thumb_press
+        if press is None or not press["drag"]:
+            return
+        h = self.thumb_canvas.winfo_height()
+        if press["y"] < THUMB_AUTOSCROLL_PX:
+            self.thumb_canvas.yview_scroll(-1, "units")
+        elif press["y"] > h - THUMB_AUTOSCROLL_PX:
+            self.thumb_canvas.yview_scroll(1, "units")
+        else:
+            return
+        self._draw_visible_thumbs()
+        self._draw_drop_line()
+        self._thumb_scroll_id = self.root.after(50, self._thumb_autoscroll)
+
+    def _on_thumb_menu(self, event):
+        """오른쪽 클릭 메뉴. 선택 밖의 페이지를 누르면 그 페이지만 선택한다"""
+        self.thumb_canvas.focus_set()
+        if self._page_count == 0:
+            return
+        idx = self._thumb_hit(event)
+        if idx is not None and idx not in self._selected:
+            self._selected = {idx}
+            self._sel_anchor = idx
+            self.select_page(idx)
+        menu = self._thumb_menu
+        menu.entryconfig("붙여넣기", state=tk.NORMAL if _read_clipboard() else tk.DISABLED)
+        menu.entryconfig("되돌리기", state=tk.NORMAL if self._undo_stack else tk.DISABLED)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _on_thumb_ctrl_key(self, event):
+        """Ctrl+C/X/V/A/Z. 한글 입력 상태나 CapsLock이어도 되게 Windows 키 코드로도 본다"""
+        actions = {"c": self.copy_selected, "x": self.cut_selected, "v": self.paste_pages,
+                   "a": self.select_all, "z": self.undo}
+        keycodes = {67: "c", 88: "x", 86: "v", 65: "a", 90: "z"}
+        key = keycodes.get(event.keycode) or event.keysym.lower()
+        if key in actions:
+            actions[key]()
+            return "break"
+        return None
 
     def _on_thumb_scroll(self, event):
         if event.num == 4:
@@ -1230,6 +1421,10 @@ class PDFLevelPreviewApp:
     def _on_thumb_canvas_resize(self, event):
         if self._page_count == 0:
             return
+        self._relayout_thumbs()
+
+    def _relayout_thumbs(self):
+        """칸 배치를 다시 계산하고 보이는 썸네일을 처음부터 다시 그린다 (렌더는 다시 안 한다)"""
         self._compute_thumb_layout()
         self.thumb_canvas.delete("all")
         self._drawn_pages.clear()
@@ -1241,6 +1436,9 @@ class PDFLevelPreviewApp:
     # Page selection
     # ------------------------------------------------------------------ #
     def select_page(self, page_idx):
+        if page_idx not in self._selected:
+            self._selected = {page_idx}
+            self._sel_anchor = page_idx
         self.current_page = page_idx
         self._update_page_label()
         self._crop_before_edit = self._page_edit(page_idx)["crop"]
@@ -1252,6 +1450,141 @@ class PDFLevelPreviewApp:
         self._draw_selection()
         self._sync_edit_panel()
         self.update_preview()
+
+    # ------------------------------------------------------------------ #
+    # Page operations (썸네일: 복사 / 잘라내기 / 붙여넣기 / 삭제 / 순서 바꾸기 / 되돌리기)
+    # ------------------------------------------------------------------ #
+    def _set_slots(self, slots, current, selected):
+        """페이지 목록을 바꾸고 썸네일·미리보기를 맞춘다. 페이지 구조를 바꾸는 동작은 모두 여기로"""
+        self.slots = slots
+        self._page_count = len(slots)
+        self._edits_dirty = True
+        self._last_fit_page = None  # 화면 위치가 바뀌었으니 이어받을 크기 맞춤 위치는 버린다
+        self._thumb_dirty.clear()
+        current = max(0, min(current, self._page_count - 1))
+        self._selected = {i for i in selected if 0 <= i < self._page_count} | {current}
+        self._sel_anchor = current
+        self._relayout_thumbs()
+        self.select_page(current)
+
+    def _push_undo(self):
+        self._undo_stack.append((list(self.slots), self.current_page, set(self._selected)))
+        del self._undo_stack[:-UNDO_MAX]
+
+    def undo(self):
+        """마지막 삭제·붙여넣기·잘라내기·순서 바꾸기를 되돌린다 (회전·자르기 편집값은 그대로)"""
+        if not self._undo_stack:
+            return
+        slots, current, selected = self._undo_stack.pop()
+        self._set_slots(slots, current, selected)
+
+    def select_all(self):
+        if self._page_count == 0:
+            return
+        self._selected = set(range(self._page_count))
+        self._draw_selection()
+
+    def copy_selected(self):
+        """선택한 페이지를 클립보드 PDF로 내보낸다. 다른 창(다른 PDF)에서도 붙여넣을 수 있다.
+
+        원본 대신 사본을 만드는 것은, 다른 창이 원본을 열어 쥐고 있으면 이 창의
+        같은 이름 저장(os.replace)이 "사용 중"으로 막히기 때문이다. 편집값은 json으로 같이 넘긴다.
+        """
+        if self._page_count == 0:
+            return False
+        pages = sorted(self._selected)
+        folder = _clipboard_dir()
+        pdf = os.path.join(folder, f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}.pdf")
+        try:
+            os.makedirs(folder, exist_ok=True)
+            out = fitz.open()
+            try:
+                for i in pages:
+                    _, path, src = self.slots[i]
+                    out.insert_pdf(self._src_docs[path], from_page=src, to_page=src)
+                out.save(pdf)
+            finally:
+                out.close()
+            info = {"pdf": pdf, "edits": [self.page_edits.get(self.slots[i][0]) for i in pages]}
+            tmp = _clipboard_json() + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(info, f, ensure_ascii=False)
+            os.replace(tmp, _clipboard_json())
+        except Exception as e:
+            messagebox.showerror("복사", f"복사 실패: {e}", parent=self.root)
+            return False
+        self._show_toast(f"{len(pages)}페이지를 복사했습니다.")
+        return True
+
+    def cut_selected(self):
+        if len(self._selected) >= self._page_count:
+            self._show_toast("모든 페이지를 잘라낼 수는 없습니다.")
+            return
+        if self.copy_selected():
+            self.delete_selected(toast=False)
+
+    def delete_selected(self, toast=True):
+        if self._page_count == 0:
+            return
+        if len(self._selected) >= self._page_count:
+            self._show_toast("모든 페이지를 지울 수는 없습니다.")
+            return
+        n = len(self._selected)
+        first = min(self._selected)
+        self._push_undo()
+        self._set_slots([slot for i, slot in enumerate(self.slots) if i not in self._selected], first, ())
+        if toast:
+            self._show_toast(f"{n}페이지를 지웠습니다.")
+
+    def paste_pages(self):
+        """클립보드 페이지를 현재 페이지 뒤에 넣는다. 넣은 페이지들이 선택된다"""
+        if self.pdf_doc is None:
+            return
+        info = _read_clipboard()
+        if info is None:
+            self._show_toast("붙여넣을 페이지가 없습니다.")
+            return
+        path = info["pdf"]
+        doc = self._src_docs.get(path)
+        if doc is None:
+            try:
+                doc = fitz.open(path)
+            except Exception as e:
+                messagebox.showerror("붙여넣기", f"붙여넣기 실패: {e}", parent=self.root)
+                return
+            self._src_docs[path] = doc
+        edits = info.get("edits") or []
+        new = []
+        for i in range(len(doc)):
+            uid = self._new_uid()
+            e = edits[i] if i < len(edits) else None
+            if isinstance(e, dict):
+                try:
+                    crop = [float(v) for v in e.get("crop", [0, 0, 0, 0])]
+                    if len(crop) == 4:
+                        self.page_edits[uid] = {"angle": float(e.get("angle", 0)),
+                                                "rot": int(e.get("rot", 0)) % 360, "crop": crop}
+                except (TypeError, ValueError):
+                    pass
+            new.append((uid, path, i))
+        at = self.current_page + 1
+        self._push_undo()
+        self._set_slots(self.slots[:at] + new + self.slots[at:], at, range(at, at + len(new)))
+        self._render_thumbs([(path, i) for i in range(len(doc)) if (path, i) not in self.thumbnail_cache])
+        self._show_toast(f"{len(new)}페이지를 붙여넣었습니다.")
+
+    def _move_selected(self, pos):
+        """선택한 페이지들을 화면 위치 pos 앞으로 옮긴다 (선택 순서 유지)"""
+        sel = sorted(self._selected)
+        moving = [self.slots[i] for i in sel]
+        rest = [slot for i, slot in enumerate(self.slots) if i not in self._selected]
+        at = pos - sum(1 for i in sel if i < pos)
+        slots = rest[:at] + moving + rest[at:]
+        if slots == self.slots:
+            return
+        current = slots.index(self.slots[self.current_page])
+        self._push_undo()
+        self._set_slots(slots, current, range(at, at + len(moving)))
 
     # ------------------------------------------------------------------ #
     # Zoom
@@ -1297,8 +1630,9 @@ class PDFLevelPreviewApp:
         """현재 페이지를 맞춤으로 볼 때의 실제 배율(%, 스캔 원본 픽셀 대비). 워커의 맞춤 계산과 같다"""
         if self.pdf_doc is None:
             return 0
-        rect = self.pdf_doc[self.current_page].rect
-        scale = _get_native_scale(self.pdf_doc, self.current_page)
+        _, path, src = self.slots[self.current_page]
+        rect = self._src_docs[path][src].rect
+        scale = _get_native_scale(self._src_docs[path], src)
         cw, ch = self._fit_canvas_size()
         return min(cw / (rect.width * scale), ch / (rect.height * scale)) * 100
 
@@ -1360,7 +1694,15 @@ class PDFLevelPreviewApp:
             cw, ch = self._fit_canvas_size()
 
         e = self._page_edit(self.current_page)
-        key = (self.current_page, black, white, zoom_pct, cw, ch, e["rot"], e["angle"])
+        _, path, src = self.slots[self.current_page]
+        key = (self._cur_uid(), black, white, zoom_pct, cw, ch, e["rot"], e["angle"])
+        # 한가할 때 미리 렌더할 화면상 앞/뒤 페이지
+        neighbors = []
+        for nb in (self.current_page + 1, self.current_page - 1):
+            if 0 <= nb < self._page_count:
+                nb_uid, nb_path, nb_src = self.slots[nb]
+                ne = self._page_edit(nb)
+                neighbors.append((nb_path, nb_src, (nb_uid,) + key[1:6] + (ne["rot"], ne["angle"])))
         self._wanted_key = key
         if key in self.preview_cache:
             # 최근 사용으로 이동 (오래된 것부터 버리기 위해)
@@ -1371,16 +1713,16 @@ class PDFLevelPreviewApp:
             self.render_status.config(text="")
             # 이웃 페이지 미리 렌더만 시킨다
             self._pending_req = None
-            self._render_req_q.put((self._pdf_path, key, False))
+            self._render_req_q.put((path, src, key, False, neighbors))
             return
 
         self.render_status.config(text="원본 해상도 렌더링 중...")
-        req = (self._pdf_path, key)
+        req = (path, key)
         if req == self._pending_req:
             return  # 같은 요청이 이미 렌더 중 (화살표 즉시 갱신 + 지연 갱신 중복 등)
         # 렌더는 워커가 한다. 결과는 _on_preview_rendered로 들어온다
         self._pending_req = req
-        self._render_req_q.put((self._pdf_path, key, True))
+        self._render_req_q.put((path, src, key, True, neighbors))
 
     def _read_preview_results(self):
         """수신 스레드: 워커 결과를 받아 화면 스레드로 넘긴다"""
@@ -1399,8 +1741,6 @@ class PDFLevelPreviewApp:
     def _on_preview_rendered(self, path, key, img, status):
         if (path, key) == self._pending_req:
             self._pending_req = None
-        if path != self._pdf_path:
-            return
         if img is not None:
             self.preview_cache[key] = (img, status)
             while len(self.preview_cache) > PREVIEW_CACHE_MAX:
@@ -1536,9 +1876,23 @@ class PDFLevelPreviewApp:
     # ------------------------------------------------------------------ #
     # Editor (회전 / 자르기 / 다른 이름으로 저장)
     # ------------------------------------------------------------------ #
+    def _new_uid(self):
+        self._next_uid += 1
+        return self._next_uid
+
+    def _cur_uid(self):
+        return self.slots[self.current_page][0]
+
+    def _uid_index(self, uid):
+        """uid 페이지의 지금 화면 위치. 지워졌으면 None"""
+        for i, slot in enumerate(self.slots):
+            if slot[0] == uid:
+                return i
+        return None
+
     def _page_edit(self, idx):
         """페이지 편집값 복사본. 편집 안 한 페이지는 기본값"""
-        e = self.page_edits.get(idx)
+        e = self.page_edits.get(self.slots[idx][0])
         if e is None:
             return {"angle": 0.0, "rot": 0, "crop": [0.0, 0.0, 0.0, 0.0]}
         return {"angle": e["angle"], "rot": e["rot"], "crop": list(e["crop"])}
@@ -1550,10 +1904,11 @@ class PDFLevelPreviewApp:
                "crop": old["crop"] if crop is None else list(crop)}
         if new == old:
             return
+        uid = self.slots[idx][0]
         if new["angle"] == 0 and new["rot"] == 0 and not any(new["crop"]):
-            self.page_edits.pop(idx, None)
+            self.page_edits.pop(uid, None)
         else:
-            self.page_edits[idx] = new
+            self.page_edits[uid] = new
         self._edits_dirty = True
         # 마지막으로 크기 맞춤한 페이지의 박스가 움직이면(드래그/숫자/적용) 이어받을 위치도 따라간다
         if idx == self._last_fit_page and any(new["crop"]):
@@ -1583,7 +1938,8 @@ class PDFLevelPreviewApp:
 
     def _page_disp_size(self, idx):
         """화면 기준 페이지 크기 (pt). 90° 회전이면 가로세로가 바뀌고, 기울기는 크기를 안 바꾼다"""
-        r = self.pdf_doc[idx].rect
+        _, path, src = self.slots[idx]
+        r = self._src_docs[path][src].rect
         if self._page_edit(idx)["rot"] in (90, 270):
             return r.height, r.width
         return r.width, r.height
@@ -1670,7 +2026,7 @@ class PDFLevelPreviewApp:
             canvas.create_line(x0, y, x1, y, fill=ROTATE_GRID_COLOR, tags="grid")
 
     def _start_rotate_drag(self, event):
-        if self.current_img is None or self._shown_key is None or self._shown_key[0] != self.current_page:
+        if self.current_img is None or self._shown_key is None or self._shown_key[0] != self._cur_uid():
             return  # 렌더 대기 중
         x = self.preview_canvas.canvasx(event.x)
         self._rotate_drag = (x, self._page_edit(self.current_page)["angle"])
@@ -1704,7 +2060,7 @@ class PDFLevelPreviewApp:
         워커의 정식 렌더가 도착하면 _draw_preview가 통째로 다시 그린다.
         """
         canvas = self.preview_canvas
-        if self.current_img is None or self._shown_key is None or self._shown_key[0] != self.current_page:
+        if self.current_img is None or self._shown_key is None or self._shown_key[0] != self._cur_uid():
             return  # 렌더 대기 중
         # 화면 이미지는 _shown_key의 각도로 그려져 있으니 그 차이만큼만 더 돌린다
         if self._shown_key[6] != self._page_edit(self.current_page)["rot"]:
@@ -1783,7 +2139,10 @@ class PDFLevelPreviewApp:
         """
         if self.crop_edit_var.get() or self._shown_key is None or self.pdf_doc is None:
             return None
-        page = self._shown_key[0]  # 화면 이미지의 페이지 (렌더 대기 중이면 현재 페이지와 다를 수 있다)
+        # 화면 이미지의 페이지 (렌더 대기 중이면 현재 페이지와 다를 수 있다)
+        page = self._uid_index(self._shown_key[0])
+        if page is None:
+            return None  # 지운 페이지
         e = self._page_edit(page)
         if self._shown_key[6] != e["rot"]:
             return None  # 90° 회전 렌더 대기 중
@@ -1818,15 +2177,17 @@ class PDFLevelPreviewApp:
         self._show_toast(f"자르기를 {self._range_label(which)}에 적용했습니다.")
 
     def _range_pages(self, which):
-        """목록 범위의 페이지들. 홀수/짝수는 문서 전체의 페이지 번호 기준 (p.1 = idx 0)"""
+        """목록 범위의 페이지들. 홀수/짝수는 문서 전체의 (화면 순서) 페이지 번호 기준 (p.1 = idx 0)"""
         if which == "현재 페이지":
             return [self.current_page]
+        if which == "선택한 페이지":
+            return sorted(self._selected)
         start, step = {"홀수": (0, 2), "짝수": (1, 2), "전체": (0, 1)}[which]
         return range(start, self._page_count, step)
 
     @staticmethod
     def _range_label(which):
-        return which if which == "현재 페이지" else f"{which} 페이지"
+        return which if which in ("현재 페이지", "선택한 페이지") else f"{which} 페이지"
 
     def reset_edits(self):
         """목록 범위(현재 페이지/홀수/짝수/전체)의 편집을 모두 되돌린다 (자르기·기울기·90° 회전)"""
@@ -1886,7 +2247,7 @@ class PDFLevelPreviewApp:
         if self.pdf_doc is None or self.current_img is None or self._shown_key is None:
             return None
         e = self._page_edit(self.current_page)
-        if self._shown_key[0] != self.current_page or self._shown_key[6] != e["rot"]:
+        if self._shown_key[0] != self._cur_uid() or self._shown_key[6] != e["rot"]:
             return None
         w, h = self._page_disp_size(self.current_page)
         s = self.current_img.width / w
@@ -1937,7 +2298,7 @@ class PDFLevelPreviewApp:
         canvas.create_rectangle(x0, y0, x1, y1, outline="#1e90ff", width=2, tags="crop")
 
     def save_edited_pdf(self):
-        """회전/자르기를 반영해 저장. 같은 이름을 고르면 원본에 덮어쓴다"""
+        """페이지 순서(삭제·붙여넣기·이동)와 회전/자르기를 반영해 저장. 같은 이름을 고르면 원본에 덮어쓴다"""
         if self.pdf_doc is None:
             return
         src = self._pdf_path
@@ -1956,8 +2317,11 @@ class PDFLevelPreviewApp:
             # 원본을 새로 열어 편집값만 적용한다 (self.pdf_doc는 원본 그대로 유지)
             out = fitz.open(src)
             try:
-                for idx, e in self.page_edits.items():
-                    _apply_page_edit(out[idx], e["angle"], e["rot"], e["crop"])
+                self._arrange_pages(out, src)
+                for idx, (uid, _, _) in enumerate(self.slots):
+                    e = self.page_edits.get(uid)
+                    if e is not None:
+                        _apply_page_edit(out[idx], e["angle"], e["rot"], e["crop"])
                 if same:
                     self._overwrite_original(src, out)
                 else:
@@ -1973,6 +2337,26 @@ class PDFLevelPreviewApp:
         # 창을 닫아 프로세스가 PDF와 폴더를 놓게 한다. 켜 둔 채면 폴더를 옮길 때 "사용 중"이 난다
         self._on_close()
 
+    def _arrange_pages(self, out, src):
+        """원본을 연 out을 화면의 페이지 목록(slots) 순서로 맞춘다.
+
+        원본 페이지는 처음 나올 때는 그 페이지를 그대로 쓰고(북마크 등 유지), 같은 페이지가
+        또 나오거나 다른 파일(클립보드) 페이지면 뒤에 새로 붙인다. 같은 페이지 객체를 두 자리에
+        쓰면 자르기·기울기가 서로 덮이므로 복제는 꼭 따로 만든다. 마지막에 select로 순서·삭제를 반영한다.
+        """
+        if [(path, i) for _, path, i in self.slots] == [(src, i) for i in range(len(out))]:
+            return  # 순서 그대로
+        seq = []
+        used = set()
+        for _, path, i in self.slots:
+            if path == src and i not in used:
+                used.add(i)
+                seq.append(i)
+            else:
+                out.insert_pdf(self._src_docs[path], from_page=i, to_page=i)
+                seq.append(len(out) - 1)
+        out.select(seq)
+
     def _overwrite_original(self, src, out):
         """원본에 덮어쓰기: 임시 파일로 저장한 뒤 바꿔치기.
 
@@ -1984,7 +2368,7 @@ class PDFLevelPreviewApp:
         self._stop_thumbnails()  # 썸네일 프로세스도 원본을 열고 있다
         self.pdf_doc.close()
         self.pdf_doc = None
-        self._render_req_q.put((None, None, False))  # 워커도 파일에서 손 떼게
+        self._render_req_q.put((None, None, None, False, ()))  # 워커도 파일에서 손 떼게
         last = None
         for _ in range(25):  # 워커가 렌더를 마치고 닫을 때까지 (최대 5초)
             try:
@@ -1999,6 +2383,7 @@ class PDFLevelPreviewApp:
         except OSError:
             pass
         self.pdf_doc = fitz.open(src)  # 못 바꿨으면 원래대로 되돌린다
+        self._src_docs[src] = self.pdf_doc
         self._build_thumbnails()
         raise RuntimeError(f"원본을 바꾸지 못했습니다. 다른 프로그램이 파일을 쓰고 있는지 확인하세요 ({last})")
 
@@ -2363,10 +2748,16 @@ class PDFLevelPreviewApp:
         self._render_proc.join(timeout=2)
         if self._render_proc.is_alive():
             self._render_proc.kill()
-        if self.pdf_doc:
-            self.pdf_doc.close()
-            self.pdf_doc = None
+        self._close_src_docs()
         self.root.destroy()
+
+    def _close_src_docs(self):
+        """열어 둔 문서(원본 + 붙여넣은 클립보드 PDF)를 모두 닫는다"""
+        for doc in self._src_docs.values():
+            if not doc.is_closed:
+                doc.close()
+        self._src_docs = {}
+        self.pdf_doc = None
 
 
 def _used_dirs_path():
@@ -2427,6 +2818,43 @@ def _cleanup_save_dirs():
         _write_used_dirs(alive)
 
 
+def _clipboard_dir():
+    """복사한 페이지(클립보드 PDF)를 두는 폴더. 창끼리 이 폴더로 페이지를 주고받는다"""
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    return os.path.join(base, "pdf-level-preview", "clipboard")
+
+
+def _clipboard_json():
+    """마지막으로 복사한 페이지 정보 {"pdf": 클립보드 PDF, "edits": [페이지별 편집값 또는 null]}"""
+    return os.path.join(_clipboard_dir(), "clipboard.json")
+
+
+def _read_clipboard():
+    """클립보드 정보. 없거나 PDF가 사라졌으면 None"""
+    try:
+        with open(_clipboard_json(), encoding="utf-8") as f:
+            info = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(info, dict) or not isinstance(info.get("pdf"), str) or not os.path.isfile(info["pdf"]):
+        return None
+    return info
+
+
+def _cleanup_clipboard():
+    """오래된 클립보드 PDF 정리. 마지막으로 복사한 것과, 다른 창이 쥐고 있어 못 지우는 것은 남는다"""
+    info = _read_clipboard()
+    keep = os.path.normcase(os.path.abspath(info["pdf"])) if info else None
+    now = time.time()
+    for path in glob.glob(os.path.join(glob.escape(_clipboard_dir()), "*.pdf")):
+        try:
+            if os.path.normcase(os.path.abspath(path)) == keep or now - os.path.getmtime(path) < CLIPBOARD_KEEP:
+                continue
+            os.unlink(path)
+        except OSError:
+            pass
+
+
 def _cleanup_temp_files():
     """임시폴더에 남은 찌꺼기 파일 정리 (이전 실행 + ABBYY)"""
     tmp_dir = tempfile.gettempdir()
@@ -2453,6 +2881,7 @@ def _pdf_arg(argv):
 def main():
     _cleanup_temp_files()
     _cleanup_save_dirs()
+    _cleanup_clipboard()
     try:
         from tkinterdnd2 import TkinterDnD
         root = TkinterDnD.Tk()
