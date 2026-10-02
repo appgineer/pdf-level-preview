@@ -72,9 +72,11 @@ CROP_SIDES = ("top", "bottom", "left", "right")
 MIN_CROP_PT = 36
 # 미리보기에서 자르기 선을 잡을 수 있는 거리 (선 양쪽 px)
 CROP_GRAB_PX = 6
-# 썸네일: 선택된 칸 배경색 / 드래그로 옮길 때 끼워 넣을 자리 선 색
-THUMB_SEL_BG = "#cce4f7"
-THUMB_DROP_LINE = "#0078d7"
+# 썸네일: 선택된 칸 배경색(분홍) / 드래그로 옮길 때 끼워 넣을 자리 선 색
+THUMB_SEL_BG = "#ffc8dc"
+THUMB_DROP_LINE = "#e00000"
+# 썸네일: 지금 미리보기에 보이는 페이지 테두리 색
+THUMB_CUR_LINE = "#e00000"
 # 썸네일을 누른 뒤 이만큼(px) 움직여야 드래그(순서 바꾸기)로 본다
 THUMB_DRAG_PX = 6
 # 드래그 중 썸네일 패널 위/아래 끝에서 이 거리(px) 안이면 자동 스크롤
@@ -748,8 +750,7 @@ class PDFLevelPreviewApp:
         FNT = UI_FONT
 
         # 적용 범위: 회전과 자르기 [적용]·[초기화]가 모두 이 범위를 따른다
-        range_menu = tk.OptionMenu(parent, self.crop_range_var, "현재 페이지", "선택한 페이지",
-                                   "홀수", "짝수", "전체")
+        range_menu = tk.OptionMenu(parent, self.crop_range_var, "선택한 페이지", "홀수", "짝수", "전체")
         range_menu.config(font=FNT, cursor="hand2", bg=RANGE_BG, fg="white",
                           activebackground=RANGE_ACTIVE, activeforeground="white",
                           highlightthickness=0, pady=BTN_PADY)  # 다른 버튼과 높이 맞춤
@@ -1226,7 +1227,7 @@ class PDFLevelPreviewApp:
         self._drawn_pages[idx] = items
 
     def _draw_selection(self):
-        """선택한 페이지는 연한 파란 바탕, 현재 페이지는 진한 파란 테두리"""
+        """선택한 페이지는 분홍 바탕, 현재 페이지(미리보기에 보이는 페이지)는 빨간 테두리"""
         self.thumb_canvas.delete("thumbsel")
         if self._selection_rect_id is not None:
             self.thumb_canvas.delete(self._selection_rect_id)
@@ -1250,7 +1251,7 @@ class PDFLevelPreviewApp:
         x, y = self._get_thumb_pos(self.current_page)
         self._selection_rect_id = self.thumb_canvas.create_rectangle(
             x - 2, y - 2, x + THUMB_W + 2, y + thumb_h + 2,
-            outline="#0078d7", width=3
+            outline=THUMB_CUR_LINE, width=3
         )
 
     def _thumb_hit(self, event):
@@ -1945,7 +1946,7 @@ class PDFLevelPreviewApp:
         return r.width, r.height
 
     def rotate_90(self, delta):
-        """90° 단위 회전. 목록 범위(현재 페이지/홀수/짝수/전체)에 적용하고, 자르기 여백도 함께 돈다.
+        """90° 단위 회전. 목록 범위(선택한 페이지/홀수/짝수/전체)에 적용하고, 자르기 여백도 함께 돈다.
 
         페이지마다 지금 각도에서 90°씩 더 돌린다. 이미 다르게 돌려 둔 페이지도 관계가 유지된다.
         """
@@ -1958,7 +1959,7 @@ class PDFLevelPreviewApp:
                                 crop=_rotate_margins(e["crop"], delta))
         self._sync_edit_panel()
         self._refresh_preview()
-        if which != "현재 페이지":
+        if which != "선택한 페이지" or len(self._selected) > 1:  # 한 장만 돌릴 때는 조용히
             way = "오른쪽" if delta > 0 else "왼쪽"
             self._show_toast(f"{self._range_label(which)}를 {way}으로 90° 돌렸습니다.")
 
@@ -2178,19 +2179,17 @@ class PDFLevelPreviewApp:
 
     def _range_pages(self, which):
         """목록 범위의 페이지들. 홀수/짝수는 문서 전체의 (화면 순서) 페이지 번호 기준 (p.1 = idx 0)"""
-        if which == "현재 페이지":
-            return [self.current_page]
-        if which == "선택한 페이지":
+        if which == "선택한 페이지":  # 현재 페이지는 항상 들어 있다
             return sorted(self._selected)
         start, step = {"홀수": (0, 2), "짝수": (1, 2), "전체": (0, 1)}[which]
         return range(start, self._page_count, step)
 
     @staticmethod
     def _range_label(which):
-        return which if which in ("현재 페이지", "선택한 페이지") else f"{which} 페이지"
+        return which if which == "선택한 페이지" else f"{which} 페이지"
 
     def reset_edits(self):
-        """목록 범위(현재 페이지/홀수/짝수/전체)의 편집을 모두 되돌린다 (자르기·기울기·90° 회전)"""
+        """목록 범위(선택한 페이지/홀수/짝수/전체)의 편집을 모두 되돌린다 (자르기·기울기·90° 회전)"""
         if self.pdf_doc is None:
             return
         which = self.crop_range_var.get()
@@ -2233,7 +2232,10 @@ class PDFLevelPreviewApp:
         self._last_fit_page = self.current_page  # 먼저 정해 둬야 _set_page_edit가 위치를 기록한다
         self._set_page_edit(self.current_page, crop=[top, h - sh - top, left, w - sw - left])
         # 크기 맞춤은 한 장씩: 이어서 [적용]/[초기화]를 눌러도 다른 페이지를 건드리지 않게
-        self.crop_range_var.set("현재 페이지")
+        self._selected = {self.current_page}
+        self._sel_anchor = self.current_page
+        self._draw_selection()
+        self.crop_range_var.set("선택한 페이지")
         self._set_drag_mode("crop")
         self._sync_edit_panel()
         self._draw_crop_overlay()
