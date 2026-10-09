@@ -608,7 +608,7 @@ class PDFLevelPreviewApp:
 
         # ── Right: 설정 세로 컬럼 ──────────────────────────────────────
         settings_outer = tk.Frame(paned, bd=1, relief=tk.RAISED, highlightthickness=FOCUS_LINE_W)
-        paned.add(settings_outer, minsize=320, width=440, stretch="never")
+        paned.add(settings_outer, minsize=400, width=560, stretch="never")
         self._build_settings_panel(settings_outer)
 
         # 구간: (테두리 틀, 빈 곳을 눌렀을 때 키보드를 받을 위젯). 키보드가 가는 구간에 빨간 테두리
@@ -678,7 +678,7 @@ class PDFLevelPreviewApp:
         # ── 구간 2: 설정 파일 (config.json, 자동화 프로그램이 읽는다) ──
         config_box = tk.Frame(inner, highlightthickness=SECTION_LINE_W, padx=8, pady=8,
                               highlightbackground=SECTION_CONFIG_LINE, highlightcolor=SECTION_CONFIG_LINE)
-        config_box.pack(fill=tk.X, pady=(16, 0))
+        config_box.pack(fill=tk.X, pady=(40, 0))  # 편집 구간과 확실히 떨어지게
         self._section_header(config_box, "설정 파일 만들기", SECTION_CONFIG_HEAD)
 
         # ── 자르기 설정 ──
@@ -897,6 +897,8 @@ class PDFLevelPreviewApp:
             side_entry.grid(row=row, column=col * 3 + 1, pady=2)
             side_entry.bind("<Right>", lambda e, s=side: self._nudge_cfg_crop(s, +1))
             side_entry.bind("<Left>",  lambda e, s=side: self._nudge_cfg_crop(s, -1))
+            side_entry.bind("<Up>",    lambda e, s=side: self._nudge_cfg_crop(s, +1))
+            side_entry.bind("<Down>",  lambda e, s=side: self._nudge_cfg_crop(s, -1))
             tk.Label(self.crop_cfg_side_frame, text="mm", font=FNT).grid(
                 row=row, column=col * 3 + 2, sticky=tk.W, padx=(4, 0))
             self.crop_cfg_side_vars[side].trace_add("write", self._on_crop_cfg_change)
