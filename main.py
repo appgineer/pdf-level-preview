@@ -56,7 +56,7 @@ RANGE_COLORS = {"선택한 페이지": ("#3a9d5d", "#2f7f4c"),  # 초록
                 "홀수": ("#e0861a", "#bf7014"),          # 주황
                 "짝수": ("#7b5cc4", "#6447a8"),          # 보라
                 "전체": ("#2f7fd1", "#2566ab")}          # 파랑
-LOAD_BTN_BG, LOAD_BTN_ACTIVE = "#ef8fb5", "#e0789f"      # 저장 크기 불러오기 (분홍)
+LOAD_BTN_BG, LOAD_BTN_ACTIVE = "#c2185b", "#9e1449"      # 저장 크기 불러오기 (진분홍, 흰 글씨)
 CFG_SAVE_BG, CFG_SAVE_ACTIVE = "#7b4fc0", "#653da8"      # 설정 저장 (보라)
 BTN_PADY = 4  # 버튼·선택창 높이를 맞추는 세로 여백
 # 내장 이미지가 없는 페이지(벡터/텍스트)의 렌더 스케일. 1.0 = 72 DPI
@@ -858,8 +858,8 @@ class PDFLevelPreviewApp:
         self.saved_size_label = tk.Label(parent, text="", font=UI_FONT_SMALL, fg="#666", anchor=tk.W)
         self.saved_size_label.pack(fill=tk.X)
         tk.Button(parent, text="저장 크기 불러오기", command=self.crop_to_saved_size, pady=BTN_PADY,
-                  cursor="hand2", font=FNT, bg=LOAD_BTN_BG, fg="#111",
-                  activebackground=LOAD_BTN_ACTIVE).pack(fill=tk.X)
+                  cursor="hand2", font=FNT, bg=LOAD_BTN_BG, fg="white",
+                  activebackground=LOAD_BTN_ACTIVE, activeforeground="white").pack(fill=tk.X)
         apply_row = tk.Frame(parent)
         apply_row.pack(fill=tk.X, pady=(4, 0))
         tk.Button(apply_row, text="초기화", command=self.reset_edits, pady=BTN_PADY,
