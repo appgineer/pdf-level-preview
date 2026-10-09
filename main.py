@@ -77,6 +77,9 @@ THUMB_SEL_BG = "#ffc8dc"
 THUMB_DROP_LINE = "#e00000"
 # 썸네일: 지금 미리보기에 보이는 페이지 테두리 색
 THUMB_CUR_LINE = "#e00000"
+# 지금 키보드가 가는 구간(왼쪽 썸네일 / 가운데 미리보기 / 오른쪽 패널) 테두리 색·두께
+FOCUS_LINE = "#e00000"
+FOCUS_LINE_W = 3
 # 썸네일을 누른 뒤 이만큼(px) 움직여야 드래그(순서 바꾸기)로 본다
 THUMB_DRAG_PX = 6
 # 드래그 중 썸네일 패널 위/아래 끝에서 이 거리(px) 안이면 자동 스크롤
@@ -522,7 +525,7 @@ class PDFLevelPreviewApp:
         paned.pack(fill=tk.BOTH, expand=True)
 
         # ── Left: thumbnail panel ──────────────────────────────────────
-        left = tk.Frame(paned, bd=1, relief=tk.SUNKEN)
+        left = tk.Frame(paned, bd=1, relief=tk.SUNKEN, highlightthickness=FOCUS_LINE_W)
         # 초기 4열. +60 = 스크롤바/테두리 여유
         paned.add(left, minsize=160, width=4 * (THUMB_W + THUMB_MARGIN * 2) + 60)
         self._thumb_label_h = tkfont.Font(font=THUMB_LABEL_FONT).metrics("linespace")
@@ -545,6 +548,11 @@ class PDFLevelPreviewApp:
         # 단축키는 썸네일 패널에 포커스가 있을 때만 (입력칸의 Ctrl+C/V와 안 겹치게)
         self.thumb_canvas.bind("<Control-KeyPress>", self._on_thumb_ctrl_key)
         self.thumb_canvas.bind("<Delete>", lambda e: self.delete_selected())
+        # 방향키: 보이는 칸 그대로 위/아래/왼쪽/오른쪽 페이지로, Shift를 누르면 범위 선택
+        for key, step in (("Left", -1), ("Right", 1), ("Up", None), ("Down", None)):
+            for mod in ("", "Shift-"):
+                self.thumb_canvas.bind(f"<{mod}{key}>",
+                                       lambda e, k=key, st=step: self._on_thumb_arrow(e, k, st))
         self._thumb_menu = tk.Menu(self.root, tearoff=0, font=UI_FONT_SMALL)
         for label, accel, cmd in (("복사", "Ctrl+C", self.copy_selected),
                                   ("잘라내기", "Ctrl+X", self.cut_selected),
@@ -564,7 +572,7 @@ class PDFLevelPreviewApp:
         self.thumb_canvas.bind("<Button-5>",   self._on_thumb_scroll)
 
         # ── Center: preview ────────────────────────────────────────────
-        preview_frame = tk.Frame(paned)
+        preview_frame = tk.Frame(paned, highlightthickness=FOCUS_LINE_W)
         paned.add(preview_frame, minsize=400, stretch="always")
 
         prev_vscroll = ttk.Scrollbar(preview_frame, orient=tk.VERTICAL)
@@ -595,15 +603,25 @@ class PDFLevelPreviewApp:
         self.preview_canvas.bind("<Button-5>", self._on_preview_scroll)
 
         # ── Right: 설정 세로 컬럼 ──────────────────────────────────────
-        settings_outer = tk.Frame(paned, bd=1, relief=tk.RAISED)
+        settings_outer = tk.Frame(paned, bd=1, relief=tk.RAISED, highlightthickness=FOCUS_LINE_W)
         paned.add(settings_outer, minsize=320, width=440, stretch="never")
         self._build_settings_panel(settings_outer)
+
+        # 구간: (테두리 틀, 빈 곳을 눌렀을 때 키보드를 받을 위젯). 키보드가 가는 구간에 빨간 테두리
+        self._regions = {"left": (left, self.thumb_canvas),
+                         "center": (preview_frame, self.preview_canvas),
+                         "right": (settings_outer, self._settings_canvas)}
+        self.root.bind_all("<ButtonPress-1>", self._on_any_press, add="+")
+        self.root.bind_all("<FocusIn>", lambda e: self._draw_focus_region(), add="+")
+        self.preview_canvas.focus_set()  # 처음에는 가운데(미리보기)
+        self._draw_focus_region()
 
     def _build_settings_panel(self, parent):
         """오른쪽 설정 컬럼. 스크롤 캔버스 하나 안에 모든 설정을 세로로 쌓는다."""
         FNT = UI_FONT
 
         canvas = tk.Canvas(parent, highlightthickness=0)
+        self._settings_canvas = canvas  # 오른쪽 빈 곳을 누르면 여기로 키보드 포커스
         vscroll = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=canvas.yview)
         canvas.configure(yscrollcommand=vscroll.set)
         vscroll.pack(side=tk.RIGHT, fill=tk.Y)
@@ -759,7 +777,7 @@ class PDFLevelPreviewApp:
 
         # 격자 보기: 페이지 위에 가로세로 격자만 그린다 (회전·자르기와 무관)
         grid_row = tk.Frame(parent)
-        grid_row.pack(fill=tk.X, pady=(16, 0))
+        grid_row.pack(fill=tk.X, pady=(16, 12))  # 아래를 띄워 회전 줄과 구분
         tk.Checkbutton(grid_row, text="격자 보기", variable=self.grid_var,
                        command=self._on_grid_toggle, cursor="hand2", font=FNT,
                        image=self._ind_tk['cb_off'], selectimage=self._ind_tk['cb_on'],
@@ -1436,6 +1454,71 @@ class PDFLevelPreviewApp:
         self._sync_edit_panel()
         self.update_preview()
 
+    def _on_thumb_arrow(self, event, key, step):
+        """썸네일 패널 방향키: 보이는 칸 기준으로 옮기고, Shift면 기준 페이지부터 범위 선택"""
+        if self._page_count == 0:
+            return "break"
+        cur = self.current_page
+        if step is None:  # 위/아래는 한 줄
+            step = -self._thumb_cols if key == "Up" else self._thumb_cols
+        new = cur + step
+        if not 0 <= new < self._page_count:
+            return "break"
+        if event.state & 0x0001:  # Shift
+            a, b = sorted((self._sel_anchor, new))
+            self._selected = set(range(a, b + 1))
+        else:
+            self._selected = {new}
+            self._sel_anchor = new
+        self.select_page(new)
+        self._thumb_see(new)
+        return "break"
+
+    def _thumb_see(self, idx):
+        """그 페이지 칸이 썸네일 패널에 다 보이도록 스크롤"""
+        total = self._thumb_total_height
+        if total <= 0:
+            return
+        canvas = self.thumb_canvas
+        top = idx // self._thumb_cols * self._thumb_cell_h
+        bottom = top + self._thumb_cell_h
+        view_top = canvas.canvasy(0)
+        view_h = canvas.winfo_height()
+        if top < view_top:
+            canvas.yview_moveto(top / total)
+        elif bottom > view_top + view_h:
+            canvas.yview_moveto((bottom - view_h) / total)
+
+    # ------------------------------------------------------------------ #
+    # 키보드가 가는 구간 (왼쪽 / 가운데 / 오른쪽) 빨간 테두리
+    # ------------------------------------------------------------------ #
+    def _region_of(self, widget):
+        """위젯이 속한 구간 이름 ("left"/"center"/"right"). 어디에도 없으면 None"""
+        path = str(widget)
+        for name, (frame, _) in self._regions.items():
+            fp = str(frame)
+            if path == fp or path.startswith(fp + "."):
+                return name
+        return None
+
+    def _on_any_press(self, event):
+        """입력칸이 아닌 곳을 눌러도 키보드가 그 구간으로 가게 (버튼·글씨·빈 곳은 포커스를 안 가져간다)"""
+        name = self._region_of(event.widget)
+        if name is None or isinstance(event.widget, str):  # 메뉴 복제본 등은 이름(str)으로 온다
+            return
+        if event.widget.winfo_class() not in ("Entry", "TEntry", "Text", "TCombobox", "Spinbox"):
+            self._regions[name][1].focus_set()
+
+    def _draw_focus_region(self):
+        try:
+            focus = self.root.focus_get()
+        except (KeyError, tk.TclError):  # 메뉴 등 Tk가 이름을 못 찾는 위젯
+            focus = None
+        active = self._region_of(focus) if focus is not None else None
+        for name, (frame, _) in self._regions.items():
+            color = FOCUS_LINE if name == active else self._bg_color
+            frame.config(highlightbackground=color, highlightcolor=color)
+
     # ------------------------------------------------------------------ #
     # Page operations (썸네일: 복사 / 잘라내기 / 붙여넣기 / 삭제 / 순서 바꾸기 / 되돌리기)
     # ------------------------------------------------------------------ #
@@ -1783,8 +1866,8 @@ class PDFLevelPreviewApp:
     def _on_drag_start(self, event):
         self._crop_drag = None
         self._rotate_drag = None
-        if self._rotate_drag_on():
-            self.preview_canvas.focus_set()  # 입력칸에서 포커스를 빼야 ←/→가 회전으로 간다
+        self.preview_canvas.focus_set()  # 입력칸에서 포커스를 빼야 ←/→가 회전으로 간다
+        if self._rotate_drag_on() and self._on_page(event):
             self._start_rotate_drag(event)
             return
         if self.crop_edit_var.get():
@@ -1797,9 +1880,8 @@ class PDFLevelPreviewApp:
         self.preview_canvas.scan_mark(event.x, event.y)
 
     def _on_drag_move(self, event):
-        if self._rotate_drag_on():
-            if self._rotate_drag is not None:
-                self._rotate_drag_move(event)
+        if self._rotate_drag is not None:
+            self._rotate_drag_move(event)
             return
         if self._crop_drag is None:
             self.preview_canvas.scan_dragto(event.x, event.y, gain=1)
@@ -1841,7 +1923,7 @@ class PDFLevelPreviewApp:
     def _on_preview_hover(self, event):
         cursor = ""
         if self._rotate_drag_on():
-            cursor = "exchange"
+            cursor = "exchange" if self._on_page(event) else ""
         elif self.crop_edit_var.get():
             cursor = {"top": "sb_v_double_arrow", "bottom": "sb_v_double_arrow",
                       "left": "sb_h_double_arrow", "right": "sb_h_double_arrow",
@@ -1987,9 +2069,19 @@ class PDFLevelPreviewApp:
         return "break"
 
     def _nudge_angle_key(self, event, delta):
-        if not self._rotate_drag_on() or event.widget.winfo_class() in ("Entry", "TEntry", "Text", "TCombobox", "Spinbox"):
+        """입력칸 밖 ←/→ 회전은 가운데(미리보기) 구간에 키보드가 있을 때만"""
+        if not self._rotate_drag_on() or self._region_of(event.widget) != "center":
             return None
         return self._nudge_angle(delta)
+
+    def _on_page(self, event):
+        """미리보기에서 마우스가 페이지 위에 있는지 (둘레 회색 바탕이 아니고)"""
+        if self.current_img is None:
+            return False
+        x0, y0, x1, y1 = self._img_clip
+        cx = self.preview_canvas.canvasx(event.x)
+        cy = self.preview_canvas.canvasy(event.y)
+        return x0 <= cx <= x1 and y0 <= cy <= y1
 
     def _rotate_drag_on(self):
         """미리보기를 끌어서 회전하는지: "선 편집"이 꺼져 있을 때 (선 편집 중에는 선 드래그). 격자 보기와 무관"""
