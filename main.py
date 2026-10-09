@@ -528,7 +528,7 @@ class PDFLevelPreviewApp:
         # Resizable split
         paned = tk.PanedWindow(
             self.root, orient=tk.HORIZONTAL,
-            sashwidth=16, sashrelief=tk.RAISED, sashpad=4,
+            sashwidth=28, sashrelief=tk.RAISED, sashpad=4,  # 넓게 잡아야 경계선을 쉽게 잡는다
             sashcursor="sb_h_double_arrow"
         )
         paned.pack(fill=tk.BOTH, expand=True)
