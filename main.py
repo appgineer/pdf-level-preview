@@ -463,8 +463,7 @@ class PDFLevelPreviewApp:
         self.selected_level_idx = tk.IntVar(value=-1)
         self.scan_type_var = tk.StringVar(value="일반")
         self.crop_cfg_mode_var = tk.StringVar(value="전체")  # 자르기 설정: "전체"(네 방향 같은 값) / "각각"
-        self.crop_cfg_var = tk.StringVar(value="안함")  # 전체일 때: "안함" / "1" / "2" / "입력"
-        self.crop_cfg_mm_var = tk.StringVar(value="")   # 전체 "입력"일 때의 mm
+        self.crop_cfg_var = tk.StringVar(value="안함")  # 전체일 때: "안함" / "1" / "2"
         self.crop_cfg_side_vars = {side: tk.StringVar(value="0") for side in CROP_SIDES}  # 각각일 때
         self.ocr_vars = {}  # name -> BooleanVar
         self.ocr_enabled_var = tk.BooleanVar(value=False)
@@ -524,8 +523,8 @@ class PDFLevelPreviewApp:
 
         # ── Left: thumbnail panel ──────────────────────────────────────
         left = tk.Frame(paned, bd=1, relief=tk.SUNKEN)
-        # 초기 2열. +60 = 스크롤바/테두리 여유
-        paned.add(left, minsize=160, width=2 * (THUMB_W + THUMB_MARGIN * 2) + 60)
+        # 초기 4열. +60 = 스크롤바/테두리 여유
+        paned.add(left, minsize=160, width=4 * (THUMB_W + THUMB_MARGIN * 2) + 60)
         self._thumb_label_h = tkfont.Font(font=THUMB_LABEL_FONT).metrics("linespace")
 
         self.thumb_canvas = tk.Canvas(left, bg="#f0f0f0")
@@ -858,14 +857,6 @@ class PDFLevelPreviewApp:
         row1.pack(anchor=tk.W)
         for txt, val in (("안함", "안함"), ("1mm", "1"), ("2mm", "2")):
             tk.Radiobutton(row1, text=txt, value=val, **radio).pack(side=tk.LEFT, padx=(0, 12))
-        row2 = tk.Frame(self.crop_cfg_all_frame)
-        row2.pack(anchor=tk.W)
-        tk.Radiobutton(row2, text="입력", value="입력", **radio).pack(side=tk.LEFT)
-        entry = tk.Entry(row2, textvariable=self.crop_cfg_mm_var, width=6, font=FNT)
-        entry.pack(side=tk.LEFT, padx=6)
-        tk.Label(row2, text="mm", font=FNT).pack(side=tk.LEFT)
-        self.crop_cfg_mm_var.trace_add("write", self._on_crop_cfg_mm_change)
-        self._edit_entries.append(entry)  # 여기서 Enter를 쳐도 레벨이 추가되지 않게
 
         # 각각: 위/아래/좌/우 따로
         self.crop_cfg_side_frame = tk.Frame(parent)
@@ -903,12 +894,6 @@ class PDFLevelPreviewApp:
         shown.pack(anchor=tk.W, before=self._pad_after_crop_cfg)
         self._on_crop_cfg_change()
         self._refresh_settings_scroll()
-
-    def _on_crop_cfg_mm_change(self, *_):
-        # 숫자를 치면 "입력"을 고른 것으로 본다
-        if self.crop_cfg_mm_var.get().strip():
-            self.crop_cfg_var.set("입력")
-        self._on_crop_cfg_change()
 
     def _on_crop_cfg_change(self, *_):
         """설정 자르기 값이 바뀌면 미리보기와 썸네일의 빨간 선을 다시 그린다"""
@@ -955,13 +940,8 @@ class PDFLevelPreviewApp:
             sides = [self._parse_mm(self.crop_cfg_side_vars[side].get()) for side in CROP_SIDES]
             return None if None in sides else sides
         choice = self.crop_cfg_var.get()
-        if choice == "안함":
-            one = 0
-        elif choice != "입력":
-            one = int(choice)
-        else:
-            one = self._parse_mm(self.crop_cfg_mm_var.get(), empty=None)
-        return None if one is None else [one] * 4
+        one = 0 if choice == "안함" else int(choice)
+        return [one] * 4
 
     # ------------------------------------------------------------------ #
     # Drag & Drop
@@ -2653,7 +2633,7 @@ class PDFLevelPreviewApp:
         except (json.JSONDecodeError, OSError):
             return
 
-        # 자르기 설정: 0/1/2는 해당 버튼, 그 밖의 숫자는 "입력". 없거나 이상한 값은 안함
+        # 자르기 설정: 네 방향이 0/1/2로 같으면 "전체"의 해당 버튼, 그 밖은 "각각". 없거나 이상한 값은 안함
         raw = cfg.get("crop_mm", 0)
         if isinstance(raw, dict):
             values = [raw.get(k, 0) for k in ("top", "bottom", "left", "right")]
@@ -2668,16 +2648,10 @@ class PDFLevelPreviewApp:
             sides.append(v if 0 <= v < float("inf") else 0.0)
         for side, v in zip(CROP_SIDES, sides):
             self.crop_cfg_side_vars[side].set(f"{round(v, 2):g}")
-        if len(set(sides)) == 1:  # 네 방향이 같으면 "전체"
-            one = sides[0]
+        presets = {0: "안함", 1: "1", 2: "2"}
+        if len(set(sides)) == 1 and sides[0] in presets:  # 네 방향이 같은 0/1/2면 "전체"
             self.crop_cfg_mode_var.set("전체")
-            presets = {0: "안함", 1: "1", 2: "2"}
-            if one in presets:
-                self.crop_cfg_mm_var.set("")
-                self.crop_cfg_var.set(presets[one])
-            else:
-                self.crop_cfg_mm_var.set(f"{round(one, 2):g}")
-                self.crop_cfg_var.set("입력")
+            self.crop_cfg_var.set(presets[sides[0]])
         else:
             self.crop_cfg_mode_var.set("각각")
         self._toggle_crop_cfg_mode()
