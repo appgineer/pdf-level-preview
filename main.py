@@ -37,9 +37,9 @@ INDICATOR_SIZE = 24  # 체크박스/라디오버튼 인디케이터 크기
 INDICATOR_MARK = "#e00000"  # 선택 표시(체크마크/라디오 점) 색. 검은색은 눈에 잘 안 띈다
 # 오른쪽 패널 구간 색: 편집(PDF 직접 수정) / 설정 파일(config.json)
 SECTION_EDIT_BG, SECTION_EDIT_HEAD = "#eaf2fb", "#b6d3f2"
-SECTION_CONFIG_BG, SECTION_CONFIG_HEAD = "#f7f1e6", "#e4d4b5"
+SECTION_CONFIG_BG, SECTION_CONFIG_HEAD = "#fcedf2", "#f3c3d4"
 # 구간 테두리 (배경색만으로는 구분이 약해서)
-SECTION_EDIT_LINE, SECTION_CONFIG_LINE = "#5b8fc7", "#b39256"
+SECTION_EDIT_LINE, SECTION_CONFIG_LINE = "#5b8fc7", "#c86b8e"
 SECTION_LINE_W = 2
 # 드래그 회전: 마우스를 좌우로 이 픽셀만큼 끌 때마다 0.1°씩 (오른쪽으로 = 오른쪽/시계방향).
 # 값이 작을수록 빨리 돈다 (2 = 1°에 20px)
@@ -51,7 +51,11 @@ ROTATE_GRID_COLOR = "#00a0e0"
 CFG_CROP_LINE = "#e00000"
 # 눈에 띄어야 하는 버튼/선택창 색
 SAVE_BTN_BG, SAVE_BTN_ACTIVE = "#1f6fd0", "#17559f"      # 적용 / 다른 이름으로 저장 (파랑)
-RANGE_BG, RANGE_ACTIVE = "#3a9d5d", "#2f7f4c"            # 적용 범위 선택창 (초록)
+# 적용 범위 선택창: 고른 범위마다 (바탕, 눌렀을 때) 색. 글씨는 흰색
+RANGE_COLORS = {"선택한 페이지": ("#3a9d5d", "#2f7f4c"),  # 초록
+                "홀수": ("#e0861a", "#bf7014"),          # 주황
+                "짝수": ("#7b5cc4", "#6447a8"),          # 보라
+                "전체": ("#2f7fd1", "#2566ab")}          # 파랑
 LOAD_BTN_BG, LOAD_BTN_ACTIVE = "#ef8fb5", "#e0789f"      # 저장 크기 불러오기 (분홍)
 CFG_SAVE_BG, CFG_SAVE_ACTIVE = "#7b4fc0", "#653da8"      # 설정 저장 (보라)
 BTN_PADY = 4  # 버튼·선택창 높이를 맞추는 세로 여백
@@ -481,7 +485,7 @@ class PDFLevelPreviewApp:
         self.split_range_text = None
         self.crop_edit_var = tk.BooleanVar(value=False)
         self.grid_var = tk.BooleanVar(value=True)
-        self.crop_range_var = tk.StringVar(value="전체")
+        self.crop_range_var = tk.StringVar(value="선택한 페이지")
 
         self._section_heads = []  # (머리말 라벨, 색) — 구간 색칠 때 제 색을 지킨다
         self._build_ui()
@@ -773,12 +777,18 @@ class PDFLevelPreviewApp:
         FNT = UI_FONT
 
         # 적용 범위: 회전과 자르기 [적용]·[초기화]가 모두 이 범위를 따른다
-        range_menu = tk.OptionMenu(parent, self.crop_range_var, "선택한 페이지", "홀수", "짝수", "전체")
-        range_menu.config(font=FNT, cursor="hand2", bg=RANGE_BG, fg="white",
-                          activebackground=RANGE_ACTIVE, activeforeground="white",
+        range_menu = tk.OptionMenu(parent, self.crop_range_var, *RANGE_COLORS)
+        range_menu.config(font=FNT, cursor="hand2", fg="white", activeforeground="white",
                           highlightthickness=0, pady=BTN_PADY)  # 다른 버튼과 높이 맞춤
-        range_menu["menu"].config(font=FNT, bg=RANGE_BG, fg="white",
-                                  activebackground=RANGE_ACTIVE, activeforeground="white")
+        range_menu["menu"].config(font=FNT, fg="white", activeforeground="white")
+        for i, (bg, active) in enumerate(RANGE_COLORS.values()):  # 목록 항목도 제 색
+            range_menu["menu"].entryconfig(i, background=bg, activebackground=active)
+
+        def _paint_range(*_):  # 고른 범위에 맞춰 바탕색
+            bg, active = RANGE_COLORS[self.crop_range_var.get()]
+            range_menu.config(bg=bg, activebackground=active)
+        self.crop_range_var.trace_add("write", _paint_range)
+        _paint_range()
         range_menu.pack(fill=tk.X)
 
         # 격자 보기: 페이지 위에 가로세로 격자만 그린다 (회전·자르기와 무관)
