@@ -56,7 +56,8 @@ RANGE_COLORS = {"선택한 페이지": ("#3a9d5d", "#2f7f4c"),  # 초록
                 "홀수": ("#e0861a", "#bf7014"),          # 주황
                 "짝수": ("#7b5cc4", "#6447a8"),          # 보라
                 "전체": ("#2f7fd1", "#2566ab")}          # 파랑
-SAVEAS_BTN_BG, SAVEAS_BTN_ACTIVE = "#e0628f", "#c84d79"  # 다른 이름으로 저장 (분홍, 흰 글씨)
+# 다른 이름으로 저장: "선택한 페이지"와 같은 초록, 흰 글씨
+SAVEAS_BTN_BG, SAVEAS_BTN_ACTIVE = RANGE_COLORS["선택한 페이지"]
 CFG_SAVE_BG, CFG_SAVE_ACTIVE = "#7b4fc0", "#653da8"      # 설정 저장 (보라)
 BTN_PADY = 4  # 버튼·선택창 높이를 맞추는 세로 여백
 # 내장 이미지가 없는 페이지(벡터/텍스트)의 렌더 스케일. 1.0 = 72 DPI
@@ -79,11 +80,11 @@ CROP_SIDES = ("top", "bottom", "left", "right")
 MIN_CROP_PT = 36
 # 미리보기에서 자르기 선을 잡을 수 있는 거리 (선 양쪽 px)
 CROP_GRAB_PX = 6
-# 썸네일: 선택된 칸 배경색(분홍) / 드래그로 옮길 때 끼워 넣을 자리 선 색
-THUMB_SEL_BG = "#ffc8dc"
+# 썸네일: 선택된 칸 배경색(연파랑) / 드래그로 옮길 때 끼워 넣을 자리 선 색
+THUMB_SEL_BG = "#cfe0fb"
 THUMB_DROP_LINE = "#e00000"
-# 썸네일: 지금 미리보기에 보이는 페이지 테두리 색
-THUMB_CUR_LINE = "#e00000"
+# 썸네일: 지금 미리보기에 보이는 페이지 테두리 색 (파랑. 설정 파일 자르기의 빨간 선과 안 헷갈리게)
+THUMB_CUR_LINE = "#1f6fd0"
 # 지금 키보드가 가는 구간(왼쪽 썸네일 / 가운데 미리보기 / 오른쪽 패널) 테두리 색·두께
 FOCUS_LINE = "#e00000"
 FOCUS_LINE_W = 3
@@ -592,9 +593,9 @@ class PDFLevelPreviewApp:
         )
         prev_vscroll.config(command=self.preview_canvas.yview)
         prev_hscroll.config(command=self.preview_canvas.xview)
-        prev_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
-        prev_hscroll.pack(side=tk.BOTTOM, fill=tk.X)
         self.preview_canvas.pack(fill=tk.BOTH, expand=True)
+        # 스크롤바는 확대했을 때만 보인다 (맞춤 화면에서는 움직일 데가 없다). _update_zoom_label이 넣고 뺀다
+        self._prev_scrolls = (prev_vscroll, prev_hscroll)
 
         self.preview_canvas.bind("<Control-MouseWheel>", self._on_ctrl_wheel)
         self.preview_canvas.bind("<Control-Button-4>",   self._on_ctrl_wheel)
@@ -1685,10 +1686,15 @@ class PDFLevelPreviewApp:
 
     def _update_zoom_label(self):
         pct = self._current_zoom_pct()
+        vscroll, hscroll = self._prev_scrolls
         if pct == 0:
             self.zoom_label.config(text="맞춤")
+            vscroll.pack_forget()
+            hscroll.pack_forget()
         else:
             self.zoom_label.config(text=f"{pct}%")
+            vscroll.pack(side=tk.RIGHT, fill=tk.Y, before=self.preview_canvas)
+            hscroll.pack(side=tk.BOTTOM, fill=tk.X, before=self.preview_canvas)
 
     def _fit_canvas_size(self):
         """맞춤이 페이지를 넣을 영역 (캔버스에서 둘레 여백을 뺀 크기).
