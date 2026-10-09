@@ -2679,6 +2679,10 @@ class PDFLevelPreviewApp:
                                             width=16, height=3, font=FNT, wrap=tk.WORD)
             self.split_range_text.pack(fill=tk.X, pady=2)
             self.split_range_text.insert("1.0", self.split_page_ranges_var.get())
+            # 안에서 스크롤하지 않고 내용만큼 칸이 커진다 (오른쪽 패널 전체 스크롤로 내려 본다)
+            for evt in ("<KeyRelease>", "<Configure>"):
+                self.split_range_text.bind(evt, lambda e: self._fit_split_range_height())
+            self.root.after_idle(self._fit_split_range_height)
         elif method == "size":
             inner = tk.Frame(self.split_detail_frame)
             inner.pack(pady=2)
@@ -2689,6 +2693,20 @@ class PDFLevelPreviewApp:
         self._tint(self.split_detail_frame, SECTION_CONFIG_BG)
         self._bind_settings_scroll(self.split_detail_frame)
         self._refresh_settings_scroll()
+
+    def _fit_split_range_height(self):
+        """분할 범위 입력칸 높이를 화면에 보이는 줄 수에 맞춘다 (최소 3줄)"""
+        text = self.split_range_text
+        if text is None or not text.winfo_exists():
+            return
+        lines = text.count("1.0", "end", "displaylines")
+        if isinstance(lines, tuple):  # 파이썬 버전에 따라 (n,) 또는 n, 빈 칸이면 None
+            lines = lines[0]
+        height = max(3, lines or 1)
+        if int(text.cget("height")) != height:
+            text.config(height=height)
+            self._refresh_settings_scroll()
+        text.yview_moveto(0)
 
     def _save_config(self):
         if not self.pdf_doc:
