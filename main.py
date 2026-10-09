@@ -50,13 +50,13 @@ ROTATE_GRID_COLOR = "#00a0e0"
 # 설정 파일의 자르기(mm) 자리를 보여주는 선 색 (미리보기 / 썸네일)
 CFG_CROP_LINE = "#e00000"
 # 눈에 띄어야 하는 버튼/선택창 색
-SAVE_BTN_BG, SAVE_BTN_ACTIVE = "#1f6fd0", "#17559f"      # 적용 / 다른 이름으로 저장 (파랑)
+SAVE_BTN_BG, SAVE_BTN_ACTIVE = "#1f6fd0", "#17559f"      # 적용 / 저장 크기 불러오기 (파랑)
 # 적용 범위 선택창: 고른 범위마다 (바탕, 눌렀을 때) 색. 글씨는 흰색
 RANGE_COLORS = {"선택한 페이지": ("#3a9d5d", "#2f7f4c"),  # 초록
                 "홀수": ("#e0861a", "#bf7014"),          # 주황
                 "짝수": ("#7b5cc4", "#6447a8"),          # 보라
                 "전체": ("#2f7fd1", "#2566ab")}          # 파랑
-LOAD_BTN_BG, LOAD_BTN_ACTIVE = "#c2185b", "#9e1449"      # 저장 크기 불러오기 (진분홍, 흰 글씨)
+SAVEAS_BTN_BG, SAVEAS_BTN_ACTIVE = "#e0628f", "#c84d79"  # 다른 이름으로 저장 (분홍, 흰 글씨)
 CFG_SAVE_BG, CFG_SAVE_ACTIVE = "#7b4fc0", "#653da8"      # 설정 저장 (보라)
 BTN_PADY = 4  # 버튼·선택창 높이를 맞추는 세로 여백
 # 내장 이미지가 없는 페이지(벡터/텍스트)의 렌더 스케일. 1.0 = 72 DPI
@@ -858,8 +858,8 @@ class PDFLevelPreviewApp:
         self.saved_size_label = tk.Label(parent, text="", font=UI_FONT_SMALL, fg="#666", anchor=tk.W)
         self.saved_size_label.pack(fill=tk.X)
         tk.Button(parent, text="저장 크기 불러오기", command=self.crop_to_saved_size, pady=BTN_PADY,
-                  cursor="hand2", font=FNT, bg=LOAD_BTN_BG, fg="white",
-                  activebackground=LOAD_BTN_ACTIVE, activeforeground="white").pack(fill=tk.X)
+                  cursor="hand2", font=FNT, bg=SAVE_BTN_BG, fg="white",
+                  activebackground=SAVE_BTN_ACTIVE, activeforeground="white").pack(fill=tk.X)
         apply_row = tk.Frame(parent)
         apply_row.pack(fill=tk.X, pady=(4, 0))
         tk.Button(apply_row, text="초기화", command=self.reset_edits, pady=BTN_PADY,
@@ -871,7 +871,7 @@ class PDFLevelPreviewApp:
 
         tk.Button(parent, text="다른 이름으로 저장", command=self.save_edited_pdf,
                   padx=12, pady=BTN_PADY, cursor="hand2", font=FNT,
-                  bg=SAVE_BTN_BG, fg="white", activebackground=SAVE_BTN_ACTIVE,
+                  bg=SAVEAS_BTN_BG, fg="white", activebackground=SAVEAS_BTN_ACTIVE,
                   activeforeground="white").pack(fill=tk.X, pady=(28, 4))
 
     def _build_crop_config(self, parent):
