@@ -586,16 +586,18 @@ class PDFLevelPreviewApp:
 
         prev_vscroll = ttk.Scrollbar(preview_frame, orient=tk.VERTICAL)
         prev_hscroll = ttk.Scrollbar(preview_frame, orient=tk.HORIZONTAL)
+        # highlightthickness=0: 포커스 테두리(Windows 기본 2px)가 있으면 실제 보이는 칸이 winfo 크기보다 작아서
+        # 맞춤 화면에서도 그 두께만큼 위아래·좌우로 조금씩 스크롤된다. 포커스는 구간 빨간 테두리로 보인다
         self.preview_canvas = tk.Canvas(
-            preview_frame, bg="#666",
+            preview_frame, bg="#666", highlightthickness=0,
             yscrollcommand=prev_vscroll.set,
             xscrollcommand=prev_hscroll.set
         )
         prev_vscroll.config(command=self.preview_canvas.yview)
         prev_hscroll.config(command=self.preview_canvas.xview)
+        prev_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
+        prev_hscroll.pack(side=tk.BOTTOM, fill=tk.X)
         self.preview_canvas.pack(fill=tk.BOTH, expand=True)
-        # 스크롤바는 확대했을 때만 보인다 (맞춤 화면에서는 움직일 데가 없다). _update_zoom_label이 넣고 뺀다
-        self._prev_scrolls = (prev_vscroll, prev_hscroll)
 
         self.preview_canvas.bind("<Control-MouseWheel>", self._on_ctrl_wheel)
         self.preview_canvas.bind("<Control-Button-4>",   self._on_ctrl_wheel)
@@ -1686,15 +1688,10 @@ class PDFLevelPreviewApp:
 
     def _update_zoom_label(self):
         pct = self._current_zoom_pct()
-        vscroll, hscroll = self._prev_scrolls
         if pct == 0:
             self.zoom_label.config(text="맞춤")
-            vscroll.pack_forget()
-            hscroll.pack_forget()
         else:
             self.zoom_label.config(text=f"{pct}%")
-            vscroll.pack(side=tk.RIGHT, fill=tk.Y, before=self.preview_canvas)
-            hscroll.pack(side=tk.BOTTOM, fill=tk.X, before=self.preview_canvas)
 
     def _fit_canvas_size(self):
         """맞춤이 페이지를 넣을 영역 (캔버스에서 둘레 여백을 뺀 크기).
