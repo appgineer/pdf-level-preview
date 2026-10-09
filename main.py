@@ -474,7 +474,7 @@ class PDFLevelPreviewApp:
         self.split_size_mb_var = tk.IntVar(value=0)
         self.split_range_text = None
         self.crop_edit_var = tk.BooleanVar(value=False)
-        self.rotate_drag_var = tk.BooleanVar(value=True)
+        self.grid_var = tk.BooleanVar(value=True)
         self.crop_range_var = tk.StringVar(value="전체")
 
         self._section_heads = []  # (머리말 라벨, 색) — 구간 색칠 때 제 색을 지킨다
@@ -705,7 +705,7 @@ class PDFLevelPreviewApp:
         # 분할 범위 입력칸(Text)의 줄바꿈 Enter와 편집/자르기 설정 입력칸의 Enter는 레벨 추가로 보내지 않는다
         self.root.bind("<Return>", lambda e: None if isinstance(e.widget, tk.Text) or e.widget in self._edit_entries
                        else self.add_level())
-        # "격자"가 켜져 있고 "선 편집"이 꺼져 있으면 입력칸 밖에서도 ←/→로 0.1°씩 돌린다 (입력칸 안에서는 글자 커서 이동)
+        # "선 편집"이 꺼져 있으면 입력칸 밖에서도 ←/→로 0.1°씩 돌린다 (입력칸 안에서는 글자 커서 이동)
         self.root.bind("<Left>",  lambda e: self._nudge_angle_key(e, -0.1))
         self.root.bind("<Right>", lambda e: self._nudge_angle_key(e, +0.1))
 
@@ -758,9 +758,18 @@ class PDFLevelPreviewApp:
                                   activebackground=RANGE_ACTIVE, activeforeground="white")
         range_menu.pack(fill=tk.X)
 
+        # 격자 보기: 페이지 위에 가로세로 격자만 그린다 (회전·자르기와 무관)
+        grid_row = tk.Frame(parent)
+        grid_row.pack(fill=tk.X, pady=(16, 0))
+        tk.Checkbutton(grid_row, text="격자 보기", variable=self.grid_var,
+                       command=self._on_grid_toggle, cursor="hand2", font=FNT,
+                       image=self._ind_tk['cb_off'], selectimage=self._ind_tk['cb_on'],
+                       indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
+                       selectcolor=self._bg_color).pack(side=tk.LEFT)
+
         # 회전 (기울기 보정, °). 페이지마다 따로. + 오른쪽 / - 왼쪽, ←/→로 0.1°씩
         rot_row = tk.Frame(parent)
-        rot_row.pack(fill=tk.X, pady=(16, 0))
+        rot_row.pack(fill=tk.X, pady=(4, 0))
         tk.Label(rot_row, text="회전 (°)", font=FNT).pack(side=tk.LEFT)
         self.angle_var = tk.StringVar(value="0")
         angle_entry = tk.Entry(rot_row, textvariable=self.angle_var, width=6, font=FNT)
@@ -769,11 +778,6 @@ class PDFLevelPreviewApp:
         # 좌/우 화살표로 0.1°씩 (오른쪽 = +, 시계방향)
         angle_entry.bind("<Right>", lambda e: self._nudge_angle(+0.1))
         angle_entry.bind("<Left>",  lambda e: self._nudge_angle(-0.1))
-        tk.Checkbutton(rot_row, text="격자", variable=self.rotate_drag_var,
-                       command=self._on_rotate_drag_toggle, cursor="hand2", font=FNT,
-                       image=self._ind_tk['cb_off'], selectimage=self._ind_tk['cb_on'],
-                       indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
-                       selectcolor=self._bg_color).pack(side=tk.LEFT)
         self._edit_entries = [angle_entry]
         rot90_row = tk.Frame(parent)
         rot90_row.pack(fill=tk.X, pady=(4, 12))
@@ -2008,18 +2012,18 @@ class PDFLevelPreviewApp:
         return self._nudge_angle(delta)
 
     def _rotate_drag_on(self):
-        """미리보기를 끌어서 회전하는지: "격자"가 켜져 있고 "선 편집"이 꺼져 있을 때 (선 편집 중에는 선 드래그)"""
-        return self.rotate_drag_var.get() and not self.crop_edit_var.get()
+        """미리보기를 끌어서 회전하는지: "선 편집"이 꺼져 있을 때 (선 편집 중에는 선 드래그). 격자 보기와 무관"""
+        return not self.crop_edit_var.get()
 
-    def _on_rotate_drag_toggle(self):
+    def _on_grid_toggle(self):
         self.preview_canvas.config(cursor="")
         self._draw_rotate_grid()
 
     def _draw_rotate_grid(self):
-        """"격자"가 켜져 있으면 페이지 위에 가로세로 격자. 돌지 않는 기준선이라 기울기를 맞춰 볼 수 있다 (선 편집 중에도)"""
+        """"격자 보기"가 켜져 있으면 페이지 위에 가로세로 격자. 돌지 않는 기준선이라 기울기를 맞춰 볼 수 있다 (선 편집 중에도)"""
         canvas = self.preview_canvas
         canvas.delete("grid")
-        if not self.rotate_drag_var.get() or self.current_img is None:
+        if not self.grid_var.get() or self.current_img is None:
             return
         x0, y0, x1, y1 = self._img_clip
         for x in range(x0 + ROTATE_GRID_PX, x1, ROTATE_GRID_PX):
@@ -2119,11 +2123,9 @@ class PDFLevelPreviewApp:
         self._draw_crop_overlay()
 
     def _set_drag_mode(self, mode):
-        """미리보기 드래그 용도: "crop" = 선 편집, "rotate" = 드래그 회전(선 편집 끄고 격자 켬). 격자는 선 편집 중에도 그대로"""
+        """미리보기 드래그 용도: "crop" = 선 편집, "rotate" = 드래그 회전(선 편집 끔). 격자 보기는 건드리지 않는다"""
         was_edit = self.crop_edit_var.get()
         self.crop_edit_var.set(mode == "crop")
-        if mode == "rotate":
-            self.rotate_drag_var.set(True)
         self.preview_canvas.config(cursor="")
         if was_edit != (mode == "crop"):
             self._refresh_preview()  # 선 화면 ↔ 잘린 결과
