@@ -539,7 +539,8 @@ class PDFLevelPreviewApp:
         paned.add(left, minsize=160, width=4 * (THUMB_W + THUMB_MARGIN * 2) + 60)
         self._thumb_label_h = tkfont.Font(font=THUMB_LABEL_FONT).metrics("linespace")
 
-        self.thumb_canvas = tk.Canvas(left, bg="#f0f0f0")
+        # 커서를 "arrow"로 못 박아 둔다. 비워 두면(Windows) 옆 경계선(sash)의 좌우 화살표 커서가 넘어와 남는다
+        self.thumb_canvas = tk.Canvas(left, bg="#f0f0f0", cursor="arrow")
         thumb_vscroll = ttk.Scrollbar(left, orient=tk.VERTICAL, command=self.thumb_canvas.yview)
         def _on_thumb_yscroll(*args):
             thumb_vscroll.set(*args)
@@ -1354,7 +1355,7 @@ class PDFLevelPreviewApp:
             return
         if press["drag"]:
             self.thumb_canvas.delete("dropline")
-            self.thumb_canvas.config(cursor="")
+            self.thumb_canvas.config(cursor="arrow")
             self._move_selected(self._drop_pos(event.x, event.y)[0])
         elif press["shrink"]:
             self._selected = {press["idx"]}
