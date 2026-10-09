@@ -38,6 +38,9 @@ INDICATOR_MARK = "#e00000"  # 선택 표시(체크마크/라디오 점) 색. 검
 # 오른쪽 패널 구간 색: 편집(PDF 직접 수정) / 설정 파일(config.json)
 SECTION_EDIT_BG, SECTION_EDIT_HEAD = "#eaf2fb", "#b6d3f2"
 SECTION_CONFIG_BG, SECTION_CONFIG_HEAD = "#f7f1e6", "#e4d4b5"
+# 구간 테두리 (배경색만으로는 구분이 약해서)
+SECTION_EDIT_LINE, SECTION_CONFIG_LINE = "#5b8fc7", "#b39256"
+SECTION_LINE_W = 2
 # 드래그 회전: 마우스를 좌우로 이 픽셀만큼 끌 때마다 0.1°씩 (오른쪽으로 = 오른쪽/시계방향).
 # 값이 작을수록 빨리 돈다 (2 = 1°에 20px)
 ROTATE_DRAG_PX = 2
@@ -445,6 +448,7 @@ class PDFLevelPreviewApp:
         self._thumb_redraw_id = None
         self._edits_dirty = False
         self._crop_drag = None  # (대상, 시작 x, 시작 y, 시작 여백)
+        self._panning = False   # 미리보기를 끌어서 화면 이동 중
         self._rotate_drag = None  # (시작 마우스 x, 시작 기울기 °)
         self._rotate_redraw_id = None
         self._rotate_drag_photo = None
@@ -665,13 +669,15 @@ class PDFLevelPreviewApp:
             canvas.bind(evt, _on_settings_scroll)
 
         # ── 구간 1: 편집 (이 PDF를 직접 고쳐 새 파일로 저장) ──
-        edit_box = tk.Frame(inner)
+        edit_box = tk.Frame(inner, highlightthickness=SECTION_LINE_W, padx=8, pady=8,
+                            highlightbackground=SECTION_EDIT_LINE, highlightcolor=SECTION_EDIT_LINE)
         edit_box.pack(fill=tk.X)
         self._section_header(edit_box, "편집", SECTION_EDIT_HEAD, first=True)
         self._build_edit_panel(edit_box)
 
         # ── 구간 2: 설정 파일 (config.json, 자동화 프로그램이 읽는다) ──
-        config_box = tk.Frame(inner)
+        config_box = tk.Frame(inner, highlightthickness=SECTION_LINE_W, padx=8, pady=8,
+                              highlightbackground=SECTION_CONFIG_LINE, highlightcolor=SECTION_CONFIG_LINE)
         config_box.pack(fill=tk.X, pady=(16, 0))
         self._section_header(config_box, "설정 파일 만들기", SECTION_CONFIG_HEAD)
 
@@ -795,6 +801,8 @@ class PDFLevelPreviewApp:
         # 좌/우 화살표로 0.1°씩 (오른쪽 = +, 시계방향)
         angle_entry.bind("<Right>", lambda e: self._nudge_angle(+0.1))
         angle_entry.bind("<Left>",  lambda e: self._nudge_angle(-0.1))
+        angle_entry.bind("<Up>",    lambda e: self._nudge_angle(+0.1))
+        angle_entry.bind("<Down>",  lambda e: self._nudge_angle(-0.1))
         self._edit_entries = [angle_entry]
         rot90_row = tk.Frame(parent)
         rot90_row.pack(fill=tk.X, pady=(4, 12))
@@ -831,6 +839,8 @@ class PDFLevelPreviewApp:
             var.trace_add("write", self._on_crop_var_change)
             entry.bind("<Right>", lambda e, s=side: self._nudge_crop(s, +1))
             entry.bind("<Left>",  lambda e, s=side: self._nudge_crop(s, -1))
+            entry.bind("<Up>",    lambda e, s=side: self._nudge_crop(s, +1))
+            entry.bind("<Down>",  lambda e, s=side: self._nudge_crop(s, -1))
             self.crop_vars[side] = var
             self._edit_entries.append(entry)
         tk.Button(parent, text="현재 크기 저장", command=self.save_crop_size, pady=BTN_PADY,
@@ -1866,17 +1876,21 @@ class PDFLevelPreviewApp:
     def _on_drag_start(self, event):
         self._crop_drag = None
         self._rotate_drag = None
+        self._panning = False
         self.preview_canvas.focus_set()  # 입력칸에서 포커스를 빼야 ←/→가 회전으로 간다
-        if self._rotate_drag_on() and self._on_page(event):
-            self._start_rotate_drag(event)
+        if self._rotate_drag_on():
+            if self._on_page(event):
+                self._start_rotate_drag(event)
             return
-        if self.crop_edit_var.get():
-            target = self._crop_hit(event)
-            if target:
-                self._crop_drag = (target, self.preview_canvas.canvasx(event.x),
-                                   self.preview_canvas.canvasy(event.y),
-                                   self._page_edit(self.current_page)["crop"])
-                return
+        target = self._crop_hit(event)  # 여기까지 오면 "선 편집" 중
+        if target:
+            self._crop_drag = (target, self.preview_canvas.canvasx(event.x),
+                               self.preview_canvas.canvasy(event.y),
+                               self._page_edit(self.current_page)["crop"])
+            return
+        if not self._on_page(event):
+            return  # 둘레 회색 바탕은 아무것도 안 한다
+        self._panning = True
         self.preview_canvas.scan_mark(event.x, event.y)
 
     def _on_drag_move(self, event):
@@ -1884,7 +1898,8 @@ class PDFLevelPreviewApp:
             self._rotate_drag_move(event)
             return
         if self._crop_drag is None:
-            self.preview_canvas.scan_dragto(event.x, event.y, gain=1)
+            if self._panning:
+                self.preview_canvas.scan_dragto(event.x, event.y, gain=1)
             return
         res = self._crop_canvas_rect()
         if res is None:
