@@ -86,6 +86,10 @@ THUMB_SEL_BG = "#cfe0fb"
 THUMB_DROP_LINE = "#e00000"
 # 썸네일: 지금 미리보기에 보이는 페이지 테두리 색 (파랑. 설정 파일 자르기의 빨간 선과 안 헷갈리게)
 THUMB_CUR_LINE = "#1f6fd0"
+# 패널 경계선(sash) 두께와, 경계선 오른쪽 패널 왼쪽 가장자리에서도 경계선처럼 끌 수 있는 폭(px).
+# 경계선은 얇게 두어 가운데를 넓히고, 잡는 범위는 가장자리로 넓힌다
+SASH_W = 6
+SASH_GRAB_PX = 14
 # 가운데 미리보기 둘레 바탕색. 패널 경계선(sash)도 이 색으로 칠해 따로 튀어 보이지 않게 한다
 PREVIEW_BG = "#666"
 # 지금 키보드가 가는 구간(왼쪽 썸네일 / 가운데 미리보기 / 오른쪽 패널) 테두리 색·두께
@@ -457,6 +461,7 @@ class PDFLevelPreviewApp:
         self._edits_dirty = False
         self._crop_drag = None  # (대상, 시작 x, 시작 y, 시작 여백)
         self._panning = False   # 미리보기를 끌어서 화면 이동 중
+        self._sash_drag = None  # 패널 가장자리를 끌어 옮기는 경계선 번호 (0 = 왼쪽|가운데, 1 = 가운데|오른쪽)
         self._rotate_drag = None  # (시작 마우스 x, 시작 기울기 °)
         self._rotate_redraw_id = None
         self._rotate_drag_photo = None
@@ -531,10 +536,11 @@ class PDFLevelPreviewApp:
         # Resizable split
         paned = tk.PanedWindow(
             self.root, orient=tk.HORIZONTAL,
-            sashwidth=28, sashrelief=tk.FLAT, sashpad=0,  # 넓게 잡아야 경계선을 쉽게 잡는다
+            sashwidth=SASH_W, sashrelief=tk.FLAT, sashpad=0,
             sashcursor="sb_h_double_arrow", bg=PREVIEW_BG  # 경계선을 미리보기 바탕색과 같게 (흰 막대로 안 보이게)
         )
         paned.pack(fill=tk.BOTH, expand=True)
+        self._paned = paned
 
         # ── Left: thumbnail panel ──────────────────────────────────────
         left = tk.Frame(paned, bd=1, relief=tk.SUNKEN, highlightthickness=FOCUS_LINE_W)
@@ -543,7 +549,8 @@ class PDFLevelPreviewApp:
         self._thumb_label_h = tkfont.Font(font=THUMB_LABEL_FONT).metrics("linespace")
 
         # 커서를 "arrow"로 못 박아 둔다. 비워 두면(Windows) 옆 경계선(sash)의 좌우 화살표 커서가 넘어와 남는다
-        self.thumb_canvas = tk.Canvas(left, bg="#f0f0f0", cursor="arrow")
+        # highlightthickness=0: Windows 기본 포커스 테두리(검은 선)를 없앤다. 포커스는 구간 빨간 테두리로 보인다
+        self.thumb_canvas = tk.Canvas(left, bg="#f0f0f0", cursor="arrow", highlightthickness=0)
         thumb_vscroll = ttk.Scrollbar(left, orient=tk.VERTICAL, command=self.thumb_canvas.yview)
         def _on_thumb_yscroll(*args):
             thumb_vscroll.set(*args)
@@ -643,6 +650,12 @@ class PDFLevelPreviewApp:
 
         inner = tk.Frame(canvas, padx=16, pady=8)
         inner_win = canvas.create_window((0, 0), window=inner, anchor=tk.NW)
+        # 왼쪽 여백(padx)을 끌면 가운데|오른쪽 경계선을 옮긴다
+        inner.bind("<Motion>", lambda e: inner.config(
+            cursor="sb_h_double_arrow" if e.x < SASH_GRAB_PX else "arrow"))
+        inner.bind("<ButtonPress-1>", lambda e: self._sash_edge_press(e, 1))
+        inner.bind("<B1-Motion>", self._sash_edge_move)
+        inner.bind("<ButtonRelease-1>", lambda e: self._sash_edge_release())
 
         def _sync_scroll_region(event=None):
             # scrollregion이 캔버스보다 작으면 Tk가 내용을 세로 가운데로 밀어버린다.
@@ -1902,6 +1915,8 @@ class PDFLevelPreviewApp:
     def _on_drag_start(self, event):
         self._crop_drag = None
         self._rotate_drag = None
+        if self._sash_edge_press(event, 0):
+            return
         self._panning = False
         self.preview_canvas.focus_set()  # 입력칸에서 포커스를 빼야 ←/→가 회전으로 간다
         if self._rotate_drag_on():
@@ -1920,6 +1935,8 @@ class PDFLevelPreviewApp:
         self.preview_canvas.scan_mark(event.x, event.y)
 
     def _on_drag_move(self, event):
+        if self._sash_edge_move(event):
+            return
         if self._rotate_drag is not None:
             self._rotate_drag_move(event)
             return
@@ -1956,6 +1973,8 @@ class PDFLevelPreviewApp:
 
     def _on_drag_end(self, event):
         self._crop_drag = None
+        if self._sash_edge_release():
+            return
         if self._rotate_drag is not None:
             self._end_rotate_drag()
         if self._thumb_dirty:
@@ -1963,7 +1982,9 @@ class PDFLevelPreviewApp:
 
     def _on_preview_hover(self, event):
         cursor = ""
-        if self._rotate_drag_on():
+        if event.x < SASH_GRAB_PX:
+            cursor = "sb_h_double_arrow"  # 왼쪽 가장자리 = 왼쪽|가운데 경계선
+        elif self._rotate_drag_on():
             cursor = "exchange" if self._on_page(event) else ""
         elif self.crop_edit_var.get():
             cursor = {"top": "sb_v_double_arrow", "bottom": "sb_v_double_arrow",
@@ -2114,6 +2135,26 @@ class PDFLevelPreviewApp:
         if not self._rotate_drag_on() or self._region_of(event.widget) != "center":
             return None
         return self._nudge_angle(delta)
+
+    # 패널 왼쪽 가장자리 SASH_GRAB_PX 안을 끌면 바로 왼쪽 경계선을 옮긴다 (경계선이 얇아도 잡기 쉽게)
+    def _sash_edge_press(self, event, sash):
+        if event.x >= SASH_GRAB_PX:
+            return False
+        self._sash_drag = sash
+        return True
+
+    def _sash_edge_move(self, event):
+        if self._sash_drag is None:
+            return False
+        x = event.x_root - self._paned.winfo_rootx() - SASH_W // 2
+        self._paned.sash_place(self._sash_drag, x, 0)
+        return True
+
+    def _sash_edge_release(self):
+        if self._sash_drag is None:
+            return False
+        self._sash_drag = None
+        return True
 
     def _on_page(self, event):
         """미리보기에서 마우스가 페이지 위에 있는지 (둘레 회색 바탕이 아니고)"""
