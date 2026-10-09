@@ -86,6 +86,8 @@ THUMB_SEL_BG = "#cfe0fb"
 THUMB_DROP_LINE = "#e00000"
 # 썸네일: 지금 미리보기에 보이는 페이지 테두리 색 (파랑. 설정 파일 자르기의 빨간 선과 안 헷갈리게)
 THUMB_CUR_LINE = "#1f6fd0"
+# 가운데 미리보기 둘레 바탕색. 패널 경계선(sash)도 이 색으로 칠해 따로 튀어 보이지 않게 한다
+PREVIEW_BG = "#666"
 # 지금 키보드가 가는 구간(왼쪽 썸네일 / 가운데 미리보기 / 오른쪽 패널) 테두리 색·두께
 FOCUS_LINE = "#e00000"
 FOCUS_LINE_W = 3
@@ -529,8 +531,8 @@ class PDFLevelPreviewApp:
         # Resizable split
         paned = tk.PanedWindow(
             self.root, orient=tk.HORIZONTAL,
-            sashwidth=28, sashrelief=tk.RAISED, sashpad=4,  # 넓게 잡아야 경계선을 쉽게 잡는다
-            sashcursor="sb_h_double_arrow"
+            sashwidth=28, sashrelief=tk.FLAT, sashpad=0,  # 넓게 잡아야 경계선을 쉽게 잡는다
+            sashcursor="sb_h_double_arrow", bg=PREVIEW_BG  # 경계선을 미리보기 바탕색과 같게 (흰 막대로 안 보이게)
         )
         paned.pack(fill=tk.BOTH, expand=True)
 
@@ -591,7 +593,7 @@ class PDFLevelPreviewApp:
         # highlightthickness=0: 포커스 테두리(Windows 기본 2px)가 있으면 실제 보이는 칸이 winfo 크기보다 작아서
         # 맞춤 화면에서도 그 두께만큼 위아래·좌우로 조금씩 스크롤된다. 포커스는 구간 빨간 테두리로 보인다
         self.preview_canvas = tk.Canvas(
-            preview_frame, bg="#666", highlightthickness=0,
+            preview_frame, bg=PREVIEW_BG, highlightthickness=0,
             yscrollcommand=prev_vscroll.set,
             xscrollcommand=prev_hscroll.set
         )
@@ -637,7 +639,6 @@ class PDFLevelPreviewApp:
         self._settings_canvas = canvas  # 오른쪽 빈 곳을 누르면 여기로 키보드 포커스
         vscroll = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=canvas.yview)
         canvas.configure(yscrollcommand=vscroll.set)
-        vscroll.pack(side=tk.RIGHT, fill=tk.Y)
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         inner = tk.Frame(canvas, padx=16, pady=8)
@@ -648,6 +649,13 @@ class PDFLevelPreviewApp:
             # 최소 높이를 캔버스 높이로 잡아 항상 위쪽에 붙인다.
             height = max(inner.winfo_reqheight(), canvas.winfo_height())
             canvas.configure(scrollregion=(0, 0, canvas.winfo_width(), height))
+            # 스크롤바는 내용이 칸보다 길 때만
+            if inner.winfo_reqheight() > canvas.winfo_height():
+                if not vscroll.winfo_ismapped():
+                    vscroll.pack(side=tk.RIGHT, fill=tk.Y, before=canvas)
+            elif vscroll.winfo_ismapped():
+                vscroll.pack_forget()
+                canvas.yview_moveto(0)
 
         def _on_canvas_configure(event):
             canvas.itemconfigure(inner_win, width=event.width)
@@ -1543,7 +1551,8 @@ class PDFLevelPreviewApp:
             focus = None
         active = self._region_of(focus) if focus is not None else None
         for name, (frame, _) in self._regions.items():
-            color = FOCUS_LINE if name == active else self._bg_color
+            idle = PREVIEW_BG if name == "center" else self._bg_color  # 가운데는 회색 바탕에 묻히게
+            color = FOCUS_LINE if name == active else idle
             frame.config(highlightbackground=color, highlightcolor=color)
 
     # ------------------------------------------------------------------ #
