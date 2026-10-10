@@ -565,6 +565,10 @@ class PDFLevelPreviewApp:
             for mod in ("", "Shift-"):
                 self.thumb_canvas.bind(f"<{mod}{key}>",
                                        lambda e, k=key, st=step: self._on_thumb_arrow(e, k, st))
+        # Page Up/Down: 패널에 다 보이는 칸 수만큼 넘기고, Ctrl을 누르면 맨 처음/맨 끝 페이지로
+        for key in ("Prior", "Next"):
+            for mod in ("", "Shift-", "Control-"):
+                self.thumb_canvas.bind(f"<{mod}{key}>", lambda e, k=key: self._on_thumb_page_key(e, k))
         self._thumb_menu = tk.Menu(self.root, tearoff=0, font=UI_FONT_SMALL)
         for label, accel, cmd in (("복사", "Ctrl+C", self.copy_selected),
                                   ("잘라내기", "Ctrl+X", self.cut_selected),
@@ -744,9 +748,11 @@ class PDFLevelPreviewApp:
         # 분할 범위 입력칸(Text)의 줄바꿈 Enter와 편집/자르기 설정 입력칸의 Enter는 레벨 추가로 보내지 않는다
         self.root.bind("<Return>", lambda e: None if isinstance(e.widget, tk.Text) or e.widget in self._edit_entries
                        else self.add_level())
-        # "선 편집"이 꺼져 있으면 입력칸 밖에서도 ←/→로 0.1°씩 돌린다 (입력칸 안에서는 글자 커서 이동)
+        # "선 편집"이 꺼져 있으면 입력칸 밖에서도 ←/→·↑/↓로 0.1°씩 돌린다 (→ ↑ = 오른쪽, 입력칸 안에서는 글자 커서 이동)
         self.root.bind("<Left>",  lambda e: self._nudge_angle_key(e, -0.1))
         self.root.bind("<Right>", lambda e: self._nudge_angle_key(e, +0.1))
+        self.root.bind("<Down>",  lambda e: self._nudge_angle_key(e, -0.1))
+        self.root.bind("<Up>",    lambda e: self._nudge_angle_key(e, +0.1))
 
         # ── 저장된 레벨 리스트 ──
         self.saved_frame = tk.Frame(self.level_frame)
@@ -1498,6 +1504,31 @@ class PDFLevelPreviewApp:
         new = cur + step
         if not 0 <= new < self._page_count:
             return "break"
+        self._thumb_go(event, new)
+        self._thumb_see(new)
+        return "break"
+
+    def _on_thumb_page_key(self, event, key):
+        """썸네일 패널 Page Up/Down: 다 보이는 칸 수(줄 수 × 열 수)만큼 넘기고 그 줄을 맨 위로.
+        Ctrl이면 맨 처음/맨 끝 페이지"""
+        if self._page_count == 0:
+            return "break"
+        if event.state & 0x0004:  # Ctrl
+            new = 0 if key == "Prior" else self._page_count - 1
+        else:
+            rows = max(1, self.thumb_canvas.winfo_height() // self._thumb_cell_h)
+            step = rows * self._thumb_cols
+            new = self.current_page + (-step if key == "Prior" else step)
+            new = max(0, min(self._page_count - 1, new))
+        if new != self.current_page:
+            self._thumb_go(event, new)
+        if self._thumb_total_height > 0:
+            top = new // self._thumb_cols * self._thumb_cell_h
+            self.thumb_canvas.yview_moveto(top / self._thumb_total_height)
+        return "break"
+
+    def _thumb_go(self, event, new):
+        """키보드로 썸네일 페이지 이동: Shift면 기준 페이지부터 범위 선택"""
         if event.state & 0x0001:  # Shift
             a, b = sorted((self._sel_anchor, new))
             self._selected = set(range(a, b + 1))
@@ -1505,8 +1536,6 @@ class PDFLevelPreviewApp:
             self._selected = {new}
             self._sel_anchor = new
         self.select_page(new)
-        self._thumb_see(new)
-        return "break"
 
     def _thumb_see(self, idx):
         """그 페이지 칸이 썸네일 패널에 다 보이도록 스크롤"""
@@ -2108,7 +2137,7 @@ class PDFLevelPreviewApp:
         return "break"
 
     def _nudge_angle_key(self, event, delta):
-        """입력칸 밖 ←/→ 회전은 가운데(미리보기) 구간에 키보드가 있을 때만"""
+        """입력칸 밖 ←/→·↑/↓ 회전은 가운데(미리보기) 구간에 키보드가 있을 때만"""
         if not self._rotate_drag_on() or self._region_of(event.widget) != "center":
             return None
         return self._nudge_angle(delta)
