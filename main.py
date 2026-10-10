@@ -516,6 +516,9 @@ class PDFLevelPreviewApp:
 
         self.page_label = tk.Label(toolbar, text="", fg=CFG_CROP_LINE, anchor=tk.W, font=UI_FONT_BOLD)
         self.page_label.pack(side=tk.LEFT, padx=12)
+        # 폴더 안 PDF 전체(파일 이름 숫자 순)에서의 "몇 번째 장 / 총 장수"
+        self.folder_page_label = tk.Label(toolbar, text="", fg=THUMB_CUR_LINE, anchor=tk.W, font=UI_FONT_BOLD)
+        self.folder_page_label.pack(side=tk.LEFT, padx=(0, 12))
 
         self.render_status = tk.Label(toolbar, text="", fg="#999", anchor=tk.W, font=UI_FONT_SMALL)
         self.render_status.pack(side=tk.LEFT, padx=6)
@@ -1052,6 +1055,8 @@ class PDFLevelPreviewApp:
         self.zoom_idx = ZOOM_DEFAULT_IDX
         self._update_zoom_label()
         self.filename_label.config(text=path.replace("\\", "/").split("/")[-1])
+        self._folder_pages = None
+        self._count_folder_pages(path)
         self._build_thumbnails()
         self._update_page_label()
         self._load_config(path)
@@ -2068,8 +2073,54 @@ class PDFLevelPreviewApp:
             self._draw_selection()
 
     def _update_page_label(self):
-        """툴바의 "선택 페이지 / 총 페이지" 표시"""
+        """툴바의 "선택 페이지 / 총 페이지" 표시 + 파란색으로 폴더 PDF 전체 기준 몇 번째 장 / 총 장수"""
         self.page_label.config(text=f"{self.current_page + 1} / {self._page_count}" if self._page_count else "")
+        folder = getattr(self, "_folder_pages", None)
+        if self._page_count and folder:
+            before, after = folder
+            self.folder_page_label.config(
+                text=f"|  {before + self.current_page + 1} / {before + self._page_count + after}")
+        else:
+            self.folder_page_label.config(text="")
+
+    def _count_folder_pages(self, path):
+        """같은 폴더의 다른 PDF 장수를 백그라운드에서 센다: (앞 파일들 장수, 뒤 파일들 장수).
+        순서는 파일 이름의 숫자 순(_2 < _10). 지금 파일 장수는 삭제·붙여넣기를 따라가게 화면 값을 쓴다"""
+        def natural(name):
+            return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", name.lower())]
+
+        def work():
+            folder = os.path.dirname(os.path.abspath(path))
+            me = os.path.basename(path)
+            try:
+                names = [n for n in os.listdir(folder) if n.lower().endswith(".pdf")]
+            except OSError:
+                return
+            if len(names) < 2:
+                return
+            me_key = natural(me)
+            before = after = 0
+            for n in names:
+                if n == me:
+                    continue
+                try:
+                    with fitz.open(os.path.join(folder, n)) as d:
+                        cnt = len(d)
+                except Exception:
+                    continue
+                if natural(n) < me_key:
+                    before += cnt
+                else:
+                    after += cnt
+            self.root.after(0, lambda: self._on_folder_pages(path, before, after))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_folder_pages(self, path, before, after):
+        if path != self._pdf_path:  # 세는 동안 다른 파일을 열었으면 버린다
+            return
+        self._folder_pages = (before, after)
+        self._update_page_label()
 
     def _page_disp_size(self, idx):
         """화면 기준 페이지 크기 (pt). 90° 회전이면 가로세로가 바뀌고, 기울기는 크기를 안 바꾼다"""
@@ -3058,6 +3109,8 @@ def main():
     # 맞춤 크기와 썸네일 열 수가 제대로 계산된다
     pdf = _pdf_arg(sys.argv)
     if pdf:
+        # 파일을 눌러 열 때는 창을 최대화해서 띄운다
+        root.state("zoomed")
         root.after(100, lambda: app._load_pdf(pdf))
     root.mainloop()
     # 남은 스레드(썸네일, 워커 결과 수신, Queue)를 기다리지 않고 바로 끝낸다.
