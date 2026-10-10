@@ -515,8 +515,10 @@ class PDFLevelPreviewApp:
         self.filename_label.pack(side=tk.LEFT, padx=6)
 
         self.page_label = tk.Label(toolbar, text="", fg=CFG_CROP_LINE, anchor=tk.W, font=UI_FONT_BOLD)
-        self.page_label.pack(side=tk.LEFT, padx=12)
-        # 폴더 안 PDF 전체(파일 이름 숫자 순)에서의 "몇 번째 장 / 총 장수"
+        self.page_label.pack(side=tk.LEFT, padx=(12, 0))
+        # 폴더 안 PDF 전체(파일 이름 숫자 순)에서의 "몇 번째 장 / 총 장수". 구분선은 검은색, 양쪽을 띄운다
+        self.folder_sep_label = tk.Label(toolbar, text="", fg="black", font=UI_FONT_BOLD)
+        self.folder_sep_label.pack(side=tk.LEFT, padx=24)
         self.folder_page_label = tk.Label(toolbar, text="", fg=THUMB_CUR_LINE, anchor=tk.W, font=UI_FONT_BOLD)
         self.folder_page_label.pack(side=tk.LEFT, padx=(0, 12))
 
@@ -2078,9 +2080,11 @@ class PDFLevelPreviewApp:
         folder = getattr(self, "_folder_pages", None)
         if self._page_count and folder:
             before, after = folder
+            self.folder_sep_label.config(text="|")
             self.folder_page_label.config(
-                text=f"|  {before + self.current_page + 1} / {before + self._page_count + after}")
+                text=f"{before + self.current_page + 1} / {before + self._page_count + after}")
         else:
+            self.folder_sep_label.config(text="")
             self.folder_page_label.config(text="")
 
     def _count_folder_pages(self, path):
