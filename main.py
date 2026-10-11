@@ -570,9 +570,9 @@ class PDFLevelPreviewApp:
             for mod in ("", "Shift-"):
                 self.thumb_canvas.bind(f"<{mod}{key}>",
                                        lambda e, k=key, st=step: self._on_thumb_arrow(e, k, st))
-        # Page Up/Down: 패널에 다 보이는 칸 수만큼 넘기고, Ctrl을 누르면 맨 처음/맨 끝 페이지로
-        for key in ("Prior", "Next"):
-            for mod in ("", "Shift-", "Control-"):
+        # Page Up/Down: 패널에 다 보이는 칸 수만큼 넘기고, Home/End는 맨 처음/맨 끝 페이지로
+        for key in ("Prior", "Next", "Home", "End"):
+            for mod in ("", "Shift-"):
                 self.thumb_canvas.bind(f"<{mod}{key}>", lambda e, k=key: self._on_thumb_page_key(e, k))
         self._thumb_menu = tk.Menu(self.root, tearoff=0, font=UI_FONT_SMALL)
         for label, accel, cmd in (("복사", "Ctrl+C", self.copy_selected),
@@ -1517,11 +1517,11 @@ class PDFLevelPreviewApp:
 
     def _on_thumb_page_key(self, event, key):
         """썸네일 패널 Page Up/Down: 다 보이는 칸 수(줄 수 × 열 수)만큼 넘기고 그 줄을 맨 위로.
-        Ctrl이면 맨 처음/맨 끝 페이지"""
+        Home/End는 맨 처음/맨 끝 페이지"""
         if self._page_count == 0:
             return "break"
-        if event.state & 0x0004:  # Ctrl
-            new = 0 if key == "Prior" else self._page_count - 1
+        if key in ("Home", "End"):
+            new = 0 if key == "Home" else self._page_count - 1
         else:
             rows = max(1, self.thumb_canvas.winfo_height() // self._thumb_cell_h)
             step = rows * self._thumb_cols
