@@ -8,6 +8,7 @@ import sys
 import threading
 import subprocess
 import tempfile
+import ctypes
 import glob
 import html
 import io
@@ -107,6 +108,8 @@ COVER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"  # 브라우저처럼 요
 COVER_MIN_W = 500
 # 표지 넣기 팝업의 미리보기 칸 크기 (px)
 COVER_PREVIEW_W, COVER_PREVIEW_H = 360, 500
+# 표지 넣기 검색 결과에서 검색한 낱말 글씨 색 (너무 진하지 않은 빨강)
+COVER_HIT_FG = "#d65c5c"
 
 
 def _make_indicator_images():
@@ -1748,7 +1751,8 @@ class PDFLevelPreviewApp:
         dlg = tk.Toplevel(self.root)
         dlg.title("표지 넣기")
         dlg.transient(self.root)
-        state = {"gen": 0, "items": [], "covers": {}}  # gen: 마지막 조회 번호 (늦게 온 옛 결과는 버린다)
+        # gen: 마지막 조회 번호 (늦게 온 옛 결과는 버린다), pick: 목록에서 고른 줄, query: 검색한 글자
+        state = {"gen": 0, "items": [], "covers": {}, "pick": None, "query": ""}
 
         top = tk.Frame(dlg, padx=16, pady=12)
         top.pack(fill=tk.X)
@@ -1756,12 +1760,18 @@ class PDFLevelPreviewApp:
         query_var = tk.StringVar()
         entry = tk.Entry(top, textvariable=query_var, width=30, font=UI_FONT)
         entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8)
+        # 조합 중인 한글이 커서 위에 작은 글씨로 따로 뜨지 않고 입력칸 글씨와 같게 보이게
+        entry.bind("<FocusIn>", lambda e: _ime_match_font(entry, UI_FONT))
         search_btn = tk.Button(top, text="조회", pady=BTN_PADY, cursor="hand2", font=UI_FONT)
         search_btn.pack(side=tk.LEFT)
 
-        result_list = tk.Listbox(dlg, height=6, font=UI_FONT_SMALL, activestyle="none", exportselection=False)
+        # 검색 결과 목록. 검색한 낱말은 붉은 글씨 (Listbox는 글자 일부만 색을 바꿀 수 없어서 Text로 만든다)
+        result_list = tk.Text(dlg, height=6, font=UI_FONT_SMALL, wrap=tk.NONE, cursor="hand2",
+                              padx=6, spacing1=2, spacing3=2, state=tk.DISABLED)
+        result_list.tag_configure("hit", foreground=COVER_HIT_FG)
+        result_list.tag_configure("pick", background=THUMB_SEL_BG)
         result_list.pack(fill=tk.X, padx=16)
-        status = tk.Label(dlg, text="", font=UI_FONT_SMALL, fg="#666", anchor=tk.W)
+        status =tk.Label(dlg, text="", font=UI_FONT_SMALL, fg="#666", anchor=tk.W)
         status.pack(fill=tk.X, padx=16, pady=(4, 0))
 
         # 앞표지 / 뒷표지 미리보기 칸, 넣을지 체크, 들어갈 자리
@@ -1775,6 +1785,7 @@ class PDFLevelPreviewApp:
             col.pack(side=tk.LEFT, anchor=tk.N)
             img_label = tk.Label(col, image=refs["blank"], bd=1, relief=tk.SOLID)
             img_label.pack()
+            img_label.bind("<Button-1>", lambda e, s=side: show_large(s))  # 누르면 크게 보기
             var = tk.BooleanVar(value=False)
             chk = tk.Checkbutton(col, text=f"{name} (없음)", variable=var, state=tk.DISABLED,
                                  cursor="hand2", font=UI_FONT,
@@ -1790,7 +1801,7 @@ class PDFLevelPreviewApp:
             for side, (name, img_label, var, chk) in sides.items():
                 found = covers.get(side)
                 if found is None:
-                    img_label.config(image=refs["blank"])
+                    img_label.config(image=refs["blank"], cursor="")
                     var.set(False)
                     chk.config(text=f"{name} (없음)", state=tk.DISABLED)
                     continue
@@ -1799,9 +1810,39 @@ class PDFLevelPreviewApp:
                 box = Image.new("RGB", (COVER_PREVIEW_W, COVER_PREVIEW_H), "#dddddd")  # 칸 크기는 그대로
                 box.paste(img, ((COVER_PREVIEW_W - img.width) // 2, (COVER_PREVIEW_H - img.height) // 2))
                 refs[side] = ImageTk.PhotoImage(box)
-                img_label.config(image=refs[side])
+                img_label.config(image=refs[side], cursor="hand2")
                 var.set(True)
                 chk.config(text=f"{name} ({found[1]})", state=tk.NORMAL)
+
+        def show_large(side):
+            """표지를 화면 높이에 맞춰 크게 보여 준다. 그림을 누르거나 Esc면 닫는다"""
+            found = state["covers"].get(side)
+            if found is None:
+                return
+            img = Image.open(io.BytesIO(found[0])).convert("RGB")
+            size = f"{img.width}×{img.height}px"
+            scale = min(dlg.winfo_screenwidth() * 0.9 / img.width, dlg.winfo_screenheight() * 0.85 / img.height)
+            img = img.resize((round(img.width * scale), round(img.height * scale)), Image.LANCZOS)
+            view = tk.Toplevel(dlg)
+            view.title(f"{sides[side][0]} ({found[1]}, 원본 {size})")
+            view.transient(dlg)
+            refs["large"] = ImageTk.PhotoImage(img)
+            label = tk.Label(view, image=refs["large"], cursor="hand2")
+            label.pack()
+
+            def close(event=None):
+                view.destroy()
+                dlg.grab_set()  # 표지 넣기 창으로 다시
+
+            label.bind("<Button-1>", close)
+            view.bind("<Escape>", close)
+            view.protocol("WM_DELETE_WINDOW", close)
+            x = (dlg.winfo_screenwidth() - img.width) // 2
+            y = (dlg.winfo_screenheight() - img.height) // 2 - 20  # 제목 줄만큼 위로
+            view.geometry(f"+{max(0, x)}+{max(0, y)}")
+            view.wait_visibility()
+            view.grab_set()
+            view.focus_set()
 
         def run(work, done):
             """work()를 백그라운드에서 돌리고 done(결과, 오류)로 받는다. 그새 다시 조회했거나 창을 닫았으면 버린다"""
@@ -1820,39 +1861,68 @@ class PDFLevelPreviewApp:
                 self.root.after(0, deliver)
             threading.Thread(target=thread, daemon=True).start()
 
-        def search(event=None):
+        def search_clicked(event=None):
+            # 마지막 글자가 아직 조합 중이면 입력칸에 안 들어가 있다. 확정시키고 그 글자가 들어간 뒤 검색
+            _ime_commit(entry)
+            dlg.after(50, search)
+
+        def search():
             query = query_var.get().strip()
             if not query:
                 return
-            result_list.delete(0, tk.END)
             state["items"] = []
+            state["query"] = query
+            fill_results()
             show_covers({})
             status.config(text="검색 중...")
             run(lambda: _yes24_search(query), on_found)
+
+        def fill_results():
+            """검색 결과를 한 줄에 한 권씩 쓰고, 검색한 낱말에 붉은 글씨를 입힌다"""
+            state["pick"] = None
+            result_list.config(state=tk.NORMAL)
+            result_list.delete("1.0", tk.END)
+            for row, it in enumerate(state["items"], 1):
+                line = f"{it['title']}  ·  {it['info']}" if it["info"] else it["title"]
+                result_list.insert(tk.END, line + "\n")
+                for start, end in _keyword_spans(line, state["query"]):
+                    result_list.tag_add("hit", f"{row}.{start}", f"{row}.{end}")
+            result_list.config(state=tk.DISABLED)
 
         def on_found(items, err):
             if err is not None:
                 status.config(text=f"검색 실패: {err}")
                 return
             state["items"] = items
-            for it in items:
-                result_list.insert(tk.END, f"{it['title']}  ·  {it['info']}" if it["info"] else it["title"])
+            fill_results()
             if not items:
                 status.config(text="찾은 책이 없습니다.")
             elif len(items) == 1:  # ISBN처럼 한 권만 나오면 바로 표지를 받는다
-                result_list.selection_set(0)
-                load_covers()
+                pick(0)
             else:
                 status.config(text="책을 고르세요.")
 
-        def load_covers(event=None):
-            sel = result_list.curselection()
-            if not sel:
+        def pick(i):
+            """목록 i번째 책을 고르고 표지를 받는다"""
+            if not 0 <= i < len(state["items"]):
                 return
+            state["pick"] = i
+            result_list.tag_remove("pick", "1.0", tk.END)
+            result_list.tag_add("pick", f"{i + 1}.0", f"{i + 2}.0")
+            result_list.see(f"{i + 1}.0")
             show_covers({})
             status.config(text="표지 받는 중...")
-            gid = state["items"][sel[0]]["id"]
+            gid = state["items"][i]["id"]
             run(lambda: _find_covers(gid), on_covers)
+
+        def on_result_click(event):
+            result_list.focus_set()  # ↑↓로 이어서 고를 수 있게
+            pick(int(result_list.index(f"@{event.x},{event.y}").split(".")[0]) - 1)
+            return "break"  # 글자를 끌어 선택하는 기본 동작은 막는다
+
+        def move_pick(step):
+            pick(0 if state["pick"] is None else state["pick"] + step)
+            return "break"
 
         def on_covers(covers, err):
             if err is not None:
@@ -1871,9 +1941,12 @@ class PDFLevelPreviewApp:
             dlg.destroy()
             self._insert_covers(picked["front"], picked["back"])
 
-        search_btn.config(command=search)
-        entry.bind("<Return>", search)
-        result_list.bind("<<ListboxSelect>>", load_covers)
+        search_btn.config(command=search_clicked)
+        entry.bind("<Return>", search_clicked)
+        result_list.bind("<Button-1>", on_result_click)
+        result_list.bind("<B1-Motion>", lambda e: "break")
+        result_list.bind("<Up>", lambda e: move_pick(-1))
+        result_list.bind("<Down>", lambda e: move_pick(1))
         dlg.bind("<Escape>", lambda e: dlg.destroy())
 
         btns = tk.Frame(dlg, padx=16, pady=12)
@@ -3284,6 +3357,77 @@ def _folder_pdfs(path):
     except OSError:
         return [path]
     return [os.path.join(folder, n) for n in sorted(names, key=_natural_key)] or [path]
+
+
+def _keyword_spans(text, query):
+    """query의 낱말들이 text에 나오는 자리 [(시작, 끝)]. 띄어쓰기와 대소문자는 따지지 않는다
+    ("돈의심리학"은 "돈의 심리학"에, "심리 돈"은 "심리"와 "돈"에 맞는다)"""
+    pos = [i for i, ch in enumerate(text) if not ch.isspace()]  # 띄어쓰기를 뺀 글자 → 원래 자리
+    flat = "".join(text[i] for i in pos).lower()
+    spans = []
+    for word in query.lower().split():
+        start = flat.find(word)
+        while start >= 0:
+            spans.append((pos[start], pos[start + len(word) - 1] + 1))
+            start = flat.find(word, start + len(word))
+    return spans
+
+
+class _LOGFONTW(ctypes.Structure):
+    _fields_ = [("lfHeight", ctypes.c_long), ("lfWidth", ctypes.c_long),
+                ("lfEscapement", ctypes.c_long), ("lfOrientation", ctypes.c_long),
+                ("lfWeight", ctypes.c_long), ("lfItalic", ctypes.c_ubyte),
+                ("lfUnderline", ctypes.c_ubyte), ("lfStrikeOut", ctypes.c_ubyte),
+                ("lfCharSet", ctypes.c_ubyte), ("lfOutPrecision", ctypes.c_ubyte),
+                ("lfClipPrecision", ctypes.c_ubyte), ("lfQuality", ctypes.c_ubyte),
+                ("lfPitchAndFamily", ctypes.c_ubyte), ("lfFaceName", ctypes.c_wchar * 32)]
+
+
+def _ime_context(widget, func):
+    """widget이 있는 창의 한글 입력기(IME) 문맥으로 func(imm32, hIMC)를 부른다 (Windows 전용, 안 되면 아무것도 안 함).
+    Tk는 조합 중인 글자를 직접 그리지 않고 입력기의 작은 창에 맡겨 글자 커서 자리에만 옮겨 둔다(Tk_SetCaretPos).
+    그 창의 글꼴을 맞추거나 조합을 확정할 때 쓴다"""
+    try:
+        imm = ctypes.windll.imm32
+    except (AttributeError, OSError):
+        return
+    imm.ImmGetContext.restype = ctypes.c_void_p
+    imm.ImmGetContext.argtypes = [ctypes.c_void_p]
+    imm.ImmReleaseContext.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    hwnd = widget.winfo_toplevel().winfo_id()  # Tk가 조합 창 자리를 잡는 창 (최상위 창)
+    himc = imm.ImmGetContext(hwnd)
+    if not himc:
+        return
+    try:
+        func(imm, himc)
+    finally:
+        imm.ImmReleaseContext(hwnd, himc)
+
+
+def _ime_match_font(widget, font):
+    """조합 중인 한글을 입력칸과 같은 글꼴·크기로 보이게 한다. 그대로 두면 입력기 기본 글꼴이라
+    커서 위에 작게 따로 뜨고, 맞춰 두면 그 자리에 바로 쓰이는 것처럼 보인다"""
+    f = tkfont.Font(font=font)
+    size = f.actual("size")
+    lf = _LOGFONTW()
+    lf.lfHeight = size if size < 0 else -widget.winfo_pixels(f"{size}p")  # 음수 = 글자 높이(px)
+    lf.lfWeight = 700 if f.actual("weight") == "bold" else 400
+    lf.lfCharSet = 1  # DEFAULT_CHARSET
+    lf.lfFaceName = f.actual("family")
+
+    def apply(imm, himc):
+        imm.ImmSetCompositionFontW.argtypes = [ctypes.c_void_p, ctypes.POINTER(_LOGFONTW)]
+        imm.ImmSetCompositionFontW(himc, ctypes.byref(lf))
+    _ime_context(widget, apply)
+
+
+def _ime_commit(widget):
+    """조합 중인 한글을 확정한다. 조합 중에 버튼을 누르면 마지막 글자가 아직 입력칸에 없어서.
+    확정된 글자는 Tk 이벤트로 조금 뒤에 입력칸에 들어간다"""
+    def apply(imm, himc):
+        imm.ImmNotifyIME.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+        imm.ImmNotifyIME(himc, 0x15, 0x1, 0)  # NI_COMPOSITIONSTR, CPS_COMPLETE
+    _ime_context(widget, apply)
 
 
 def _http_get(url):
