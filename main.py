@@ -1815,34 +1815,39 @@ class PDFLevelPreviewApp:
                 chk.config(text=f"{name} ({found[1]})", state=tk.NORMAL)
 
         def show_large(side):
-            """표지를 화면 높이에 맞춰 크게 보여 준다. 그림을 누르거나 Esc면 닫는다"""
+            """표지를 가운데 미리보기 칸 위에 그 칸 크기로 크게 띄운다 (페이지 미리보기 '맞춤'과 같은 크기).
+            화면 크기(winfo_screen*) 대신 실제 칸 크기를 쓴다: 창을 만든 뒤 DPI 설정을 켜서 화면 크기는 작게 나온다.
+            아무 곳이나 누르거나 Esc면 닫는다"""
             found = state["covers"].get(side)
             if found is None:
                 return
             img = Image.open(io.BytesIO(found[0])).convert("RGB")
-            size = f"{img.width}×{img.height}px"
-            scale = min(dlg.winfo_screenwidth() * 0.9 / img.width, dlg.winfo_screenheight() * 0.85 / img.height)
-            img = img.resize((round(img.width * scale), round(img.height * scale)), Image.LANCZOS)
-            view = tk.Toplevel(dlg)
-            view.title(f"{sides[side][0]} ({found[1]}, 원본 {size})")
-            view.transient(dlg)
+            caption = f"{sides[side][0]} · {found[1]} · 원본 {img.width}×{img.height}px · 누르면 닫힘"
+            canvas = self.preview_canvas
+            cw, ch = canvas.winfo_width(), canvas.winfo_height()
+            cap_h = tkfont.Font(font=UI_FONT_SMALL).metrics("linespace") + 8
+            scale = min((cw - 2 * PREVIEW_PAD) / img.width, (ch - 2 * PREVIEW_PAD - 2 * cap_h) / img.height)
+            img = img.resize((max(1, round(img.width * scale)), max(1, round(img.height * scale))), Image.LANCZOS)
+
+            view = tk.Toplevel(dlg, bg="#666")  # 미리보기 바탕색
+            view.overrideredirect(True)  # 제목 줄 없이 미리보기 칸에 딱 맞게
+            view.attributes("-topmost", True)
+            view.geometry(f"{cw}x{ch}+{canvas.winfo_rootx()}+{canvas.winfo_rooty()}")
             refs["large"] = ImageTk.PhotoImage(img)
-            label = tk.Label(view, image=refs["large"], cursor="hand2")
-            label.pack()
+            label = tk.Label(view, image=refs["large"], bd=0, cursor="hand2")
+            label.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
+            tk.Label(view, text=caption, font=UI_FONT_SMALL, bg="#666", fg="white").place(
+                relx=0.5, rely=1.0, y=-PREVIEW_PAD // 2, anchor=tk.S)
 
             def close(event=None):
                 view.destroy()
                 dlg.grab_set()  # 표지 넣기 창으로 다시
 
-            label.bind("<Button-1>", close)
+            view.bind("<Button-1>", close)
             view.bind("<Escape>", close)
-            view.protocol("WM_DELETE_WINDOW", close)
-            x = (dlg.winfo_screenwidth() - img.width) // 2
-            y = (dlg.winfo_screenheight() - img.height) // 2 - 20  # 제목 줄만큼 위로
-            view.geometry(f"+{max(0, x)}+{max(0, y)}")
             view.wait_visibility()
             view.grab_set()
-            view.focus_set()
+            view.focus_force()  # 제목 줄 없는 창은 Esc를 받으려면 포커스를 직접 가져와야 한다
 
         def run(work, done):
             """work()를 백그라운드에서 돌리고 done(결과, 오류)로 받는다. 그새 다시 조회했거나 창을 닫았으면 버린다"""
