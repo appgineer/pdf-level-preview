@@ -101,15 +101,15 @@ THUMB_AUTOSCROLL_PX = 40
 UNDO_MAX = 50
 # 복사한 페이지(클립보드 PDF)를 남겨 두는 기간 (초). 지난 것은 다음 실행 때 지운다
 CLIPBOARD_KEEP = 24 * 3600
-# 표지 넣기: 서점(예스24 → 알라딘) 웹페이지를 읽어 표지 그림을 받는다. 요청 하나 기다리는 시간 (초)
+# 표지 넣기: 서점 웹페이지를 읽어 표지 그림을 받는다 (검색은 알라딘, 표지는 알라딘·예스24 중 고름). 요청 하나 기다리는 시간 (초)
 COVER_TIMEOUT = 10
 COVER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"  # 브라우저처럼 요청한다
-# 예스24 표지가 이 폭(px)보다 좁으면 알라딘 표지(500px)도 받아서 넓은 쪽을 쓴다
-COVER_MIN_W = 500
 # 표지 넣기 팝업의 미리보기 칸 크기 (px)
 COVER_PREVIEW_W, COVER_PREVIEW_H = 360, 500
 # 표지 넣기 검색 결과에서 검색한 낱말 글씨 색 (너무 진하지 않은 빨강)
 COVER_HIT_FG = "#d65c5c"
+# 표지 넣기 칸마다 고를 수 있는 출처 (앞에 있는 것을 먼저 고른다: 예스24가 크고, 알라딘은 워터마크가 없다)
+COVER_SOURCES = ("예스24", "알라딘")
 
 
 def _make_indicator_images():
@@ -1743,7 +1743,8 @@ class PDFLevelPreviewApp:
     # 표지 넣기 (앞표지 → 폴더 첫 PDF 맨 앞, 뒷표지 → 마지막 PDF 맨 뒤)
     # ------------------------------------------------------------------ #
     def open_cover_dialog(self):
-        """책 이름/ISBN으로 예스24를 검색해 앞·뒤 표지를 미리 보여 주고, [확인]이면 넣는다"""
+        """책 이름/ISBN으로 알라딘에서 검색해 고른 책의 앞·뒤 표지(칸마다 예스24/알라딘 중 고름)를 보여 주고,
+        [확인]이면 넣는다"""
         if self.pdf_doc is None:
             self._show_toast("PDF를 먼저 여세요.")
             return
@@ -1774,7 +1775,7 @@ class PDFLevelPreviewApp:
         status =tk.Label(dlg, text="", font=UI_FONT_SMALL, fg="#666", anchor=tk.W)
         status.pack(fill=tk.X, padx=16, pady=(4, 0))
 
-        # 앞표지 / 뒷표지 미리보기 칸, 넣을지 체크, 들어갈 자리
+        # 앞표지 / 뒷표지: 출처 고르기(예스24 / 알라딘), 미리보기 칸, 넣을지 체크, 들어갈 자리
         refs = {"blank": ImageTk.PhotoImage(Image.new("RGB", (COVER_PREVIEW_W, COVER_PREVIEW_H), "#dddddd"))}
         covers_row = tk.Frame(dlg, padx=16, pady=8)
         covers_row.pack()
@@ -1783,6 +1784,18 @@ class PDFLevelPreviewApp:
                                            ("back", "뒷표지", files[-1], "맨 뒤")):
             col = tk.Frame(covers_row, padx=12)
             col.pack(side=tk.LEFT, anchor=tk.N)
+            src_var = tk.StringVar(value="-")  # 고른 출처. "-" = 없음 (""은 Tk 라디오의 중간 상태라 안 쓴다)
+            src_row = tk.Frame(col)
+            src_row.pack(pady=(0, 6))
+            radios = {}
+            for source in COVER_SOURCES:
+                rb = tk.Radiobutton(src_row, text=source, variable=src_var, value=source, state=tk.DISABLED,
+                                    command=lambda s=side: show_side(s), cursor="hand2", font=UI_FONT_SMALL,
+                                    image=self._ind_tk['rb_off'], selectimage=self._ind_tk['rb_on'],
+                                    indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
+                                    selectcolor=self._bg_color)
+                rb.pack(side=tk.LEFT, padx=8)
+                radios[source] = rb
             img_label = tk.Label(col, image=refs["blank"], bd=1, relief=tk.SOLID)
             img_label.pack()
             img_label.bind("<Button-1>", lambda e, s=side: show_large(s))  # 누르면 크게 보기
@@ -1794,35 +1807,52 @@ class PDFLevelPreviewApp:
                                  selectcolor=self._bg_color)
             chk.pack(pady=(8, 0))
             tk.Label(col, text=f"→ {os.path.basename(target)} {where}", font=UI_FONT_SMALL).pack()
-            sides[side] = (name, img_label, var, chk)
+            sides[side] = {"name": name, "src": src_var, "radios": radios, "img": img_label, "var": var, "chk": chk}
+
+        def chosen(side):
+            """칸에서 고른 출처의 표지 (그림 bytes, 가로 px). 없으면 None"""
+            return state["covers"].get(side, {}).get(sides[side]["src"].get())
 
         def show_covers(covers):
+            """새 책의 표지들 {"front": {출처: (bytes, 가로 px)}, …}. 칸마다 예스24가 있으면 예스24를 먼저 고른다"""
             state["covers"] = covers
-            for side, (name, img_label, var, chk) in sides.items():
-                found = covers.get(side)
-                if found is None:
-                    img_label.config(image=refs["blank"], cursor="")
-                    var.set(False)
-                    chk.config(text=f"{name} (없음)", state=tk.DISABLED)
-                    continue
-                img = Image.open(io.BytesIO(found[0])).convert("RGB")
-                img.thumbnail((COVER_PREVIEW_W, COVER_PREVIEW_H), Image.LANCZOS)
-                box = Image.new("RGB", (COVER_PREVIEW_W, COVER_PREVIEW_H), "#dddddd")  # 칸 크기는 그대로
-                box.paste(img, ((COVER_PREVIEW_W - img.width) // 2, (COVER_PREVIEW_H - img.height) // 2))
-                refs[side] = ImageTk.PhotoImage(box)
-                img_label.config(image=refs[side], cursor="hand2")
-                var.set(True)
-                chk.config(text=f"{name} ({found[1]})", state=tk.NORMAL)
+            for side, w in sides.items():
+                found = covers.get(side, {})
+                for source, rb in w["radios"].items():
+                    if source in found:
+                        rb.config(text=f"{source} {found[source][1]}px", state=tk.NORMAL)
+                    else:  # 받는 중(covers가 비었을 때)에는 이름만
+                        rb.config(text=f"{source} 없음" if covers else source, state=tk.DISABLED)
+                w["src"].set(next((s for s in COVER_SOURCES if s in found), "-"))
+                w["var"].set(bool(found))
+                w["chk"].config(text=f"{w['name']} 넣기" if found else f"{w['name']} (없음)",
+                                state=tk.NORMAL if found else tk.DISABLED)
+                show_side(side)
+
+        def show_side(side):
+            """칸에서 고른 출처의 표지를 미리보기 칸에 그린다"""
+            img_label = sides[side]["img"]
+            found = chosen(side)
+            if found is None:
+                img_label.config(image=refs["blank"], cursor="")
+                return
+            img = Image.open(io.BytesIO(found[0])).convert("RGB")
+            img.thumbnail((COVER_PREVIEW_W, COVER_PREVIEW_H), Image.LANCZOS)
+            box = Image.new("RGB", (COVER_PREVIEW_W, COVER_PREVIEW_H), "#dddddd")  # 칸 크기는 그대로
+            box.paste(img, ((COVER_PREVIEW_W - img.width) // 2, (COVER_PREVIEW_H - img.height) // 2))
+            refs[side] = ImageTk.PhotoImage(box)
+            img_label.config(image=refs[side], cursor="hand2")
 
         def show_large(side):
             """표지를 가운데 미리보기 칸 위에 그 칸 크기로 크게 띄운다 (페이지 미리보기 '맞춤'과 같은 크기).
             화면 크기(winfo_screen*) 대신 실제 칸 크기를 쓴다: 창을 만든 뒤 DPI 설정을 켜서 화면 크기는 작게 나온다.
             아무 곳이나 누르거나 Esc면 닫는다"""
-            found = state["covers"].get(side)
+            found = chosen(side)
             if found is None:
                 return
             img = Image.open(io.BytesIO(found[0])).convert("RGB")
-            caption = f"{sides[side][0]} · {found[1]} · 원본 {img.width}×{img.height}px · 누르면 닫힘"
+            caption = (f"{sides[side]['name']} · {sides[side]['src'].get()} · "
+                       f"원본 {img.width}×{img.height}px · 누르면 닫힘")
             canvas = self.preview_canvas
             cw, ch = canvas.winfo_width(), canvas.winfo_height()
             cap_h = tkfont.Font(font=UI_FONT_SMALL).metrics("linespace") + 8
@@ -1880,7 +1910,7 @@ class PDFLevelPreviewApp:
             fill_results()
             show_covers({})
             status.config(text="검색 중...")
-            run(lambda: _yes24_search(query), on_found)
+            run(lambda: _aladin_search(query), on_found)
 
         def fill_results():
             """검색 결과를 한 줄에 한 권씩 쓰고, 검색한 낱말에 붉은 글씨를 입힌다"""
@@ -1917,8 +1947,8 @@ class PDFLevelPreviewApp:
             result_list.see(f"{i + 1}.0")
             show_covers({})
             status.config(text="표지 받는 중...")
-            gid = state["items"][i]["id"]
-            run(lambda: _find_covers(gid), on_covers)
+            item_id = state["items"][i]["id"]  # 알라딘 상품 번호
+            run(lambda: _find_covers(item_id), on_covers)
 
         def on_result_click(event):
             result_list.focus_set()  # ↑↓로 이어서 고를 수 있게
@@ -1937,8 +1967,7 @@ class PDFLevelPreviewApp:
             status.config(text="" if any(covers.values()) else "표지를 찾지 못했습니다.")
 
         def confirm():
-            covers = state["covers"]
-            picked = {side: covers[side][0] if covers.get(side) and sides[side][2].get() else None
+            picked = {side: chosen(side)[0] if chosen(side) and sides[side]["var"].get() else None
                       for side in sides}
             if not any(picked.values()):
                 status.config(text="넣을 표지가 없습니다.")
@@ -3446,11 +3475,30 @@ def _html_text(s):
     return " ".join(html.unescape(re.sub(r"<[^>]+>", " ", s)).split())
 
 
-def _yes24_search(query):
-    """예스24 국내도서 검색 (책 이름 또는 ISBN) → [{"id": 상품 번호, "title": 제목, "info": "저자 · 출판사 · 날짜"}]"""
+def _aladin_search(query):
+    """알라딘 국내도서 검색 (책 이름 또는 ISBN, 알라딘 기본 정렬 = 정확도순)
+    → [{"id": 알라딘 상품 번호, "title": 제목, "info": "저자 · 출판사 · 날짜"}]"""
     digits = re.sub(r"[\s-]", "", query)
     if re.fullmatch(r"\d{9}[\dXx]|\d{13}", digits):  # ISBN은 하이픈이 있으면 못 찾는다
         query = digits
+    url = "https://www.aladin.co.kr/search/wsearchresult.aspx?" + urllib.parse.urlencode(
+        {"SearchTarget": "Book", "SearchWord": query})
+    page = _http_get(url).decode("utf-8", "replace")
+    items = []
+    parts = re.split(r'<div class="ss_book_box" itemId="(\d+)"', page)
+    for item_id, chunk in zip(parts[1::2], parts[2::2]):
+        # <li>[국내도서] <a class="bo3">제목</a> - 부제</li> 다음 <li>저자 (지은이) | 출판사 | 날짜</li>
+        m = re.search(r'class="bo3">(.*?)</a>.*?</li>\s*<li>(.*?)</li>', chunk, re.S)
+        if not m:
+            continue
+        info = " · ".join(t.strip() for t in _html_text(m.group(2)).split("|") if t.strip())
+        items.append({"id": item_id, "title": _html_text(m.group(1)), "info": info})
+    return items
+
+
+def _yes24_search(query):
+    """예스24 국내도서 검색 → [{"id": 상품 번호, "title": 제목, "info": "저자 · 출판사 · 날짜"}].
+    표지 넣기에서는 ISBN으로 같은 책의 예스24 상품을 찾을 때 쓴다"""
     url ="https://www.yes24.com/Product/Search?" + urllib.parse.urlencode({"domain": "BOOK", "query": query})
     page = _http_get(url).decode("utf-8", "replace")
     start = page.find('id="yesSchList"')  # 검색 결과 목록부터 (위쪽 광고·추천 상품 제외)
@@ -3482,25 +3530,25 @@ def _yes24_cover_urls(gid):
     return front, back, (m.group(1) if m else None)
 
 
-def _aladin_cover_urls(isbn):
-    """알라딘 상품 페이지 '미리보기'의 (앞표지 주소, 뒷표지 주소). 없으면 None.
+def _aladin_cover_urls(item_id):
+    """알라딘 상품의 (ISBN, 앞표지 주소, 뒷표지 주소). 표지는 상품 페이지 '미리보기'의 것, 없으면 None.
     주소를 짐작해 만들면 옛 판 그림이 나올 수 있어서 페이지에 실린 주소만 쓴다"""
-    page = _http_get("https://www.aladin.co.kr/shop/wproduct.aspx?ISBN=" + isbn).decode("utf-8", "replace")
-    if isbn not in page:  # 없는 ISBN이면 엉뚱한 상품 페이지가 나온다
-        return None, None
+    page = _http_get(f"https://www.aladin.co.kr/shop/wproduct.aspx?ItemId={item_id}").decode("utf-8", "replace")
+    m = re.search(r'property="books:isbn"\s+content="([\dXx]+)"', page)
+    isbn = m.group(1) if m else None
     m = re.search(r'property="og:image"\s+content="((https://image\.aladin\.co\.kr/product/\d+/\d+/)[^"]+)"', page)
     if not m:
-        return None, None
+        return isbn, None, None
     cover, base = m.groups()  # 대표 표지 (앞표지 대신 쓸 수 있다) / 이 상품의 그림 폴더
     found = []
     for suffix in ("f", "b"):  # 미리보기의 앞표지 _f.jpg / 뒷표지 _b.jpg
         m2 = re.search(re.escape(base) + r"letslook/[^\"'\s]+_" + suffix + r"\.jpg", page)
         found.append(m2.group(0) if m2 else None)
-    return found[0] or cover, found[1]
+    return isbn, found[0] or cover, found[1]
 
 
-def _get_cover(url, source):
-    """표지 그림 받기 → (그림 bytes, 출처, 가로 px). 주소가 없거나 그림이 아니면 (오류 페이지 등) None"""
+def _get_cover(url):
+    """표지 그림 받기 → (그림 bytes, 가로 px). 주소가 없거나 그림이 아니면 (오류 페이지 등) None"""
     if not url:
         return None
     data = _http_get(url)
@@ -3508,25 +3556,32 @@ def _get_cover(url, source):
         width = Image.open(io.BytesIO(data)).size[0]
     except Exception:
         return None
-    return data, source, width
+    return data, width
 
 
-def _find_covers(gid):
-    """예스24 상품의 앞·뒤 표지 → {"front": (그림 bytes, 출처) 또는 None, "back": …}.
-    예스24(보통 가로 827px)를 먼저 받고, 없거나 COVER_MIN_W보다 좁은 쪽은 알라딘(500px)도 찾아 넓은 쪽을 쓴다"""
-    front, back, isbn = _yes24_cover_urls(gid)
-    covers = {"front": _get_cover(front, "예스24"), "back": _get_cover(back, "예스24")}
-    if isbn and any(c is None or c[2] < COVER_MIN_W for c in covers.values()):
+def _find_covers(item_id):
+    """알라딘 상품의 앞·뒤 표지를 알라딘과 예스24(같은 ISBN의 상품)에서 모두 받는다. 어느 쪽을 쓸지는 사용자가 고른다
+    → {"front": {"예스24": (그림 bytes, 가로 px), "알라딘": …}, "back": {…}} (없는 곳은 빠진다)"""
+    isbn, a_front, a_back = _aladin_cover_urls(item_id)
+    y_front = y_back = None
+    if isbn:
         try:
-            aladin = dict(zip(("front", "back"), _aladin_cover_urls(isbn)))
-        except Exception:
-            aladin = {}
-        for side, c in covers.items():
-            if (c is None or c[2] < COVER_MIN_W) and aladin.get(side):
-                a = _get_cover(aladin[side], "알라딘")
-                if a and (c is None or a[2] > c[2]):
-                    covers[side] = a
-    return {side: c[:2] if c else None for side, c in covers.items()}
+            found = _yes24_search(isbn)
+            if found:
+                y_front, y_back, y_isbn = _yes24_cover_urls(found[0]["id"])
+                if y_isbn != isbn:  # ISBN이 다른 상품이면 다른 책이다
+                    y_front = y_back = None
+        except Exception:  # 예스24가 안 되면 알라딘 표지만 보여 준다
+            pass
+    urls = [("front", "예스24", y_front), ("front", "알라딘", a_front),
+            ("back", "예스24", y_back), ("back", "알라딘", a_back)]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        got = list(pool.map(lambda u: _get_cover(u[2]), urls))
+    covers = {"front": {}, "back": {}}
+    for (side, source, _), cover in zip(urls, got):
+        if cover:
+            covers[side][source] = cover
+    return covers
 
 
 def _add_cover_page(doc, pno, w, h, img_bytes):
