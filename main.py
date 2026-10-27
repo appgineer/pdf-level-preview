@@ -9,12 +9,15 @@ import threading
 import subprocess
 import tempfile
 import glob
+import html
 import io
 import math
 import re
 import queue
 import time
 import multiprocessing
+import urllib.parse
+import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
@@ -97,6 +100,13 @@ THUMB_AUTOSCROLL_PX = 40
 UNDO_MAX = 50
 # 복사한 페이지(클립보드 PDF)를 남겨 두는 기간 (초). 지난 것은 다음 실행 때 지운다
 CLIPBOARD_KEEP = 24 * 3600
+# 표지 넣기: 서점(예스24 → 알라딘) 웹페이지를 읽어 표지 그림을 받는다. 요청 하나 기다리는 시간 (초)
+COVER_TIMEOUT = 10
+COVER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"  # 브라우저처럼 요청한다
+# 예스24 표지가 이 폭(px)보다 좁으면 알라딘 표지(500px)도 받아서 넓은 쪽을 쓴다
+COVER_MIN_W = 500
+# 표지 넣기 팝업의 미리보기 칸 크기 (px)
+COVER_PREVIEW_W, COVER_PREVIEW_H = 360, 500
 
 
 def _make_indicator_images():
@@ -511,6 +521,8 @@ class PDFLevelPreviewApp:
         toolbar.pack(side=tk.TOP, fill=tk.X)
 
         tk.Button(toolbar, text="파일 열기", command=self.open_pdf, cursor="hand2", font=UI_FONT).pack(side=tk.LEFT, padx=6)
+        tk.Button(toolbar, text="표지 넣기", command=self.open_cover_dialog, cursor="hand2",
+                  font=UI_FONT).pack(side=tk.LEFT, padx=(0, 6))
         self.filename_label = tk.Label(toolbar, text="열린 파일 없음", anchor=tk.W, font=UI_FONT_SMALL)
         self.filename_label.pack(side=tk.LEFT, padx=6)
 
@@ -1725,6 +1737,202 @@ class PDFLevelPreviewApp:
         self._set_slots(slots, current, range(at, at + len(moving)))
 
     # ------------------------------------------------------------------ #
+    # 표지 넣기 (앞표지 → 폴더 첫 PDF 맨 앞, 뒷표지 → 마지막 PDF 맨 뒤)
+    # ------------------------------------------------------------------ #
+    def open_cover_dialog(self):
+        """책 이름/ISBN으로 예스24를 검색해 앞·뒤 표지를 미리 보여 주고, [확인]이면 넣는다"""
+        if self.pdf_doc is None:
+            self._show_toast("PDF를 먼저 여세요.")
+            return
+        files = _folder_pdfs(self._pdf_path)
+        dlg = tk.Toplevel(self.root)
+        dlg.title("표지 넣기")
+        dlg.transient(self.root)
+        state = {"gen": 0, "items": [], "covers": {}}  # gen: 마지막 조회 번호 (늦게 온 옛 결과는 버린다)
+
+        top = tk.Frame(dlg, padx=16, pady=12)
+        top.pack(fill=tk.X)
+        tk.Label(top, text="책 이름 또는 ISBN", font=UI_FONT).pack(side=tk.LEFT)
+        query_var = tk.StringVar()
+        entry = tk.Entry(top, textvariable=query_var, width=30, font=UI_FONT)
+        entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8)
+        search_btn = tk.Button(top, text="조회", pady=BTN_PADY, cursor="hand2", font=UI_FONT)
+        search_btn.pack(side=tk.LEFT)
+
+        result_list = tk.Listbox(dlg, height=6, font=UI_FONT_SMALL, activestyle="none", exportselection=False)
+        result_list.pack(fill=tk.X, padx=16)
+        status = tk.Label(dlg, text="", font=UI_FONT_SMALL, fg="#666", anchor=tk.W)
+        status.pack(fill=tk.X, padx=16, pady=(4, 0))
+
+        # 앞표지 / 뒷표지 미리보기 칸, 넣을지 체크, 들어갈 자리
+        refs = {"blank": ImageTk.PhotoImage(Image.new("RGB", (COVER_PREVIEW_W, COVER_PREVIEW_H), "#dddddd"))}
+        covers_row = tk.Frame(dlg, padx=16, pady=8)
+        covers_row.pack()
+        sides = {}
+        for side, name, target, where in (("front", "앞표지", files[0], "맨 앞"),
+                                           ("back", "뒷표지", files[-1], "맨 뒤")):
+            col = tk.Frame(covers_row, padx=12)
+            col.pack(side=tk.LEFT, anchor=tk.N)
+            img_label = tk.Label(col, image=refs["blank"], bd=1, relief=tk.SOLID)
+            img_label.pack()
+            var = tk.BooleanVar(value=False)
+            chk = tk.Checkbutton(col, text=f"{name} (없음)", variable=var, state=tk.DISABLED,
+                                 cursor="hand2", font=UI_FONT,
+                                 image=self._ind_tk['cb_off'], selectimage=self._ind_tk['cb_on'],
+                                 indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
+                                 selectcolor=self._bg_color)
+            chk.pack(pady=(8, 0))
+            tk.Label(col, text=f"→ {os.path.basename(target)} {where}", font=UI_FONT_SMALL).pack()
+            sides[side] = (name, img_label, var, chk)
+
+        def show_covers(covers):
+            state["covers"] = covers
+            for side, (name, img_label, var, chk) in sides.items():
+                found = covers.get(side)
+                if found is None:
+                    img_label.config(image=refs["blank"])
+                    var.set(False)
+                    chk.config(text=f"{name} (없음)", state=tk.DISABLED)
+                    continue
+                img = Image.open(io.BytesIO(found[0])).convert("RGB")
+                img.thumbnail((COVER_PREVIEW_W, COVER_PREVIEW_H), Image.LANCZOS)
+                box = Image.new("RGB", (COVER_PREVIEW_W, COVER_PREVIEW_H), "#dddddd")  # 칸 크기는 그대로
+                box.paste(img, ((COVER_PREVIEW_W - img.width) // 2, (COVER_PREVIEW_H - img.height) // 2))
+                refs[side] = ImageTk.PhotoImage(box)
+                img_label.config(image=refs[side])
+                var.set(True)
+                chk.config(text=f"{name} ({found[1]})", state=tk.NORMAL)
+
+        def run(work, done):
+            """work()를 백그라운드에서 돌리고 done(결과, 오류)로 받는다. 그새 다시 조회했거나 창을 닫았으면 버린다"""
+            state["gen"] += 1
+            gen = state["gen"]
+
+            def thread():
+                try:
+                    res, err = work(), None
+                except Exception as e:
+                    res, err = None, e
+
+                def deliver():
+                    if gen == state["gen"] and dlg.winfo_exists():
+                        done(res, err)
+                self.root.after(0, deliver)
+            threading.Thread(target=thread, daemon=True).start()
+
+        def search(event=None):
+            query = query_var.get().strip()
+            if not query:
+                return
+            result_list.delete(0, tk.END)
+            state["items"] = []
+            show_covers({})
+            status.config(text="검색 중...")
+            run(lambda: _yes24_search(query), on_found)
+
+        def on_found(items, err):
+            if err is not None:
+                status.config(text=f"검색 실패: {err}")
+                return
+            state["items"] = items
+            for it in items:
+                result_list.insert(tk.END, f"{it['title']}  ·  {it['info']}" if it["info"] else it["title"])
+            if not items:
+                status.config(text="찾은 책이 없습니다.")
+            elif len(items) == 1:  # ISBN처럼 한 권만 나오면 바로 표지를 받는다
+                result_list.selection_set(0)
+                load_covers()
+            else:
+                status.config(text="책을 고르세요.")
+
+        def load_covers(event=None):
+            sel = result_list.curselection()
+            if not sel:
+                return
+            show_covers({})
+            status.config(text="표지 받는 중...")
+            gid = state["items"][sel[0]]["id"]
+            run(lambda: _find_covers(gid), on_covers)
+
+        def on_covers(covers, err):
+            if err is not None:
+                status.config(text=f"표지를 받지 못했습니다: {err}")
+                return
+            show_covers(covers)
+            status.config(text="" if any(covers.values()) else "표지를 찾지 못했습니다.")
+
+        def confirm():
+            covers = state["covers"]
+            picked = {side: covers[side][0] if covers.get(side) and sides[side][2].get() else None
+                      for side in sides}
+            if not any(picked.values()):
+                status.config(text="넣을 표지가 없습니다.")
+                return
+            dlg.destroy()
+            self._insert_covers(picked["front"], picked["back"])
+
+        search_btn.config(command=search)
+        entry.bind("<Return>", search)
+        result_list.bind("<<ListboxSelect>>", load_covers)
+        dlg.bind("<Escape>", lambda e: dlg.destroy())
+
+        btns = tk.Frame(dlg, padx=16, pady=12)
+        btns.pack(fill=tk.X)
+        tk.Button(btns, text="확인", command=confirm, padx=24, pady=BTN_PADY, cursor="hand2", font=UI_FONT,
+                  bg=SAVE_BTN_BG, fg="white", activebackground=SAVE_BTN_ACTIVE,
+                  activeforeground="white").pack(side=tk.RIGHT)
+        tk.Button(btns, text="취소", command=dlg.destroy, padx=24, pady=BTN_PADY, cursor="hand2",
+                  font=UI_FONT).pack(side=tk.RIGHT, padx=(0, 8))
+
+        # 부모 창 가운데. 떠 있는 동안 본 창은 못 건드리게 (넣을 자리가 바뀌지 않게)
+        dlg.update_idletasks()
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - dlg.winfo_reqwidth()) // 2
+        y = self.root.winfo_rooty() + (self.root.winfo_height() - dlg.winfo_reqheight()) // 2
+        dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
+        dlg.wait_visibility()
+        dlg.grab_set()
+        entry.focus_set()
+
+    def _insert_covers(self, front, back):
+        """앞표지(그림 bytes 또는 None)는 폴더 첫 PDF 맨 앞, 뒷표지는 마지막 PDF 맨 뒤에 넣는다 (PDF가 하나면 그 파일 앞뒤).
+        대상이 지금 열린 파일이면 화면 페이지 목록에 넣고(파일에는 [다른 이름으로 저장] 때 들어간다),
+        열려 있지 않은 파일이면 그 파일에 바로 저장한다"""
+        files = _folder_pdfs(self._pdf_path)
+        me = os.path.normcase(os.path.abspath(self._pdf_path))
+        head, tail, lines, failed = [], [], [], []
+        saved_other = False
+        for img, target, at_end, name in ((front, files[0], False, "앞표지"), (back, files[-1], True, "뒷표지")):
+            if img is None:
+                continue
+            where = f"{os.path.basename(target)} {'맨 뒤' if at_end else '맨 앞'}"
+            try:
+                if os.path.normcase(target) == me:
+                    # 표지 크기는 화면의 맨 앞(맨 뒤) 페이지와 같게
+                    w, h = self._page_disp_size(self._page_count - 1 if at_end else 0)
+                    pdf = _make_cover_pdf(img, w, h)
+                    self._src_docs[pdf] = fitz.open(pdf)
+                    (tail if at_end else head).append((self._new_uid(), pdf, 0))
+                    lines.append(f"{name}: {where} (저장해야 들어갑니다)")
+                else:
+                    _insert_cover_into_file(target, img, at_end)
+                    saved_other = True
+                    lines.append(f"{name}: {where} 저장함")
+            except Exception as e:
+                failed.append(f"{name} → {where}: {e}")
+        if head or tail:
+            n = len(head) + self._page_count
+            new = list(range(len(head))) + list(range(n, n + len(tail)))
+            self._push_undo()
+            self._set_slots(head + self.slots + tail, new[0], new)
+            self._render_thumbs([(path, 0) for _, path, _ in head + tail])
+        if saved_other:  # 다른 파일 장수가 늘었으니 파란 총 장수를 다시 센다
+            self._count_folder_pages(self._pdf_path)
+        if failed:
+            messagebox.showerror("표지 넣기", "넣지 못했습니다.\n" + "\n".join(failed), parent=self.root)
+        if lines:
+            self._show_toast("\n".join(lines))
+
+    # ------------------------------------------------------------------ #
     # Zoom
     # ------------------------------------------------------------------ #
     def _current_zoom_pct(self):
@@ -2090,9 +2298,6 @@ class PDFLevelPreviewApp:
     def _count_folder_pages(self, path):
         """같은 폴더의 다른 PDF 장수를 백그라운드에서 센다: (앞 파일들 장수, 뒤 파일들 장수).
         순서는 파일 이름의 숫자 순(_2 < _10). 지금 파일 장수는 삭제·붙여넣기를 따라가게 화면 값을 쓴다"""
-        def natural(name):
-            return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", name.lower())]
-
         def work():
             folder = os.path.dirname(os.path.abspath(path))
             me = os.path.basename(path)
@@ -2102,7 +2307,7 @@ class PDFLevelPreviewApp:
                 return
             if len(names) < 2:
                 return
-            me_key = natural(me)
+            me_key = _natural_key(me)
             before = after = 0
             for n in names:
                 if n == me:
@@ -2112,7 +2317,7 @@ class PDFLevelPreviewApp:
                         cnt = len(d)
                 except Exception:
                     continue
-                if natural(n) < me_key:
+                if _natural_key(n) < me_key:
                     before += cnt
                 else:
                     after += cnt
@@ -3064,6 +3269,157 @@ def _cleanup_clipboard():
             os.unlink(path)
         except OSError:
             pass
+
+
+def _natural_key(name):
+    """파일 이름 숫자 순 정렬 키 (_2 < _10)"""
+    return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", name.lower())]
+
+
+def _folder_pdfs(path):
+    """path와 같은 폴더의 PDF 경로 목록, 파일 이름 숫자 순. 폴더를 못 읽으면 [path]"""
+    folder = os.path.dirname(os.path.abspath(path))
+    try:
+        names = [n for n in os.listdir(folder) if n.lower().endswith(".pdf")]
+    except OSError:
+        return [path]
+    return [os.path.join(folder, n) for n in sorted(names, key=_natural_key)] or [path]
+
+
+def _http_get(url):
+    req = urllib.request.Request(url, headers={"User-Agent": COVER_UA})
+    with urllib.request.urlopen(req, timeout=COVER_TIMEOUT) as r:
+        return r.read()
+
+
+def _html_text(s):
+    """HTML 조각에서 글자만 (태그를 빼고 공백은 한 칸으로)"""
+    return " ".join(html.unescape(re.sub(r"<[^>]+>", " ", s)).split())
+
+
+def _yes24_search(query):
+    """예스24 국내도서 검색 (책 이름 또는 ISBN) → [{"id": 상품 번호, "title": 제목, "info": "저자 · 출판사 · 날짜"}]"""
+    digits = re.sub(r"[\s-]", "", query)
+    if re.fullmatch(r"\d{9}[\dXx]|\d{13}", digits):  # ISBN은 하이픈이 있으면 못 찾는다
+        query = digits
+    url ="https://www.yes24.com/Product/Search?" + urllib.parse.urlencode({"domain": "BOOK", "query": query})
+    page = _http_get(url).decode("utf-8", "replace")
+    start = page.find('id="yesSchList"')  # 검색 결과 목록부터 (위쪽 광고·추천 상품 제외)
+    if start < 0:
+        return []
+    items = []
+    parts = re.split(r'<li[^>]*data-goods-no="(\d+)"', page[start:])
+    for gid, chunk in zip(parts[1::2], parts[2::2]):
+        m = re.search(r'class="gd_name"[^>]*>(.*?)</a>', chunk, re.S)
+        if not m:
+            continue
+        info = []
+        for cls in ("info_auth", "info_pub", "info_date"):
+            m2 = re.search(r'class="authPub %s"[^>]*>(.*?)</span>' % cls, chunk, re.S)
+            if m2 and _html_text(m2.group(1)):
+                info.append(_html_text(m2.group(1)))
+        items.append({"id": gid, "title": _html_text(m.group(1)), "info": " · ".join(info)})
+    return items
+
+
+def _yes24_cover_urls(gid):
+    """예스24 상품의 (앞표지 주소, 뒷표지 주소, ISBN). 상품 페이지에 실린 것만, 없으면 None"""
+    page = _http_get(f"https://www.yes24.com/product/goods/{gid}").decode("utf-8", "replace")
+    low = page.lower()
+    front = f"https://image.yes24.com/goods/{gid}/XL" if f"goods/{gid}/xl" in low else None
+    # 뒷표지가 없는 상품도 BACK/XL 주소는 빈 그림을 준다. 상품 페이지에 실려 있을 때만 쓴다
+    back = f"https://image.yes24.com/goods/{gid}/BACK/XL" if f"goods/{gid}/back/xl" in low else None
+    m = re.search(r'property="books:isbn"\s+content="([\dXx]+)"', page)
+    return front, back, (m.group(1) if m else None)
+
+
+def _aladin_cover_urls(isbn):
+    """알라딘 상품 페이지 '미리보기'의 (앞표지 주소, 뒷표지 주소). 없으면 None.
+    주소를 짐작해 만들면 옛 판 그림이 나올 수 있어서 페이지에 실린 주소만 쓴다"""
+    page = _http_get("https://www.aladin.co.kr/shop/wproduct.aspx?ISBN=" + isbn).decode("utf-8", "replace")
+    if isbn not in page:  # 없는 ISBN이면 엉뚱한 상품 페이지가 나온다
+        return None, None
+    m = re.search(r'property="og:image"\s+content="((https://image\.aladin\.co\.kr/product/\d+/\d+/)[^"]+)"', page)
+    if not m:
+        return None, None
+    cover, base = m.groups()  # 대표 표지 (앞표지 대신 쓸 수 있다) / 이 상품의 그림 폴더
+    found = []
+    for suffix in ("f", "b"):  # 미리보기의 앞표지 _f.jpg / 뒷표지 _b.jpg
+        m2 = re.search(re.escape(base) + r"letslook/[^\"'\s]+_" + suffix + r"\.jpg", page)
+        found.append(m2.group(0) if m2 else None)
+    return found[0] or cover, found[1]
+
+
+def _get_cover(url, source):
+    """표지 그림 받기 → (그림 bytes, 출처, 가로 px). 주소가 없거나 그림이 아니면 (오류 페이지 등) None"""
+    if not url:
+        return None
+    data = _http_get(url)
+    try:
+        width = Image.open(io.BytesIO(data)).size[0]
+    except Exception:
+        return None
+    return data, source, width
+
+
+def _find_covers(gid):
+    """예스24 상품의 앞·뒤 표지 → {"front": (그림 bytes, 출처) 또는 None, "back": …}.
+    예스24(보통 가로 827px)를 먼저 받고, 없거나 COVER_MIN_W보다 좁은 쪽은 알라딘(500px)도 찾아 넓은 쪽을 쓴다"""
+    front, back, isbn = _yes24_cover_urls(gid)
+    covers = {"front": _get_cover(front, "예스24"), "back": _get_cover(back, "예스24")}
+    if isbn and any(c is None or c[2] < COVER_MIN_W for c in covers.values()):
+        try:
+            aladin = dict(zip(("front", "back"), _aladin_cover_urls(isbn)))
+        except Exception:
+            aladin = {}
+        for side, c in covers.items():
+            if (c is None or c[2] < COVER_MIN_W) and aladin.get(side):
+                a = _get_cover(aladin[side], "알라딘")
+                if a and (c is None or a[2] > c[2]):
+                    covers[side] = a
+    return {side: c[:2] if c else None for side, c in covers.items()}
+
+
+def _add_cover_page(doc, pno, w, h, img_bytes):
+    """doc의 pno 자리(-1 = 맨 뒤)에 w×h pt 표지 페이지를 넣는다.
+    그림은 비율대로 가운데, 남는 곳은 흰색. 그림은 다시 압축하지 않고 그대로 넣는다"""
+    page = doc.new_page(pno=pno, width=w, height=h)
+    page.insert_image(page.rect, stream=img_bytes, keep_proportion=True)
+
+
+def _make_cover_pdf(img_bytes, w, h):
+    """표지 한 장짜리 PDF를 클립보드 폴더에 만든다 (열린 파일의 화면 목록에 넣을 때. 하루 지나면 _cleanup_clipboard가 지운다)"""
+    folder = _clipboard_dir()
+    os.makedirs(folder, exist_ok=True)
+    pdf = os.path.join(folder, f"cover-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}.pdf")
+    doc = fitz.open()
+    try:
+        _add_cover_page(doc, -1, w, h, img_bytes)
+        doc.save(pdf)
+    finally:
+        doc.close()
+    return pdf
+
+
+def _insert_cover_into_file(target, img_bytes, at_end):
+    """열려 있지 않은 PDF 맨 앞(at_end면 맨 뒤)에 표지를 넣어 바로 저장. 표지 크기는 옆 페이지와 같게.
+    임시 파일로 저장한 뒤 바꿔치기 (os.replace는 같은 드라이브에서만 되므로 원본 옆에 만든다)"""
+    tmp = target + SAVE_TMP_EXT
+    doc = fitz.open(target)
+    try:
+        r = doc[-1 if at_end else 0].rect
+        _add_cover_page(doc, -1 if at_end else 0, r.width, r.height, img_bytes)
+        doc.save(tmp)
+    finally:
+        doc.close()
+    try:
+        os.replace(tmp, target)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _cleanup_temp_files():
