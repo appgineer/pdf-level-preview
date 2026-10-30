@@ -1,6 +1,6 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, font as tkfont
-from PIL import Image, ImageTk, ImageDraw
+from PIL import Image, ImageTk, ImageDraw, ImageChops, ImageFilter
 import fitz  # PyMuPDF
 import json
 import os
@@ -51,6 +51,9 @@ ROTATE_DRAG_PX = 2
 # 드래그 회전 중 미리보기에 겹쳐 그리는 바둑판 격자 (화면 px 간격, 색). 글줄이 격자와 나란하면 수평
 ROTATE_GRID_PX = 20
 ROTATE_GRID_COLOR = "#00a0e0"
+# 기울기 자동 보정(_detect_skew): 이 해상도(dpi)로 그려 글줄을 보고, ±이 각도(°) 안에서 찾는다
+DESKEW_DPI = 150
+DESKEW_MAX = 5
 # 설정 파일의 자르기(mm) 자리를 보여주는 선 색 (미리보기 / 썸네일)
 CFG_CROP_LINE = "#e00000"
 # 눈에 띄어야 하는 버튼/선택창 색
@@ -269,6 +272,58 @@ def _deskew_page(page, angle):
     doc.xref_set_key(page.xref, "Contents", f"[{refs}]")
 
 
+def _detect_skew(page, rot=0):
+    """글줄을 보고 찾은 기울기 보정 각도(°, 시계방향 양수 = _deskew_page 방향). 글자가 거의 없는 페이지는 None.
+
+    ABBYY 같은 자동 기울기 보정과 같은 가로 투영 방식: 글자만 남긴 그림을 조금씩 돌려 보며 줄과 줄 사이가
+    가장 또렷하게 갈리는(줄마다 글자 양이 가장 들쭉날쭉한) 각도를 찾는다. rot(90° 회전)는 글줄을 가로로 놓고
+    보려는 것뿐이고, 기울기 각도는 90°씩 돌려도 같다.
+    """
+    z = DESKEW_DPI / 72
+    pix = page.get_pixmap(matrix=fitz.Matrix(z, z).prerotate(rot), colorspace=fitz.csGRAY)
+    img = Image.frombytes("L", (pix.width, pix.height), pix.samples)
+    # 종이색·바탕 무늬는 빼고 둘레보다 확 어두운 것(글자)만 남긴다. 바탕은 줄인 그림에 최댓값 필터로 구한다
+    bg = img.reduce(4).filter(ImageFilter.MaxFilter(5)).resize(img.size, Image.BILINEAR)
+    ink = ImageChops.subtract(bg, img).point(lambda v: 255 if v > 60 else 0)
+    m = min(ink.size) * 3 // 100  # 종이 끝 그림자는 뺀다
+    ink = ink.crop((m, m, ink.width - m, ink.height - m))
+    h = ink.height
+
+    def score(a):  # PIL 각도(반시계 양수)로 돌렸을 때 줄마다 글자 양이 얼마나 들쭉날쭉한지
+        rows = list(ink.rotate(a, resample=Image.NEAREST).resize((1, h), Image.BOX).getdata())
+        return sum((rows[i + 1] - rows[i]) ** 2 for i in range(h - 1))
+
+    # 0.2° 간격으로 훑고, 가장 나은 각도 둘레를 0.02° 간격으로
+    coarse = [(score(a / 10), a / 10) for a in range(-DESKEW_MAX * 10, DESKEW_MAX * 10 + 1, 2)]
+    best, a0 = max(coarse)
+    if best < 1.5 * max(1, min(coarse)[0]):  # 각도를 바꿔도 별 차이가 없다 = 글줄이 없다 (빈 페이지 등)
+        return None
+    fine = [(score(a0 + d / 100), a0 + d / 100) for d in range(-20, 21, 2)]
+    # 아주 작게 돌리면 1px도 안 움직여 점수가 같은 구간이 생긴다. 한쪽 끝을 고르면 0.05°쯤 치우치므로 가운데
+    top = max(fine)[0]
+    ties = [a for s, a in fine if s == top]
+    a = (ties[0] + ties[-1]) / 2
+    return round(-a, 2) or 0.0  # PIL 반시계 → 화면 시계방향 양수 (-0.0은 0으로)
+
+
+def _deskew_worker(jobs, res_q):
+    """기울기 자동 보정 프로세스: jobs = [(uid, PDF 경로, 페이지 번호, 90° 회전)] → res_q에 (uid, 각도 또는 None).
+
+    PyMuPDF는 스레드에서 쓸 수 없고 페이지가 많으면 오래 걸려서 여러 프로세스로 나눠 돌린다.
+    """
+    docs = {}
+    for uid, path, pno, rot in jobs:
+        try:
+            if path not in docs:
+                docs[path] = fitz.open(path)
+            angle = _detect_skew(docs[path][pno], rot)
+        except Exception:
+            angle = None
+        res_q.put((uid, angle))
+    for doc in docs.values():
+        doc.close()
+
+
 def _apply_page_edit(page, angle, rot, margins):
     """화면에서 본 모양(90° 회전 + 기울기 보정 + 화면 기준 여백 pt)을 PDF 페이지에 반영한다.
 
@@ -449,6 +504,7 @@ class PDFLevelPreviewApp:
         # Async rendering state
         self._thumb_generation = 0
         self._thumb_procs = set()  # 돌고 있는 썸네일 프로세스 (닫을 때 끝내야 PDF를 놓는다)
+        self._deskew_procs = []  # 돌고 있는 기울기 자동 보정 프로세스 (마찬가지)
         self._pdf_path = None
         self._wanted_key = None
         self._pending_req = None  # 워커에 보낸 마지막 렌더 요청 (결과 대기 중)
@@ -852,6 +908,10 @@ class PDFLevelPreviewApp:
         angle_entry.bind("<Up>",    lambda e: self._nudge_angle(+0.1))
         angle_entry.bind("<Down>",  lambda e: self._nudge_angle(-0.1))
         self._edit_entries = [angle_entry]
+        # 자동 보정: 목록 범위 페이지마다 글줄을 보고 기울기를 넣는다
+        self.deskew_btn = tk.Button(rot_row, text="자동 보정", command=self.auto_deskew, pady=BTN_PADY,
+                                    cursor="hand2", font=FNT)
+        self.deskew_btn.pack(side=tk.LEFT, fill=tk.X, expand=True)
         rot90_row = tk.Frame(parent)
         rot90_row.pack(fill=tk.X, pady=(4, 12))
         tk.Button(rot90_row, text="왼쪽 90°", command=lambda: self.rotate_90(-90), pady=BTN_PADY,
@@ -1050,6 +1110,7 @@ class PDFLevelPreviewApp:
     def _load_pdf(self, path):
         if not self._confirm_discard_edits():
             return
+        self._stop_deskew()
         self._close_src_docs()
         self.pdf_doc = fitz.open(path)
         self._pdf_path = path
@@ -2464,6 +2525,68 @@ class PDFLevelPreviewApp:
             way = "오른쪽" if delta > 0 else "왼쪽"
             self._show_toast(f"{self._range_label(which)}를 {way}으로 90° 돌렸습니다.")
 
+    def auto_deskew(self):
+        """목록 범위(선택한 페이지/홀수/짝수/전체) 페이지마다 글줄을 보고 기울기 각도를 넣는다 (_detect_skew).
+
+        페이지가 많으면 오래 걸려서 여러 프로세스로 나눠 돌리고, 찾은 페이지부터 바로 반영한다.
+        글자가 거의 없어 못 찾은 페이지는 그대로 둔다.
+        """
+        if self.pdf_doc is None or self._deskew_procs:
+            return
+        which = self.crop_range_var.get()
+        jobs = [self.slots[i] + (self._page_edit(i)["rot"],) for i in self._range_pages(which)]
+        if not jobs:
+            return
+        n = min(len(jobs), max(1, ((os.cpu_count() or 4) * 3) // 4))
+        res_q = multiprocessing.Queue()
+        procs = [multiprocessing.Process(target=_deskew_worker, args=(jobs[k::n], res_q), daemon=True)
+                 for k in range(n)]
+        for p in procs:
+            p.start()
+        self._deskew_procs = procs
+        self._set_drag_mode("rotate")  # 선 편집을 끄고 돌린 결과를 보여 준다
+        self._poll_deskew(procs, res_q, which, len(jobs), [0, 0])
+
+    def _poll_deskew(self, procs, res_q, which, total, count):
+        """자동 보정 결과를 받아 페이지에 넣는다. count = [받은 수, 못 찾은 수]"""
+        if procs is not self._deskew_procs:
+            return  # 멈췄다 (다른 파일을 열었거나 덮어쓰기·창 닫기)
+        alive = any(p.is_alive() for p in procs)
+        cur_changed = False
+        try:
+            while True:
+                uid, angle = res_q.get_nowait()
+                count[0] += 1
+                idx = self._uid_index(uid)
+                if angle is None or idx is None:
+                    count[1] += 1
+                    continue
+                self._set_page_edit(idx, angle=angle)
+                cur_changed |= idx == self.current_page
+        except queue.Empty:
+            pass
+        if cur_changed:
+            self._sync_edit_panel()
+            self.update_preview()
+        if count[0] < total and alive:
+            self.deskew_btn.config(text=f"찾는 중 {count[0]}/{total}")
+            self.root.after(100, lambda: self._poll_deskew(procs, res_q, which, total, count))
+            return
+        self._stop_deskew()
+        skipped = total - count[0] + count[1]  # 프로세스가 죽어 못 받은 것도
+        msg = f"{self._range_label(which)} {total - skipped}쪽의 기울기를 맞췄습니다."
+        if skipped:
+            msg += f" 글자가 거의 없는 {skipped}쪽은 그대로 뒀습니다."
+        self._show_toast(msg)
+
+    def _stop_deskew(self):
+        """기울기 자동 보정 프로세스를 끝낸다 (PDF를 놓게)"""
+        for p in self._deskew_procs:
+            p.terminate()
+            p.join(timeout=2)
+        self._deskew_procs = []
+        self.deskew_btn.config(text="자동 보정")
+
     def _sync_edit_panel(self):
         """편집 패널의 각도/여백 입력칸과 페이지 크기 표시를 현재 페이지 값으로 맞춘다"""
         if self.pdf_doc is None:
@@ -2877,6 +3000,7 @@ class PDFLevelPreviewApp:
         out.save(tmp)
         out.close()
         self._stop_thumbnails()  # 썸네일 프로세스도 원본을 열고 있다
+        self._stop_deskew()
         self.pdf_doc.close()
         self.pdf_doc = None
         self._render_req_q.put((None, None, None, False, ()))  # 워커도 파일에서 손 떼게
@@ -3267,6 +3391,7 @@ class PDFLevelPreviewApp:
             return
         # 남은 프로세스가 PDF를 쥐고 있으면 창을 닫아도 파일이 "사용 중"으로 남는다
         self._stop_thumbnails()
+        self._stop_deskew()
         self._render_proc.terminate()
         self._render_proc.join(timeout=2)
         if self._render_proc.is_alive():
