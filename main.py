@@ -97,6 +97,10 @@ THUMB_DROP_LINE = "#e00000"
 THUMB_CUR_LINE = "#1f6fd0"
 # 썸네일: 자동 보정 때 DESKEW_MAX°를 넘게 기울어 그대로 둔 페이지 테두리 색 (누르면 없어진다)
 THUMB_SKEW_LINE = "#e00000"
+# 툴바: [로마자 표기]로 정한 종이 쪽 번호 글씨 색 (보라. 빨간 페이지 번호·파란 폴더 번호 사이에 괄호로)
+PAPER_NUM_FG = "#8e44ad"
+# 툴바 버튼 [파일 열기] [로마자 표기] [표지 넣기] 사이 간격 (px)
+TOOLBAR_BTN_GAP = 16
 # 지금 키보드가 가는 구간(왼쪽 썸네일 / 가운데 미리보기 / 오른쪽 패널) 테두리 색·두께
 FOCUS_LINE = "#e00000"
 FOCUS_LINE_W = 3
@@ -216,6 +220,17 @@ def _roman(n):
             out += sym
             n -= value
     return out
+
+
+def _roman_count(doc):
+    """[로마자 표기]로 넣은 쪽 번호 표기(0쪽부터 i, ii … + k쪽부터 1, 2 …)면 로마자 쪽 수 k, 아니면 0"""
+    try:
+        labels = [(l["startpage"], l["style"], l["firstpagenum"], l["prefix"]) for l in doc.get_page_labels()]
+    except Exception:  # 쪽 번호 표기가 망가진 파일
+        return 0
+    if len(labels) == 2 and labels[0] == (0, "r", 1, "") and labels[1][1:] == ("D", 1, ""):
+        return labels[1][0]
+    return 0
 
 
 def _clamp_margins(margins, w, h):
@@ -601,19 +616,31 @@ class PDFLevelPreviewApp:
         toolbar = tk.Frame(self.root, bd=1, relief=tk.RAISED, pady=4)
         toolbar.pack(side=tk.TOP, fill=tk.X)
 
-        tk.Button(toolbar, text="파일 열기", command=self.open_pdf, cursor="hand2", font=UI_FONT).pack(side=tk.LEFT, padx=6)
+        # 버튼 사이를 띄운다 (TOOLBAR_BTN_GAP)
+        tk.Button(toolbar, text="파일 열기", command=self.open_pdf, cursor="hand2",
+                  font=UI_FONT).pack(side=tk.LEFT, padx=(6, 0))
+        tk.Button(toolbar, text="로마자 표기", command=self.set_roman_labels, cursor="hand2",
+                  font=UI_FONT).pack(side=tk.LEFT, padx=(TOOLBAR_BTN_GAP, 0))
         tk.Button(toolbar, text="표지 넣기", command=self.open_cover_dialog, cursor="hand2",
-                  font=UI_FONT).pack(side=tk.LEFT, padx=(0, 6))
+                  font=UI_FONT).pack(side=tk.LEFT, padx=(TOOLBAR_BTN_GAP, 6))
         self.filename_label = tk.Label(toolbar, text="열린 파일 없음", anchor=tk.W, font=UI_FONT_SMALL)
         self.filename_label.pack(side=tk.LEFT, padx=6)
 
-        self.page_label = tk.Label(toolbar, text="", fg=CFG_CROP_LINE, anchor=tk.W, font=UI_FONT_BOLD)
-        self.page_label.pack(side=tk.LEFT, padx=(12, 0))
-        # 폴더 안 PDF 전체(파일 이름 숫자 순)에서의 "몇 번째 장 / 총 장수". 구분선은 검은색, 양쪽을 띄운다
+        # "11(1) / 100": 빨간 지금 페이지 / 총 페이지, 사이에 보라색 종이 쪽 번호([로마자 표기]가 있을 때).
+        # 글씨 칸 셋을 여백 없이 붙여 한 줄처럼 보인다
+        def num_label(fg, padx=0):
+            label = tk.Label(toolbar, text="", fg=fg, font=UI_FONT_BOLD, padx=0, bd=0)
+            label.pack(side=tk.LEFT, padx=padx)
+            return label
+        self.page_label = num_label(CFG_CROP_LINE, (12, 0))
+        self.paper_label = num_label(PAPER_NUM_FG)
+        self.page_total_label = num_label(CFG_CROP_LINE)
+        # 폴더 안 PDF 전체(파일 이름 숫자 순)에서의 "몇 번째 장(종이 쪽) / 총 장수". 구분선은 검은색, 양쪽을 띄운다
         self.folder_sep_label = tk.Label(toolbar, text="", fg="black", font=UI_FONT_BOLD)
         self.folder_sep_label.pack(side=tk.LEFT, padx=24)
-        self.folder_page_label = tk.Label(toolbar, text="", fg=THUMB_CUR_LINE, anchor=tk.W, font=UI_FONT_BOLD)
-        self.folder_page_label.pack(side=tk.LEFT, padx=(0, 12))
+        self.folder_page_label = num_label(THUMB_CUR_LINE)
+        self.folder_paper_label = num_label(PAPER_NUM_FG)
+        self.folder_total_label = num_label(THUMB_CUR_LINE, (0, 12))
 
         self.render_status = tk.Label(toolbar, text="", fg="#999", anchor=tk.W, font=UI_FONT_SMALL)
         self.render_status.pack(side=tk.LEFT, padx=6)
@@ -999,12 +1026,6 @@ class PDFLevelPreviewApp:
                   activebackground=SAVE_BTN_ACTIVE, activeforeground="white"
                   ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0))
 
-        # 쪽 번호 표기 (PDF 페이지 레이블): 보고 있는 페이지를 종이 1쪽으로, 앞쪽은 i, ii … (저장할 때 들어간다)
-        tk.Button(parent, text="로마자 표기 (이 쪽을 1쪽으로)", command=self.set_roman_labels, pady=BTN_PADY,
-                  cursor="hand2", font=FNT).pack(fill=tk.X, pady=(16, 0))
-        self.paper_number_label = tk.Label(parent, text="", font=UI_FONT_SMALL, fg="#666", anchor=tk.W)
-        self.paper_number_label.pack(fill=tk.X)
-
         tk.Button(parent, text="다른 이름으로 저장", command=self.save_edited_pdf,
                   padx=12, pady=BTN_PADY, cursor="hand2", font=FNT,
                   bg=SAVEAS_BTN_BG, fg="white", activebackground=SAVEAS_BTN_ACTIVE,
@@ -1164,17 +1185,9 @@ class PDFLevelPreviewApp:
         self._deskew_prev.clear()
         self._skew_flagged.clear()
         self._show_skew_flags()
-        self._label_start_uid = None
-        try:
-            labels = [(l["startpage"], l["style"], l["firstpagenum"], l["prefix"])
-                      for l in self.pdf_doc.get_page_labels()]
-        except Exception:  # 쪽 번호 표기가 망가진 파일
-            labels = []
-        # 이 도구가 넣은 모양(앞쪽 i, ii … + k쪽부터 1, 2 …)이면 이어서 보여 주고 저장 때도 다시 넣는다
-        if len(labels) == 2 and labels[0] == (0, "r", 1, "") and labels[1][1:] == ("D", 1, "") \
-                and 0 < labels[1][0] < len(self.slots):
-            self._label_start_uid = self.slots[labels[1][0]][0]
-        self._show_paper_numbers()
+        # [로마자 표기]로 넣은 표기면 이어서 보여 주고 저장 때도 다시 넣는다
+        k = _roman_count(self.pdf_doc)
+        self._label_start_uid = self.slots[k][0] if 0 < k < len(self.slots) else None
         self._last_fit_page = None
         self._thumb_dirty.clear()
         self._crop_before_edit = [0.0, 0.0, 0.0, 0.0]
@@ -1396,9 +1409,9 @@ class PDFLevelPreviewApp:
             items.append(txt_id)
 
         caption = f"p.{idx + 1}"
-        start = self._label_start()
-        if start:  # [로마자 표기]: 종이 쪽 번호도
-            caption += f" ({_roman(idx + 1) if idx < start else idx - start + 1})"
+        paper = self._paper_number(idx)
+        if paper:  # [로마자 표기]: 종이 쪽 번호도
+            caption += f" ({paper})"
         label_id = self.thumb_canvas.create_text(
             x + THUMB_W // 2, y + thumb_h + 8, anchor=tk.N,
             text=caption, font=THUMB_LABEL_FONT, fill="#000"
@@ -1745,7 +1758,6 @@ class PDFLevelPreviewApp:
         self._relayout_thumbs()
         self.select_page(current)
         self._show_skew_flags()  # 쪽 번호가 바뀌었을 수 있다
-        self._show_paper_numbers()
 
     def _push_undo(self):
         self._undo_stack.append((list(self.slots), self.current_page, set(self._selected)))
@@ -2517,21 +2529,30 @@ class PDFLevelPreviewApp:
             self._draw_selection()
 
     def _update_page_label(self):
-        """툴바의 "선택 페이지 / 총 페이지" 표시 + 파란색으로 폴더 PDF 전체 기준 몇 번째 장 / 총 장수"""
-        self.page_label.config(text=f"{self.current_page + 1} / {self._page_count}" if self._page_count else "")
-        folder = getattr(self, "_folder_pages", None)
-        if self._page_count and folder:
-            before, after = folder
-            self.folder_sep_label.config(text="|")
-            self.folder_page_label.config(
-                text=f"{before + self.current_page + 1} / {before + self._page_count + after}")
-        else:
-            self.folder_sep_label.config(text="")
-            self.folder_page_label.config(text="")
+        """툴바의 빨간 "선택 페이지 / 총 페이지" + 파란색으로 폴더 PDF 전체 기준 몇 번째 장 / 총 장수.
+        [로마자 표기]가 있으면 번호 뒤에 보라색 괄호로 종이 쪽 번호: "11(1) / 100 | 111(101) / 1000".
+        폴더 쪽 번호는 폴더 기준 장 번호에서 로마자 쪽 수(앞 파일들 + 이 파일)를 뺀 것"""
+        texts = [""] * 7  # 페이지, 종이 쪽, / 총, 구분선, 폴더 장, 폴더 종이 쪽, / 폴더 총
+        if self._page_count:
+            cur = self.current_page
+            paper = self._paper_number(cur)
+            texts[:3] = [str(cur + 1), f"({paper})" if paper else "", f" / {self._page_count}"]
+            folder = getattr(self, "_folder_pages", None)
+            if folder:
+                before, after, roman = folder
+                roman += self._label_start() or 0
+                pos = before + cur + 1
+                folder_paper = (_roman(pos) if pos <= roman else pos - roman) if roman else None
+                texts[3:] = ["|", str(pos), f"({folder_paper})" if folder_paper else "",
+                             f" / {before + self._page_count + after}"]
+        for label, text in zip((self.page_label, self.paper_label, self.page_total_label, self.folder_sep_label,
+                                self.folder_page_label, self.folder_paper_label, self.folder_total_label), texts):
+            label.config(text=text)
 
     def _count_folder_pages(self, path):
-        """같은 폴더의 다른 PDF 장수를 백그라운드에서 센다: (앞 파일들 장수, 뒤 파일들 장수).
-        순서는 파일 이름의 숫자 순(_2 < _10). 지금 파일 장수는 삭제·붙여넣기를 따라가게 화면 값을 쓴다"""
+        """같은 폴더의 다른 PDF 장수를 백그라운드에서 센다: (앞 파일들 장수, 뒤 파일들 장수, 앞 파일들 로마자 쪽 수).
+        순서는 파일 이름의 숫자 순(_2 < _10). 지금 파일 장수는 삭제·붙여넣기를 따라가게 화면 값을 쓴다.
+        로마자 쪽 수는 폴더 기준 종이 쪽 번호용 (앞 파일에 [로마자 표기]가 있으면 그만큼 뺀다)"""
         def work():
             folder = os.path.dirname(os.path.abspath(path))
             me = os.path.basename(path)
@@ -2542,27 +2563,30 @@ class PDFLevelPreviewApp:
             if len(names) < 2:
                 return
             me_key = _natural_key(me)
-            before = after = 0
+            before = after = roman = 0
             for n in names:
                 if n == me:
                     continue
+                is_before = _natural_key(n) < me_key
                 try:
                     with fitz.open(os.path.join(folder, n)) as d:
                         cnt = len(d)
+                        if is_before:
+                            roman += _roman_count(d)
                 except Exception:
                     continue
-                if _natural_key(n) < me_key:
+                if is_before:
                     before += cnt
                 else:
                     after += cnt
-            self.root.after(0, lambda: self._on_folder_pages(path, before, after))
+            self.root.after(0, lambda: self._on_folder_pages(path, before, after, roman))
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _on_folder_pages(self, path, before, after):
+    def _on_folder_pages(self, path, before, after, roman):
         if path != self._pdf_path:  # 세는 동안 다른 파일을 열었으면 버린다
             return
-        self._folder_pages = (before, after)
+        self._folder_pages = (before, after, roman)
         self._update_page_label()
 
     def _page_disp_size(self, idx):
@@ -3073,7 +3097,7 @@ class PDFLevelPreviewApp:
             return
         self._label_start_uid = self.slots[self.current_page][0]
         self._edits_dirty = True
-        self._show_paper_numbers()
+        self._update_page_label()  # 툴바 보라색 종이 쪽 번호
         self._thumb_dirty.update(self._drawn_pages)  # 썸네일 아래 쪽 번호
         self._schedule_thumb_redraw()
         start = self.current_page
@@ -3086,10 +3110,12 @@ class PDFLevelPreviewApp:
         """[로마자 표기]로 종이 1쪽이 된 페이지의 화면 위치. 안 정했거나 그 페이지를 지웠으면 None"""
         return None if self._label_start_uid is None else self._uid_index(self._label_start_uid)
 
-    def _show_paper_numbers(self):
-        """[로마자 표기] 버튼 아래에 지금 표기를 적는다 (페이지를 끼우거나 지우면 로마자 쪽 수가 바뀐다)"""
+    def _paper_number(self, idx):
+        """[로마자 표기]로 정한 화면 위치 idx의 종이 쪽 번호 ("iii", "1" …). 표기가 없으면 None"""
         start = self._label_start()
-        self.paper_number_label.config(text=f"p.1~{start} → i~{_roman(start)}, p.{start + 1} → 1" if start else "")
+        if not start:  # 안 정했거나 첫 페이지가 1쪽 = 페이지 번호와 같다
+            return None
+        return _roman(idx + 1) if idx < start else str(idx - start + 1)
 
     def save_edited_pdf(self):
         """페이지 순서(삭제·붙여넣기·이동)와 회전/자르기를 반영해 저장. 같은 이름을 고르면 원본에 덮어쓴다"""
