@@ -51,8 +51,10 @@ ROTATE_DRAG_PX = 2
 # 드래그 회전 중 미리보기에 겹쳐 그리는 바둑판 격자 (화면 px 간격, 색). 글줄이 격자와 나란하면 수평
 ROTATE_GRID_PX = 20
 ROTATE_GRID_COLOR = "#00a0e0"
-# 기울기 자동 보정(_detect_skew): 이 해상도(dpi)로 그려 글줄을 보고, ±이 각도(°) 안에서 찾는다
+# 기울기 자동 보정(_detect_skew): 이 해상도(dpi)로 그려 글줄을 보고 ±DESKEW_SEARCH° 안에서 찾는다 (ABBYY도 20°까지).
+# DESKEW_MAX°를 넘게 기운 페이지는 각도를 넣지 않고 썸네일에 빨간 테두리로 알린다 (크게 돌리면 모서리가 많이 잘린다)
 DESKEW_DPI = 150
+DESKEW_SEARCH = 20
 DESKEW_MAX = 5
 # 설정 파일의 자르기(mm) 자리를 보여주는 선 색 (미리보기 / 썸네일)
 CFG_CROP_LINE = "#e00000"
@@ -93,6 +95,8 @@ THUMB_SEL_BG = "#cfe0fb"
 THUMB_DROP_LINE = "#e00000"
 # 썸네일: 지금 미리보기에 보이는 페이지 테두리 색 (파랑. 설정 파일 자르기의 빨간 선과 안 헷갈리게)
 THUMB_CUR_LINE = "#1f6fd0"
+# 썸네일: 자동 보정 때 DESKEW_MAX°를 넘게 기울어 그대로 둔 페이지 테두리 색 (누르면 없어진다)
+THUMB_SKEW_LINE = "#e00000"
 # 지금 키보드가 가는 구간(왼쪽 썸네일 / 가운데 미리보기 / 오른쪽 패널) 테두리 색·두께
 FOCUS_LINE = "#e00000"
 FOCUS_LINE_W = 3
@@ -287,17 +291,20 @@ def _detect_skew(page, rot=0):
     ink = ImageChops.subtract(bg, img).point(lambda v: 255 if v > 60 else 0)
     m = min(ink.size) * 3 // 100  # 종이 끝 그림자는 뺀다
     ink = ink.crop((m, m, ink.width - m, ink.height - m))
+    if ink.histogram()[255] < ink.width * ink.height // 2000:  # 글자가 0.05%(단어 서너 개)도 안 된다 (빈 페이지의 티끌 등)
+        return None
     h = ink.height
 
     def score(a):  # PIL 각도(반시계 양수)로 돌렸을 때 줄마다 글자 양이 얼마나 들쭉날쭉한지
         rows = list(ink.rotate(a, resample=Image.NEAREST).resize((1, h), Image.BOX).getdata())
         return sum((rows[i + 1] - rows[i]) ** 2 for i in range(h - 1))
 
-    # 0.2° 간격으로 훑고, 가장 나은 각도 둘레를 0.02° 간격으로
-    coarse = [(score(a / 10), a / 10) for a in range(-DESKEW_MAX * 10, DESKEW_MAX * 10 + 1, 2)]
+    # 1° 간격으로 훑고, 가장 나은 각도 둘레를 0.2°, 다시 0.02° 간격으로
+    coarse = [(score(a), a) for a in range(-DESKEW_SEARCH, DESKEW_SEARCH + 1)]
     best, a0 = max(coarse)
-    if best < 1.5 * max(1, min(coarse)[0]):  # 각도를 바꿔도 별 차이가 없다 = 글줄이 없다 (빈 페이지 등)
+    if best < 2 * max(1, min(coarse)[0]):  # 각도를 바꿔도 별 차이가 없다 = 글줄이 없다 (그림만 있는 페이지 등)
         return None
+    _, a0 = max((score(a0 + d / 10), a0 + d / 10) for d in range(-10, 11, 2))
     fine = [(score(a0 + d / 100), a0 + d / 100) for d in range(-20, 21, 2)]
     # 아주 작게 돌리면 1px도 안 움직여 점수가 같은 구간이 생긴다. 한쪽 끝을 고르면 0.05°쯤 치우치므로 가운데
     top = max(fine)[0]
@@ -505,6 +512,8 @@ class PDFLevelPreviewApp:
         self._thumb_generation = 0
         self._thumb_procs = set()  # 돌고 있는 썸네일 프로세스 (닫을 때 끝내야 PDF를 놓는다)
         self._deskew_procs = []  # 돌고 있는 기울기 자동 보정 프로세스 (마찬가지)
+        self._deskew_prev = {}  # 페이지 uid -> 자동 보정 전 기울기 (되돌리기용)
+        self._skew_flagged = set()  # DESKEW_MAX°를 넘게 기울어 그대로 둔 페이지 uid (썸네일 빨간 테두리)
         self._pdf_path = None
         self._wanted_key = None
         self._pending_req = None  # 워커에 보낸 마지막 렌더 요청 (결과 대기 중)
@@ -908,17 +917,27 @@ class PDFLevelPreviewApp:
         angle_entry.bind("<Up>",    lambda e: self._nudge_angle(+0.1))
         angle_entry.bind("<Down>",  lambda e: self._nudge_angle(-0.1))
         self._edit_entries = [angle_entry]
-        # 자동 보정: 목록 범위 페이지마다 글줄을 보고 기울기를 넣는다
-        self.deskew_btn = tk.Button(rot_row, text="자동 보정", command=self.auto_deskew, pady=BTN_PADY,
+        # [되돌리기] [자동 보정] / [왼쪽 90°] [오른쪽 90°]: 두 줄 모두 같은 너비 두 칸(uniform)이라 위아래 버튼이 맞는다.
+        # 자동 보정은 목록 범위 페이지마다 글줄을 보고 기울기를 넣고, 되돌리기는 자동 보정 전 각도로
+        auto_row = tk.Frame(parent)
+        auto_row.pack(fill=tk.X, pady=(4, 0))
+        auto_row.columnconfigure((0, 1), weight=1, uniform="half")
+        tk.Button(auto_row, text="되돌리기", command=self.undo_deskew, pady=BTN_PADY,
+                  cursor="hand2", font=FNT).grid(row=0, column=0, sticky="ew", padx=(0, 2))
+        self.deskew_btn = tk.Button(auto_row, text="자동 보정", command=self.auto_deskew, pady=BTN_PADY,
                                     cursor="hand2", font=FNT)
-        self.deskew_btn.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.deskew_btn.grid(row=0, column=1, sticky="ew", padx=(2, 0))
+        self._auto_row = auto_row
+        # 자동 보정 때 DESKEW_MAX°를 넘게 기운 쪽 번호 (있을 때만 이 자리에 보인다, _show_skew_flags)
+        self._skew_flag_frame = tk.Frame(parent)
         rot90_row = tk.Frame(parent)
         rot90_row.pack(fill=tk.X, pady=(4, 12))
+        rot90_row.columnconfigure((0, 1), weight=1, uniform="half")
         tk.Button(rot90_row, text="왼쪽 90°", command=lambda: self.rotate_90(-90), pady=BTN_PADY,
-                  cursor="hand2", font=FNT).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
+                  cursor="hand2", font=FNT).grid(row=0, column=0, sticky="ew", padx=(0, 2))
         ref_btn = tk.Button(rot90_row, text="오른쪽 90°", command=lambda: self.rotate_90(90), pady=BTN_PADY,
                             cursor="hand2", font=FNT)
-        ref_btn.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0))
+        ref_btn.grid(row=0, column=1, sticky="ew", padx=(2, 0))
         # 선택창은 버튼과 기본 여백이 달라 더 낮게 나온다. 실제 높이를 재서 맞춘다
         parent.update_idletasks()
         gap = ref_btn.winfo_reqheight() - range_menu.winfo_reqheight()
@@ -1123,6 +1142,9 @@ class PDFLevelPreviewApp:
         self.thumbnail_cache.clear()
         self.preview_cache.clear()
         self.page_edits.clear()
+        self._deskew_prev.clear()
+        self._skew_flagged.clear()
+        self._show_skew_flags()
         self._last_fit_page = None
         self._thumb_dirty.clear()
         self._crop_before_edit = [0.0, 0.0, 0.0, 0.0]
@@ -1348,6 +1370,9 @@ class PDFLevelPreviewApp:
             text=f"p.{idx + 1}", font=THUMB_LABEL_FONT, fill="#000"
         )
         items.append(label_id)
+        if self.slots[idx][0] in self._skew_flagged:  # 파란 현재 페이지 테두리 바깥에
+            items.append(self.thumb_canvas.create_rectangle(
+                x - 6, y - 6, x + THUMB_W + 6, y + thumb_h + 6, outline=THUMB_SKEW_LINE, width=3))
 
         self._drawn_pages[idx] = items
 
@@ -1399,6 +1424,11 @@ class PDFLevelPreviewApp:
         idx = self._thumb_hit(event)
         if idx is None:
             return
+        if self.slots[idx][0] in self._skew_flagged:  # 많이 기운 페이지 표시는 누르면 없앤다
+            self._skew_flagged.discard(self.slots[idx][0])
+            self._thumb_dirty.add(idx)
+            self._schedule_thumb_redraw()
+            self._show_skew_flags()
         shift = event.state & 0x0001
         ctrl = event.state & 0x0004
         shrink = False
@@ -1680,6 +1710,7 @@ class PDFLevelPreviewApp:
         self._sel_anchor = current
         self._relayout_thumbs()
         self.select_page(current)
+        self._show_skew_flags()  # 쪽 번호가 바뀌었을 수 있다
 
     def _push_undo(self):
         self._undo_stack.append((list(self.slots), self.current_page, set(self._selected)))
@@ -2545,14 +2576,14 @@ class PDFLevelPreviewApp:
             p.start()
         self._deskew_procs = procs
         self._set_drag_mode("rotate")  # 선 편집을 끄고 돌린 결과를 보여 준다
-        self._poll_deskew(procs, res_q, which, len(jobs), [0, 0])
+        self._poll_deskew(procs, res_q, which, len(jobs), [0, 0, 0])
 
     def _poll_deskew(self, procs, res_q, which, total, count):
-        """자동 보정 결과를 받아 페이지에 넣는다. count = [받은 수, 못 찾은 수]"""
+        """자동 보정 결과를 받아 페이지에 넣는다. count = [받은 수, 못 찾은 수, DESKEW_MAX° 넘은 수]"""
         if procs is not self._deskew_procs:
             return  # 멈췄다 (다른 파일을 열었거나 덮어쓰기·창 닫기)
         alive = any(p.is_alive() for p in procs)
-        cur_changed = False
+        cur_changed = flagged = False
         try:
             while True:
                 uid, angle = res_q.get_nowait()
@@ -2561,6 +2592,14 @@ class PDFLevelPreviewApp:
                 if angle is None or idx is None:
                     count[1] += 1
                     continue
+                if abs(angle) > DESKEW_MAX:  # 각도는 넣지 않고 썸네일 빨간 테두리 + 쪽 번호 목록
+                    count[2] += 1
+                    self._skew_flagged.add(uid)
+                    self._thumb_dirty.add(idx)
+                    self._schedule_thumb_redraw()
+                    flagged = True
+                    continue
+                self._deskew_prev.setdefault(uid, self._page_edit(idx)["angle"])  # 두 번 돌려도 처음 값
                 self._set_page_edit(idx, angle=angle)
                 cur_changed |= idx == self.current_page
         except queue.Empty:
@@ -2568,16 +2607,74 @@ class PDFLevelPreviewApp:
         if cur_changed:
             self._sync_edit_panel()
             self.update_preview()
+        if flagged:
+            self._show_skew_flags()
         if count[0] < total and alive:
             self.deskew_btn.config(text=f"찾는 중 {count[0]}/{total}")
             self.root.after(100, lambda: self._poll_deskew(procs, res_q, which, total, count))
             return
         self._stop_deskew()
         skipped = total - count[0] + count[1]  # 프로세스가 죽어 못 받은 것도
-        msg = f"{self._range_label(which)} {total - skipped}쪽의 기울기를 맞췄습니다."
+        msg = f"{self._range_label(which)} {total - skipped - count[2]}쪽의 기울기를 맞췄습니다."
+        if count[2]:
+            msg += f" {DESKEW_MAX}°를 넘게 기운 {count[2]}쪽은 그대로 두고 빨간 테두리로 표시했습니다."
         if skipped:
             msg += f" 글자가 거의 없는 {skipped}쪽은 그대로 뒀습니다."
         self._show_toast(msg)
+
+    def _show_skew_flags(self):
+        """DESKEW_MAX°를 넘게 기운 쪽 번호를 [자동 보정] 줄 아래에 보여 준다 (누르면 그 페이지로). 없으면 숨긴다"""
+        frame = self._skew_flag_frame
+        for w in frame.winfo_children():
+            w.destroy()
+        pages = sorted(i for i in map(self._uid_index, self._skew_flagged) if i is not None)
+        if not pages:
+            frame.pack_forget()
+            return
+        head = tk.Label(frame, text=f"{DESKEW_MAX}° 넘음:", font=UI_FONT, fg=THUMB_SKEW_LINE, bg=frame["bg"])
+        head.grid(row=0, column=0, sticky="nw", padx=(0, 8))
+        # 한 줄에 들어가는 만큼 (글꼴 크기는 화면 배율에 따라 달라서 재서 정한다)
+        fnt = tkfont.Font(font=UI_FONT)
+        cell = fnt.measure("p.0000") + 8
+        cols = max(1, (self._auto_row.winfo_width() - fnt.measure(head["text"]) - 8) // cell)
+        for k, idx in enumerate(pages):
+            num = tk.Label(frame, text=f"p.{idx + 1}", font=UI_FONT, fg=THUMB_SKEW_LINE, bg=frame["bg"],
+                           cursor="hand2")
+            num.grid(row=k // cols, column=1 + k % cols, sticky="w", padx=(0, 8))
+            num.bind("<Button-1>", lambda e, i=idx: self._go_skew_flag(i))
+        frame.pack(fill=tk.X, pady=(4, 0), after=self._auto_row)
+        self._bind_settings_scroll(frame)  # 휠로 오른쪽 패널 스크롤
+
+    def _go_skew_flag(self, idx):
+        """많이 기운 쪽 번호를 누르면 그 페이지를 보여 준다 (빨간 테두리는 썸네일을 눌러야 없어진다)"""
+        if idx >= self._page_count:
+            return
+        self._selected = {idx}
+        self._sel_anchor = idx
+        self.select_page(idx)
+        self._thumb_see(idx)
+
+    def undo_deskew(self):
+        """목록 범위 페이지 중 자동 보정한 페이지의 기울기를 자동 보정 전 각도로 되돌린다.
+
+        자동 보정이 돌고 있으면 먼저 멈춘다 (안 그러면 뒤에 오는 결과가 되돌린 페이지를 다시 바꾼다).
+        """
+        if self.pdf_doc is None:
+            return
+        self._stop_deskew()
+        which = self.crop_range_var.get()
+        n = 0
+        for idx in self._range_pages(which):
+            prev = self._deskew_prev.pop(self.slots[idx][0], None)
+            if prev is not None:
+                self._set_page_edit(idx, angle=prev)
+                n += 1
+        if not n:
+            self._show_toast(f"{self._range_label(which)}에는 되돌릴 자동 보정이 없습니다.")
+            return
+        self._sync_edit_panel()
+        self.update_preview()
+        self._show_toast(f"{self._range_label(which)} {n}쪽의 기울기를 자동 보정 전으로 되돌렸습니다.")
 
     def _stop_deskew(self):
         """기울기 자동 보정 프로세스를 끝낸다 (PDF를 놓게)"""
