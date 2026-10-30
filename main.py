@@ -207,6 +207,17 @@ def _pt_to_mm(pt):
     return pt * 25.4 / 72
 
 
+def _roman(n):
+    """작은 로마 숫자 (1 → i, 14 → xiv). PDF 페이지 레이블 'r' 모양과 같다"""
+    out = ""
+    for value, sym in ((1000, "m"), (900, "cm"), (500, "d"), (400, "cd"), (100, "c"), (90, "xc"),
+                       (50, "l"), (40, "xl"), (10, "x"), (9, "ix"), (5, "v"), (4, "iv"), (1, "i")):
+        while n >= value:
+            out += sym
+            n -= value
+    return out
+
+
 def _clamp_margins(margins, w, h):
     """여백 [위, 아래, 좌, 우](pt)를 w×h 페이지 안에 가둔다. 남는 크기는 MIN_CROP_PT 이상"""
     top, bottom, left, right = (max(0.0, v) for v in margins)
@@ -514,6 +525,8 @@ class PDFLevelPreviewApp:
         self._deskew_procs = []  # 돌고 있는 기울기 자동 보정 프로세스 (마찬가지)
         self._deskew_prev = {}  # 페이지 uid -> 자동 보정 전 기울기 (되돌리기용)
         self._skew_flagged = set()  # DESKEW_MAX°를 넘게 기울어 그대로 둔 페이지 uid (썸네일 빨간 테두리)
+        # [로마자 표기]로 종이 1쪽이 된 페이지 uid (앞쪽은 i, ii …). None이면 쪽 번호 표기를 건드리지 않는다
+        self._label_start_uid = None
         self._pdf_path = None
         self._wanted_key = None
         self._pending_req = None  # 워커에 보낸 마지막 렌더 요청 (결과 대기 중)
@@ -986,6 +999,12 @@ class PDFLevelPreviewApp:
                   activebackground=SAVE_BTN_ACTIVE, activeforeground="white"
                   ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0))
 
+        # 쪽 번호 표기 (PDF 페이지 레이블): 보고 있는 페이지를 종이 1쪽으로, 앞쪽은 i, ii … (저장할 때 들어간다)
+        tk.Button(parent, text="로마자 표기 (이 쪽을 1쪽으로)", command=self.set_roman_labels, pady=BTN_PADY,
+                  cursor="hand2", font=FNT).pack(fill=tk.X, pady=(16, 0))
+        self.paper_number_label = tk.Label(parent, text="", font=UI_FONT_SMALL, fg="#666", anchor=tk.W)
+        self.paper_number_label.pack(fill=tk.X)
+
         tk.Button(parent, text="다른 이름으로 저장", command=self.save_edited_pdf,
                   padx=12, pady=BTN_PADY, cursor="hand2", font=FNT,
                   bg=SAVEAS_BTN_BG, fg="white", activebackground=SAVEAS_BTN_ACTIVE,
@@ -1145,6 +1164,17 @@ class PDFLevelPreviewApp:
         self._deskew_prev.clear()
         self._skew_flagged.clear()
         self._show_skew_flags()
+        self._label_start_uid = None
+        try:
+            labels = [(l["startpage"], l["style"], l["firstpagenum"], l["prefix"])
+                      for l in self.pdf_doc.get_page_labels()]
+        except Exception:  # 쪽 번호 표기가 망가진 파일
+            labels = []
+        # 이 도구가 넣은 모양(앞쪽 i, ii … + k쪽부터 1, 2 …)이면 이어서 보여 주고 저장 때도 다시 넣는다
+        if len(labels) == 2 and labels[0] == (0, "r", 1, "") and labels[1][1:] == ("D", 1, "") \
+                and 0 < labels[1][0] < len(self.slots):
+            self._label_start_uid = self.slots[labels[1][0]][0]
+        self._show_paper_numbers()
         self._last_fit_page = None
         self._thumb_dirty.clear()
         self._crop_before_edit = [0.0, 0.0, 0.0, 0.0]
@@ -1365,9 +1395,13 @@ class PDFLevelPreviewApp:
             )
             items.append(txt_id)
 
+        caption = f"p.{idx + 1}"
+        start = self._label_start()
+        if start:  # [로마자 표기]: 종이 쪽 번호도
+            caption += f" ({_roman(idx + 1) if idx < start else idx - start + 1})"
         label_id = self.thumb_canvas.create_text(
             x + THUMB_W // 2, y + thumb_h + 8, anchor=tk.N,
-            text=f"p.{idx + 1}", font=THUMB_LABEL_FONT, fill="#000"
+            text=caption, font=THUMB_LABEL_FONT, fill="#000"
         )
         items.append(label_id)
         if self.slots[idx][0] in self._skew_flagged:  # 파란 현재 페이지 테두리 바깥에
@@ -1711,6 +1745,7 @@ class PDFLevelPreviewApp:
         self._relayout_thumbs()
         self.select_page(current)
         self._show_skew_flags()  # 쪽 번호가 바뀌었을 수 있다
+        self._show_paper_numbers()
 
     def _push_undo(self):
         self._undo_stack.append((list(self.slots), self.current_page, set(self._selected)))
@@ -3028,6 +3063,34 @@ class PDFLevelPreviewApp:
         canvas.create_rectangle(x1, y0, ix1, y1, **shade)   # 우
         canvas.create_rectangle(x0, y0, x1, y1, outline="#1e90ff", width=2, tags="crop")
 
+    def set_roman_labels(self):
+        """보고 있는 페이지를 종이 1쪽으로: 앞쪽은 i, ii …, 이 페이지부터 1, 2 … (PDF 페이지 레이블, 저장할 때 넣는다).
+
+        첫 페이지에서 누르면 로마자 없이 1쪽부터 그대로가 된다 (표기를 없앨 때). 페이지 uid로 기억해서
+        앞에 페이지를 끼우거나 지워도 이 페이지가 1쪽이다.
+        """
+        if self.pdf_doc is None:
+            return
+        self._label_start_uid = self.slots[self.current_page][0]
+        self._edits_dirty = True
+        self._show_paper_numbers()
+        self._thumb_dirty.update(self._drawn_pages)  # 썸네일 아래 쪽 번호
+        self._schedule_thumb_redraw()
+        start = self.current_page
+        if start:
+            self._show_toast(f"쪽 번호 표기: p.1~{start} → i~{_roman(start)}, p.{start + 1} → 1 (저장할 때 들어갑니다)")
+        else:
+            self._show_toast("로마자 표기를 없앴습니다. 1쪽부터 그대로입니다 (저장할 때 들어갑니다)")
+
+    def _label_start(self):
+        """[로마자 표기]로 종이 1쪽이 된 페이지의 화면 위치. 안 정했거나 그 페이지를 지웠으면 None"""
+        return None if self._label_start_uid is None else self._uid_index(self._label_start_uid)
+
+    def _show_paper_numbers(self):
+        """[로마자 표기] 버튼 아래에 지금 표기를 적는다 (페이지를 끼우거나 지우면 로마자 쪽 수가 바뀐다)"""
+        start = self._label_start()
+        self.paper_number_label.config(text=f"p.1~{start} → i~{_roman(start)}, p.{start + 1} → 1" if start else "")
+
     def save_edited_pdf(self):
         """페이지 순서(삭제·붙여넣기·이동)와 회전/자르기를 반영해 저장. 같은 이름을 고르면 원본에 덮어쓴다"""
         if self.pdf_doc is None:
@@ -3053,6 +3116,14 @@ class PDFLevelPreviewApp:
                     e = self.page_edits.get(uid)
                     if e is not None:
                         _apply_page_edit(out[idx], e["angle"], e["rot"], e["crop"])
+                # [로마자 표기]: 앞쪽 i, ii …, start쪽부터 1, 2 … (첫 페이지면 1쪽부터 그대로).
+                # 순서를 바꾼 저장(select)은 파일에 있던 표기를 지우므로 마지막에 넣는다
+                start = self._label_start()
+                if start is not None:
+                    labels = [{"startpage": start, "prefix": "", "style": "D", "firstpagenum": 1}]
+                    if start:
+                        labels.insert(0, {"startpage": 0, "prefix": "", "style": "r", "firstpagenum": 1})
+                    out.set_page_labels(labels)
                 if same:
                     self._overwrite_original(src, out)
                 else:
@@ -3833,8 +3904,15 @@ def _insert_cover_into_file(target, img_bytes, at_end):
     tmp = target + SAVE_TMP_EXT
     doc = fitz.open(target)
     try:
+        labels = doc.get_page_labels()
         r = doc[-1 if at_end else 0].rect
         _add_cover_page(doc, -1 if at_end else 0, r.width, r.height, img_bytes)
+        # MuPDF는 맨 앞에 끼우면 표지에 쪽 번호 "1"을 따로 붙인다 (표기가 없던 파일도 "1, 1, 2 …",
+        # [로마자 표기] 파일은 "1, i, ii …"). 원래 표기를 한 칸씩 밀어 표지를 첫 구간에 넣는다 (없던 파일은 없게)
+        if not at_end:
+            for label in labels[1:]:
+                label["startpage"] += 1
+            doc.set_page_labels(labels)
         doc.save(tmp)
     finally:
         doc.close()
