@@ -939,7 +939,7 @@ class PDFLevelPreviewApp:
         # 격자 보기: 페이지 위에 가로세로 격자만 그린다 (회전·자르기와 무관)
         grid_row = tk.Frame(parent)
         grid_row.pack(fill=tk.X, pady=(16, 12))  # 아래를 띄워 회전 줄과 구분
-        tk.Checkbutton(grid_row, text="격자 보기", variable=self.grid_var,
+        tk.Checkbutton(grid_row, text="격자 보기 (F1)", variable=self.grid_var,
                        command=self._on_grid_toggle, cursor="hand2", font=FNT,
                        image=self._ind_tk['cb_off'], selectimage=self._ind_tk['cb_on'],
                        indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
