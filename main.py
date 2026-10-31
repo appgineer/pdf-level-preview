@@ -55,7 +55,7 @@ ROTATE_GRID_COLOR = "#00a0e0"
 # DESKEW_MAX°를 넘게 기운 페이지는 각도를 넣지 않고 썸네일에 빨간 테두리로 알린다 (크게 돌리면 모서리가 많이 잘린다)
 DESKEW_DPI = 150
 DESKEW_SEARCH = 20
-DESKEW_MAX = 5
+DESKEW_MAX = 2
 # 설정 파일의 자르기(mm) 자리를 보여주는 선 색 (미리보기 / 썸네일)
 CFG_CROP_LINE = "#e00000"
 # 눈에 띄어야 하는 버튼/선택창 색
@@ -878,6 +878,8 @@ class PDFLevelPreviewApp:
         self.root.bind("<Right>", lambda e: self._nudge_angle_key(e, +0.1))
         self.root.bind("<Down>",  lambda e: self._nudge_angle_key(e, -0.1))
         self.root.bind("<Up>",    lambda e: self._nudge_angle_key(e, +0.1))
+        # F1: 어느 구간에 있든(입력칸 안에서도) "격자 보기"를 켜고 끈다
+        self.root.bind("<F1>", lambda e: (self.grid_var.set(not self.grid_var.get()), self._on_grid_toggle()))
 
         # ── 저장된 레벨 리스트 ──
         self.saved_frame = tk.Frame(self.level_frame)
