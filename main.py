@@ -69,6 +69,7 @@ RANGE_COLORS = {"선택한 페이지": ("#0f8b99", "#0b6d78"),  # 청록
 # 다른 이름으로 저장: 초록, 흰 글씨
 SAVEAS_BTN_BG, SAVEAS_BTN_ACTIVE = "#3a9d5d", "#2f7f4c"
 CFG_SAVE_BG, CFG_SAVE_ACTIVE = "#7b4fc0", "#653da8"      # 설정 저장 (보라)
+DESKEW_BTN_BG, DESKEW_BTN_ACTIVE = "#8e44ad", "#763a91"  # 자동 보정 (붉은 보라, 짝수 범위색과 구별)
 BTN_PADY = 4  # 버튼·선택창 높이를 맞추는 세로 여백
 # 내장 이미지가 없는 페이지(벡터/텍스트)의 렌더 스케일. 1.0 = 72 DPI
 BASE_SCALE = 8  # 576 DPI
@@ -86,6 +87,11 @@ USED_DIRS_MAX = 20
 SAVE_TMP_GRACE = 60
 # 편집기 자르기 여백 순서 (화면 기준)
 CROP_SIDES = ("top", "bottom", "left", "right")
+# 설정 파일 구간 기본값 (자르기 전체·안함, 일반, OCR·분할 체크 안 함). config.json이 없을 때 이것과 다르면
+# [다른 이름으로 저장] 때 설정을 저장할지 묻는다 (저장하면 창이 닫혀 설정이 사라지므로)
+CONFIG_DEFAULT = {"crop_mm": {"top": 0, "bottom": 0, "left": 0, "right": 0}, "scan_type": "일반",
+                  "black_point": 0, "white_point": 255, "ocr": False, "ocr_language": [],
+                  "is_split": False, "split_method": "none", "split_page_ranges": "", "split_size_mb": 0}
 # 자르고 남는 최소 크기 (pt, 72pt = 25.4mm)
 MIN_CROP_PT = 36
 # 미리보기에서 자르기 선을 잡을 수 있는 거리 (선 양쪽 px)
@@ -591,6 +597,7 @@ class PDFLevelPreviewApp:
         self.split_page_ranges_var = tk.StringVar(value="")
         self.split_size_mb_var = tk.IntVar(value=0)
         self.split_range_text = None
+        self._config_saved = CONFIG_DEFAULT  # 마지막으로 불러오거나 저장한 config.json 값 (없으면 기본값)
         self.crop_edit_var = tk.BooleanVar(value=False)
         self.grid_var = tk.BooleanVar(value=True)
         self.crop_range_var = tk.StringVar(value="선택한 페이지")
@@ -967,7 +974,8 @@ class PDFLevelPreviewApp:
         tk.Button(auto_row, text="되돌리기", command=self.undo_deskew, pady=BTN_PADY,
                   cursor="hand2", font=FNT).grid(row=0, column=0, sticky="ew", padx=(0, 2))
         self.deskew_btn = tk.Button(auto_row, text="자동 보정", command=self.auto_deskew, pady=BTN_PADY,
-                                    cursor="hand2", font=FNT)
+                                    cursor="hand2", font=FNT, bg=DESKEW_BTN_BG, fg="white",
+                                    activebackground=DESKEW_BTN_ACTIVE, activeforeground="white")
         self.deskew_btn.grid(row=0, column=1, sticky="ew", padx=(2, 0))
         self._auto_row = auto_row
         # 자동 보정 때 DESKEW_MAX°를 넘게 기운 쪽 번호 (있을 때만 이 자리에 보인다, _show_skew_flags)
@@ -1204,7 +1212,11 @@ class PDFLevelPreviewApp:
         self._count_folder_pages(path)
         self._build_thumbnails()
         self._update_page_label()
-        self._load_config(path)
+        loaded = self._load_config(path)
+        try:
+            self._config_saved = self._config_dict() if loaded else CONFIG_DEFAULT
+        except ValueError:  # 파일에 이상한 값이 있으면 기본값과 비교
+            self._config_saved = CONFIG_DEFAULT
         self.update_preview()
 
     # ------------------------------------------------------------------ #
@@ -3123,6 +3135,15 @@ class PDFLevelPreviewApp:
         """페이지 순서(삭제·붙여넣기·이동)와 회전/자르기를 반영해 저장. 같은 이름을 고르면 원본에 덮어쓴다"""
         if self.pdf_doc is None:
             return
+        # 저장이 끝나면 창이 닫혀 설정 파일 구간 값이 사라지므로, [설정 저장]을 안 했으면 먼저 묻는다
+        if self._config_changed():
+            ans = messagebox.askyesnocancel(
+                "설정 파일", "설정 파일 구간을 바꾼 뒤 [설정 저장]을 하지 않았습니다.\n"
+                "config.json을 저장할까요?\n\n"
+                "예: 설정을 저장하고 PDF 저장\n아니요: 설정은 저장하지 않고 PDF 저장\n취소: 돌아가기",
+                parent=self.root)
+            if ans is None or (ans and not self._save_config()):
+                return
         src = self._pdf_path
         path = filedialog.asksaveasfilename(
             parent=self.root, title="다른 이름으로 저장", defaultextension=".pdf",
@@ -3433,14 +3454,51 @@ class PDFLevelPreviewApp:
         text.yview_moveto(0)
 
     def _save_config(self):
+        """config.json 저장. 저장했으면 True"""
         if not self.pdf_doc:
-            return
+            return False
+        try:
+            config = self._config_dict()
+        except ValueError as e:
+            messagebox.showwarning("설정 저장", str(e), parent=self.root)
+            return False
+        pdf_dir = os.path.dirname(self.pdf_doc.name)
+
+        config_path = os.path.join(pdf_dir, "config.json")
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, ensure_ascii=False, indent=2)
+        self._config_saved = config
+
+        self._show_toast("설정이 생성되었습니다.")
+        return True
+
+    def _config_changed(self):
+        """설정 파일 구간이 마지막으로 불러오거나 저장한 config.json(없으면 기본값)과 다른지.
+        화면에 안 보이는 값(일반일 때 레벨, OCR을 끈 때 언어)은 보지 않는다"""
+        def visible(cfg):
+            cfg = dict(cfg)
+            if cfg["scan_type"] != "고급":
+                cfg["black_point"], cfg["white_point"] = 0, 255
+            if not cfg["ocr"]:
+                cfg["ocr_language"] = []
+            return cfg
+        try:
+            return visible(self._config_dict()) != visible(self._config_saved)
+        except ValueError:  # 숫자 칸이 잘못됨 = 바꾼 것
+            return True
+
+    def _config_dict(self):
+        """[설정 저장]이 config.json에 쓰는 값. 숫자 칸이 잘못됐으면 ValueError(안내 문구)"""
         crop_sides = self._crop_cfg_sides()
         if crop_sides is None:
-            messagebox.showwarning("설정 저장", "자르기 값(mm)을 숫자로 입력하세요.", parent=self.root)
-            return
+            raise ValueError("자르기 값(mm)을 숫자로 입력하세요.")
         crop_mm = dict(zip(("top", "bottom", "left", "right"), crop_sides))
-        pdf_dir = os.path.dirname(self.pdf_doc.name)
+        split_size_mb = 0
+        if self.is_split_var.get() and self.split_method_var.get() == "size":
+            try:
+                split_size_mb = int(self.split_size_mb_var.get())
+            except (tk.TclError, ValueError):
+                raise ValueError("분할 크기(MB)를 숫자로 입력하세요.")
 
         # 선택된 레벨 프리셋 사용, 없으면 현재 슬라이더 값
         idx = self.selected_level_idx.get()
@@ -3453,7 +3511,7 @@ class PDFLevelPreviewApp:
             except (tk.TclError, ValueError):
                 black, white = 0, 255
 
-        config = {
+        return {
             "crop_mm": crop_mm,
             "scan_type": self.scan_type_var.get(),
             "black_point": black,
@@ -3463,14 +3521,8 @@ class PDFLevelPreviewApp:
             "is_split": self.is_split_var.get(),
             "split_method": self.split_method_var.get() if self.is_split_var.get() else "none",
             "split_page_ranges": _normalize_page_ranges(self.split_range_text.get("1.0", tk.END)) if self.is_split_var.get() and self.split_method_var.get() == "page" and self.split_range_text else "",
-            "split_size_mb": int(self.split_size_mb_var.get()) if self.is_split_var.get() and self.split_method_var.get() == "size" else 0,
+            "split_size_mb": split_size_mb,
         }
-
-        config_path = os.path.join(pdf_dir, "config.json")
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(config, f, ensure_ascii=False, indent=2)
-
-        self._show_toast("설정이 생성되었습니다.")
 
     def _show_toast(self, text):
         """잠깐 떴다가 자동으로 닫히는 안내창"""
@@ -3489,14 +3541,15 @@ class PDFLevelPreviewApp:
         self.root.after(1000, popup.destroy)
 
     def _load_config(self, pdf_path):
+        """PDF 폴더의 config.json을 설정 파일 구간에 넣는다. 넣었으면 True"""
         config_path = os.path.join(os.path.dirname(pdf_path), "config.json")
         if not os.path.exists(config_path):
-            return
+            return False
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 cfg = json.load(f)
         except (json.JSONDecodeError, OSError):
-            return
+            return False
 
         # 자르기 설정: 네 방향이 0/1/2로 같으면 "전체"의 해당 버튼, 그 밖은 "각각". 없거나 이상한 값은 안함
         raw = cfg.get("crop_mm", 0)
@@ -3555,6 +3608,7 @@ class PDFLevelPreviewApp:
 
         # UI 상태 갱신
         self._toggle_split()
+        return True
 
     # ------------------------------------------------------------------ #
     # Slider / entry callbacks
