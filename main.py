@@ -887,6 +887,9 @@ class PDFLevelPreviewApp:
         self.root.bind("<Up>",    lambda e: self._nudge_angle_key(e, +0.1))
         # F1: 어느 구간에 있든(입력칸 안에서도) "격자 보기"를 켜고 끈다
         self.root.bind("<F1>", lambda e: (self.grid_var.set(not self.grid_var.get()), self._on_grid_toggle()))
+        # Ctrl+W: 창 닫기 (오른쪽 위 X와 같다). 한글 입력 상태나 CapsLock이어도 되게 Windows 키 코드로도 본다
+        self.root.bind("<Control-KeyPress>",
+                       lambda e: self._on_close() if e.keycode == 87 or e.keysym.lower() == "w" else None)
 
         # ── 저장된 레벨 리스트 ──
         self.saved_frame = tk.Frame(self.level_frame)
