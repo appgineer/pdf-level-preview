@@ -48,8 +48,7 @@ SECTION_LINE_W = 2
 # 드래그 회전: 마우스를 좌우로 이 픽셀만큼 끌 때마다 0.1°씩 (오른쪽으로 = 오른쪽/시계방향).
 # 값이 작을수록 빨리 돈다 (2 = 1°에 20px)
 ROTATE_DRAG_PX = 2
-# 미리보기 페이지에 겹쳐 그리는 바둑판 격자 (화면 px 간격, 색). 글줄이 격자와 나란하면 수평.
-# 캔버스 선이 아니라 화면용 그림에 직접 그린다(_paint_grid)
+# 드래그 회전 중 미리보기에 겹쳐 그리는 바둑판 격자 (화면 px 간격, 색). 글줄이 격자와 나란하면 수평
 ROTATE_GRID_PX = 20
 ROTATE_GRID_COLOR = "#00a0e0"
 # 기울기 자동 보정(_detect_skew): 이 해상도(dpi)로 그려 글줄을 보고 ±DESKEW_SEARCH° 안에서 찾는다 (ABBYY도 20°까지).
@@ -278,15 +277,6 @@ def _rotate_image(img, angle):
     """미리보기/썸네일용 기울기 보정. angle은 시계방향 양수(°), 크기 유지, 빈 모서리는 흰색"""
     # PIL은 반시계방향이 양수
     return img.rotate(-angle, resample=Image.BICUBIC, fillcolor="white")
-
-
-def _paint_grid(img, left=0, top=0):
-    """화면용 그림 img에 가로세로 격자를 직접 그린다. left, top = img 왼쪽 위가 페이지 안에서 어디인지 (일부만 그린 그림일 때)"""
-    draw = ImageDraw.Draw(img)
-    for x in range(ROTATE_GRID_PX, left + img.width, ROTATE_GRID_PX):
-        draw.line([(x - left, 0), (x - left, img.height)], fill=ROTATE_GRID_COLOR)
-    for y in range(ROTATE_GRID_PX, top + img.height, ROTATE_GRID_PX):
-        draw.line([(0, y - top), (img.width, y - top)], fill=ROTATE_GRID_COLOR)
 
 
 def _deskew_page(page, angle):
@@ -2376,9 +2366,6 @@ class PDFLevelPreviewApp:
         # [적용] 뒤에는 저장될 모양대로 남는 부분만 보여준다 (기울기 보정 뒤 자르기 = 저장 순서)
         cut = self._preview_cut_box()
         img = self.current_img.crop(cut) if cut else self.current_img
-        if self.grid_var.get():  # current_img는 깨끗하게 둔다 (끄거나 돌릴 때 다시 쓴다)
-            img = img.copy()
-            _paint_grid(img)
         photo = ImageTk.PhotoImage(img)
         self.preview_photo = photo
 
@@ -2402,6 +2389,7 @@ class PDFLevelPreviewApp:
         self._img_origin = (x0 - cut[0], y0 - cut[1]) if cut else (x0, y0)
         self._draw_crop_overlay()
         self._draw_cfg_crop_lines()
+        self._draw_rotate_grid()
         # 그사이 각도가 더 바뀌었으면(←/→ 연타, 드래그 중) 예전 각도 화면으로 튀지 않게 바로 덮는다
         self._draw_quick_rotation()
 
@@ -2829,7 +2817,20 @@ class PDFLevelPreviewApp:
 
     def _on_grid_toggle(self):
         self.preview_canvas.config(cursor="")
-        self._draw_preview()  # 격자는 화면용 그림에 들어가므로 다시 그린다
+        self._draw_rotate_grid()
+
+    def _draw_rotate_grid(self):
+        """"격자 보기"가 켜져 있으면 페이지 위에 가로세로 격자. 돌지 않는 기준선이라 기울기를 맞춰 볼 수 있다 (선 편집 중에도)"""
+        canvas = self.preview_canvas
+        canvas.delete("grid")
+        if not self.grid_var.get() or self.current_img is None:
+            return
+        x0, y0, x1, y1 = self._img_clip
+        for x in range(x0 + ROTATE_GRID_PX, x1, ROTATE_GRID_PX):
+            canvas.create_line(x, y0, x, y1, fill=ROTATE_GRID_COLOR, tags="grid")
+        for y in range(y0 + ROTATE_GRID_PX, y1, ROTATE_GRID_PX):
+            canvas.create_line(x0, y, x1, y, fill=ROTATE_GRID_COLOR, tags="grid")
+        canvas.tag_raise("crop")  # 자르기 선/박스는 격자 위에
 
     def _start_rotate_drag(self, event):
         if self.current_img is None or self._shown_key is None or self._shown_key[0] != self._cur_uid():
@@ -2894,12 +2895,11 @@ class PDFLevelPreviewApp:
                 -sin, cos, -dx * sin + dy * cos + cy - oy)
         quick = img.transform((rx1 - rx0, ry1 - ry0), Image.AFFINE, data,
                               resample=resample, fillcolor="white")
-        if self.grid_var.get():  # 페이지만 돌고 격자는 돌지 않는 기준선이라 돌린 뒤에 그린다
-            _paint_grid(quick, rx0 - px0, ry0 - py0)
         self._rotate_drag_photo = ImageTk.PhotoImage(quick)
         canvas.delete("rotdrag")
         canvas.create_image(rx0, ry0, anchor=tk.NW, image=self._rotate_drag_photo, tags="rotdrag")
         canvas.tag_raise("crop")  # 자르기 선은 수평 기준선으로 그대로 보이게
+        canvas.tag_raise("grid")
 
     def _end_rotate_drag(self):
         if self._rotate_redraw_id is not None:
@@ -2929,6 +2929,7 @@ class PDFLevelPreviewApp:
         self.preview_canvas.config(cursor="")
         if was_edit != (mode == "crop"):
             self._refresh_preview()  # 선 화면 ↔ 잘린 결과
+        self._draw_rotate_grid()
 
     def _on_crop_edit_toggle(self):
         self.preview_canvas.config(cursor="")
