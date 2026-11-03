@@ -55,7 +55,7 @@ ROTATE_GRID_COLOR = "#00a0e0"
 # DESKEW_MAX°를 넘게 기운 페이지는 각도를 넣지 않고 썸네일에 빨간 테두리로 알린다 (크게 돌리면 모서리가 많이 잘린다)
 DESKEW_DPI = 150
 DESKEW_SEARCH = 20
-DESKEW_MAX = 2
+DESKEW_MAX = 1
 # 설정 파일의 자르기(mm) 자리를 보여주는 선 색 (미리보기 / 썸네일)
 CFG_CROP_LINE = "#e00000"
 # 눈에 띄어야 하는 버튼/선택창 색
