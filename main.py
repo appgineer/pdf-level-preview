@@ -3509,7 +3509,7 @@ class PDFLevelPreviewApp:
             return True
 
     def _config_dict(self):
-        """[설정 저장]이 config.json에 쓰는 값. 숫자 칸이 잘못됐으면 ValueError(안내 문구)"""
+        """[설정 저장]이 config.json에 쓰는 값. 숫자 칸이 잘못됐거나 OCR 언어가 없으면 ValueError(안내 문구)"""
         crop_sides = self._crop_cfg_sides()
         if crop_sides is None:
             raise ValueError("자르기 값(mm)을 숫자로 입력하세요.")
@@ -3520,6 +3520,9 @@ class PDFLevelPreviewApp:
                 split_size_mb = int(self.split_size_mb_var.get())
             except (tk.TclError, ValueError):
                 raise ValueError("분할 크기(MB)를 숫자로 입력하세요.")
+        ocr_language = [name for name, var in self.ocr_vars.items() if var.get()]
+        if self.ocr_enabled_var.get() and not ocr_language:
+            raise ValueError("OCR을 체크했는데 언어가 없습니다.\nOCR 언어를 하나 이상 체크하세요.")
 
         # 선택된 레벨 프리셋 사용, 없으면 현재 슬라이더 값
         idx = self.selected_level_idx.get()
@@ -3538,7 +3541,7 @@ class PDFLevelPreviewApp:
             "black_point": black,
             "white_point": white,
             "ocr": self.ocr_enabled_var.get(),
-            "ocr_language": [name for name, var in self.ocr_vars.items() if var.get()],
+            "ocr_language": ocr_language,
             "is_split": self.is_split_var.get(),
             "split_method": self.split_method_var.get() if self.is_split_var.get() else "none",
             "split_page_ranges": _normalize_page_ranges(self.split_range_text.get("1.0", tk.END)) if self.is_split_var.get() and self.split_method_var.get() == "page" and self.split_range_text else "",
