@@ -98,6 +98,8 @@ MIN_CROP_PT = 36
 CROP_GRAB_PX = 6
 # 썸네일: 선택된 칸 배경색(연파랑) / 드래그로 옮길 때 끼워 넣을 자리 선 색
 THUMB_SEL_BG = "#cfe0fb"
+# 미리보기·썸네일 바탕 (진회색). 흰 종이와 여백이 잘 구별된다
+PREVIEW_BG = "#666"
 THUMB_DROP_LINE = "#e00000"
 # 썸네일: 지금 미리보기에 보이는 페이지 테두리 색 (파랑. 설정 파일 자르기의 빨간 선과 안 헷갈리게)
 THUMB_CUR_LINE = "#1f6fd0"
@@ -674,7 +676,7 @@ class PDFLevelPreviewApp:
 
         # 커서를 "arrow"로 못 박아 둔다. 비워 두면(Windows) 옆 경계선(sash)의 좌우 화살표 커서가 넘어와 남는다
         # highlightthickness=0: Windows 기본 포커스 테두리(검은 선)를 없앤다. 포커스는 구간 빨간 테두리로 보인다
-        self.thumb_canvas = tk.Canvas(left, bg="#f0f0f0", cursor="arrow", highlightthickness=0)
+        self.thumb_canvas = tk.Canvas(left, bg=PREVIEW_BG, cursor="arrow", highlightthickness=0)
         thumb_vscroll = ttk.Scrollbar(left, orient=tk.VERTICAL, command=self.thumb_canvas.yview)
         def _on_thumb_yscroll(*args):
             thumb_vscroll.set(*args)
@@ -728,7 +730,7 @@ class PDFLevelPreviewApp:
         # highlightthickness=0: 포커스 테두리(Windows 기본 2px)가 있으면 실제 보이는 칸이 winfo 크기보다 작아서
         # 맞춤 화면에서도 그 두께만큼 위아래·좌우로 조금씩 스크롤된다. 포커스는 구간 빨간 테두리로 보인다
         self.preview_canvas = tk.Canvas(
-            preview_frame, bg="#666", highlightthickness=0,
+            preview_frame, bg=PREVIEW_BG, highlightthickness=0,
             yscrollcommand=prev_vscroll.set,
             xscrollcommand=prev_hscroll.set
         )
@@ -1378,6 +1380,10 @@ class PDFLevelPreviewApp:
         page = self.slots[idx][1:]
         if page in self.thumbnail_cache:
             img = self.thumbnail_cache[page]
+            # 레벨도 가운데 미리보기와 같게 (설정 파일의 검은색·흰색, 저장할 PDF에는 안 들어간다)
+            black, white = self._levels() or (0, 255)
+            if (black, white) != (0, 255):
+                img = apply_levels(img, black, white)
             # 썸네일도 저장될 모양 그대로: 기울기 보정 → 자르기 → 셀에 맞추기
             e = self._page_edit(idx)
             if e["rot"]:
@@ -2284,17 +2290,22 @@ class PDFLevelPreviewApp:
     # ------------------------------------------------------------------ #
     # Preview update & center drawing
     # ------------------------------------------------------------------ #
-    def update_preview(self):
-        if self.pdf_doc is None:
-            return
+    def _levels(self):
+        """미리보기·썸네일에 쓰는 레벨 (검은색, 흰색). 입력 중이라 숫자가 아니면 None"""
         try:
             black = int(self.black_var.get())
             white = int(self.white_var.get())
         except (tk.TclError, ValueError):
-            return
+            return None
+        return max(0, min(255, black)), max(0, min(255, white))
 
-        black = max(0, min(255, black))
-        white = max(0, min(255, white))
+    def update_preview(self):
+        if self.pdf_doc is None:
+            return
+        levels = self._levels()
+        if levels is None:
+            return
+        black, white = levels
         zoom_pct = self._current_zoom_pct()
         # 맞춤 모드는 캔버스 크기에 따라 결과가 달라지므로 키에 포함.
         # 둘레 여백을 뺀 영역에 맞춰야 페이지 전체와 위아래 여백이 보이고 스크롤이 안 생긴다
@@ -3465,6 +3476,13 @@ class PDFLevelPreviewApp:
         except ValueError as e:
             messagebox.showwarning("설정 저장", str(e), parent=self.root)
             return False
+        if config["scan_type"] == "고급":  # 레벨을 안 맞추고 저장하는 실수를 막는다
+            defaults = [f"{name} {value}" for name, value, default in
+                        (("검은색", config["black_point"], 0), ("흰색", config["white_point"], 255)) if value == default]
+            if defaults and not messagebox.askyesno(
+                    "설정 저장", f"스캔타입이 고급인데 {' · '.join(defaults)}(기본값)입니다.\n이대로 저장할까요?",
+                    parent=self.root):
+                return False
         pdf_dir = os.path.dirname(self.pdf_doc.name)
 
         config_path = os.path.join(pdf_dir, "config.json")
@@ -3619,7 +3637,14 @@ class PDFLevelPreviewApp:
     def _on_var_change(self, *_):
         if hasattr(self, "_var_after_id"):
             self.root.after_cancel(self._var_after_id)
-        self._var_after_id = self.root.after(150, self.update_preview)
+        self._var_after_id = self.root.after(150, self._on_levels_change)
+
+    def _on_levels_change(self):
+        """검은색·흰색 값이 바뀌면 가운데 미리보기와 보이는 썸네일을 그 레벨로 다시 그린다"""
+        self.update_preview()
+        if self._levels() is not None:
+            self._thumb_dirty.update(self._drawn_pages)
+            self._schedule_thumb_redraw()
 
     def _nudge(self, var, delta):
         try:
