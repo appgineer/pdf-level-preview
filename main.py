@@ -546,7 +546,6 @@ class PDFLevelPreviewApp:
         self._thumb_generation = 0
         self._thumb_procs = set()  # 돌고 있는 썸네일 프로세스 (닫을 때 끝내야 PDF를 놓는다)
         self._deskew_procs = []  # 돌고 있는 기울기 자동 보정 프로세스 (마찬가지)
-        self._deskew_prev = {}  # 페이지 uid -> 자동 보정 전 기울기 (되돌리기용)
         self._skew_flagged = set()  # DESKEW_MAX°를 넘게 기울어 그대로 둔 페이지 uid (썸네일 빨간 테두리)
         # [로마자 표기]로 종이 1쪽이 된 페이지 uid (앞쪽은 i, ii …). None이면 쪽 번호 표기를 건드리지 않는다
         self._label_start_uid = None
@@ -564,6 +563,9 @@ class PDFLevelPreviewApp:
         self._saved_crop_box = None  # (위, 좌, 가로, 세로) pt, 크기 맞춤용. 다른 PDF를 열어도 유지
         self._last_fit_page = None  # 마지막으로 [저장 크기로 자르기]를 누른 페이지
         self._last_fit_pos = None   # 그 페이지 박스의 (위, 좌) pt. 다음 [저장 크기로 자르기]가 이어받는다
+        # [저장 크기 불러오기]로 박스를 놓고 아직 [적용]하지 않은 페이지 uid. 다른 페이지로 가면 되돌리고 저장에도 안 넣는다
+        self._pending_fit_uid = None
+        self._pressed_edit_box = False  # 오른쪽 패널에서 마지막으로 누른 곳이 편집 구간인지 (Enter = [적용])
         self._thumb_dirty = set()   # 편집값이 바뀌어 다시 그릴 썸네일
         self._thumb_redraw_id = None
         self._edits_dirty = False
@@ -828,6 +830,7 @@ class PDFLevelPreviewApp:
         edit_box.pack(fill=tk.X, padx=8)  # 좌우 여백
         self._section_header(edit_box, "편집", SECTION_EDIT_HEAD, first=True)
         self._build_edit_panel(edit_box)
+        self._edit_box = edit_box
 
         # ── 구간 2: 설정 파일 (config.json, 자동화 프로그램이 읽는다) ──
         config_box = tk.Frame(inner, highlightthickness=SECTION_LINE_W, padx=8, pady=8,
@@ -870,7 +873,7 @@ class PDFLevelPreviewApp:
         self.white_entry = tk.Entry(r_white, textvariable=self.white_var, width=6, font=FNT)
         self.white_entry.pack(side=tk.LEFT, padx=6)
 
-        tk.Button(self.level_frame, text="확인", command=self.add_level, padx=10, pady=2,
+        tk.Button(self.level_frame, text="비교옵션 추가", command=self.add_level, padx=10, pady=2,
                   cursor="hand2", font=FNT).pack(fill=tk.X)
 
         self.black_entry.bind("<Up>",   lambda e: self._nudge(self.black_var, +1))
@@ -880,8 +883,7 @@ class PDFLevelPreviewApp:
         self.black_var.trace_add("write", self._on_var_change)
         self.white_var.trace_add("write", self._on_var_change)
         # 분할 범위 입력칸(Text)의 줄바꿈 Enter와 편집/자르기 설정 입력칸의 Enter는 레벨 추가로 보내지 않는다
-        self.root.bind("<Return>", lambda e: None if isinstance(e.widget, tk.Text) or e.widget in self._edit_entries
-                       else self.add_level())
+        self.root.bind("<Return>", self._on_return)
         # "선 편집"이 꺼져 있으면 입력칸 밖에서도 ←/→·↑/↓로 0.1°씩 돌린다 (→ ↑ = 오른쪽, 입력칸 안에서는 글자 커서 이동)
         self.root.bind("<Left>",  lambda e: self._nudge_angle_key(e, -0.1))
         self.root.bind("<Right>", lambda e: self._nudge_angle_key(e, +0.1))
@@ -957,12 +959,16 @@ class PDFLevelPreviewApp:
                        indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
                        selectcolor=self._bg_color).pack(side=tk.LEFT)
 
-        # 회전 (기울기 보정, °). 페이지마다 따로. + 오른쪽 / - 왼쪽, ←/→로 0.1°씩
+        # 회전 (기울기 보정, °). 페이지마다 따로. + 오른쪽 / - 왼쪽, ←/→로 0.1°씩.
+        # 같은 줄 오른쪽 칸에 [자동 보정] (아래 [왼쪽 90°] [오른쪽 90°]와 같은 너비 두 칸(uniform)이라 위아래가 맞는다)
         rot_row = tk.Frame(parent)
         rot_row.pack(fill=tk.X, pady=(4, 0))
-        tk.Label(rot_row, text="회전 (°)", font=FNT).pack(side=tk.LEFT)
+        rot_row.columnconfigure((0, 1), weight=1, uniform="half")
+        angle_box = tk.Frame(rot_row)
+        angle_box.grid(row=0, column=0, sticky="w")
+        tk.Label(angle_box, text="회전 (°)", font=FNT).pack(side=tk.LEFT)
         self.angle_var = tk.StringVar(value="0")
-        angle_entry = tk.Entry(rot_row, textvariable=self.angle_var, width=6, font=FNT)
+        angle_entry = tk.Entry(angle_box, textvariable=self.angle_var, width=6, font=FNT)
         angle_entry.pack(side=tk.LEFT, padx=6)
         self.angle_var.trace_add("write", self._on_angle_var_change)
         # 좌/우 화살표로 0.1°씩 (오른쪽 = +, 시계방향)
@@ -971,18 +977,12 @@ class PDFLevelPreviewApp:
         angle_entry.bind("<Up>",    lambda e: self._nudge_angle(+0.1))
         angle_entry.bind("<Down>",  lambda e: self._nudge_angle(-0.1))
         self._edit_entries = [angle_entry]
-        # [되돌리기] [자동 보정] / [왼쪽 90°] [오른쪽 90°]: 두 줄 모두 같은 너비 두 칸(uniform)이라 위아래 버튼이 맞는다.
-        # 자동 보정은 목록 범위 페이지마다 글줄을 보고 기울기를 넣고, 되돌리기는 자동 보정 전 각도로
-        auto_row = tk.Frame(parent)
-        auto_row.pack(fill=tk.X, pady=(4, 0))
-        auto_row.columnconfigure((0, 1), weight=1, uniform="half")
-        tk.Button(auto_row, text="되돌리기", command=self.undo_deskew, pady=BTN_PADY,
-                  cursor="hand2", font=FNT).grid(row=0, column=0, sticky="ew", padx=(0, 2))
-        self.deskew_btn = tk.Button(auto_row, text="자동 보정", command=self.auto_deskew, pady=BTN_PADY,
+        # [자동 보정]: 목록 범위 페이지마다 글줄을 보고 기울기를 넣는다
+        self.deskew_btn = tk.Button(rot_row, text="자동 보정", command=self.auto_deskew, pady=BTN_PADY,
                                     cursor="hand2", font=FNT, bg=DESKEW_BTN_BG, fg="white",
                                     activebackground=DESKEW_BTN_ACTIVE, activeforeground="white")
         self.deskew_btn.grid(row=0, column=1, sticky="ew", padx=(2, 0))
-        self._auto_row = auto_row
+        self._auto_row = rot_row  # 1° 넘은 쪽 번호 목록이 이 줄 바로 아래에 붙는다
         # 자동 보정 때 DESKEW_MAX°를 넘게 기운 쪽 번호 (있을 때만 이 자리에 보인다, _show_skew_flags)
         self._skew_flag_frame = tk.Frame(parent)
         rot90_row = tk.Frame(parent)
@@ -1011,6 +1011,7 @@ class PDFLevelPreviewApp:
         grid = tk.Frame(parent)
         grid.pack(anchor=tk.W)
         self.crop_vars = {}
+        self._crop_entries = []  # Enter = [적용]
         for i, (side, text) in enumerate(zip(CROP_SIDES, ("위", "아래", "좌", "우"))):
             row, col = divmod(i, 2)
             tk.Label(grid, text=text, font=FNT).grid(row=row, column=col * 2, sticky=tk.E,
@@ -1025,6 +1026,7 @@ class PDFLevelPreviewApp:
             entry.bind("<Down>",  lambda e, s=side: self._nudge_crop(s, -1))
             self.crop_vars[side] = var
             self._edit_entries.append(entry)
+            self._crop_entries.append(entry)
         tk.Button(parent, text="현재 크기 저장", command=self.save_crop_size, pady=BTN_PADY,
                   cursor="hand2", font=FNT).pack(fill=tk.X, pady=(4, 0))
         self.saved_size_label = tk.Label(parent, text="", font=UI_FONT_SMALL, fg="#666", anchor=tk.W)
@@ -1197,13 +1199,13 @@ class PDFLevelPreviewApp:
         self.thumbnail_cache.clear()
         self.preview_cache.clear()
         self.page_edits.clear()
-        self._deskew_prev.clear()
         self._skew_flagged.clear()
         self._show_skew_flags()
         # [로마자 표기]로 넣은 표기면 이어서 보여 주고 저장 때도 다시 넣는다
         k = _roman_count(self.pdf_doc)
         self._label_start_uid = self.slots[k][0] if 0 < k < len(self.slots) else None
         self._last_fit_page = None
+        self._pending_fit_uid = None
         self._thumb_dirty.clear()
         self._crop_before_edit = [0.0, 0.0, 0.0, 0.0]
         self._edits_dirty = False
@@ -1662,12 +1664,15 @@ class PDFLevelPreviewApp:
     # Page selection
     # ------------------------------------------------------------------ #
     def select_page(self, page_idx):
+        if self._pending_fit_uid is not None and self.slots[page_idx][0] != self._pending_fit_uid:
+            self._discard_pending_fit()
         if page_idx not in self._selected:
             self._selected = {page_idx}
             self._sel_anchor = page_idx
         self.current_page = page_idx
         self._update_page_label()
-        self._crop_before_edit = self._page_edit(page_idx)["crop"]
+        if self.slots[page_idx][0] != self._pending_fit_uid:  # 같은 페이지를 다시 눌러도 불러오기 전 값은 지킨다
+            self._crop_before_edit = self._page_edit(page_idx)["crop"]
         if self.crop_edit_var.get():
             # 다른 페이지는 저장될 모양(잘린 결과)으로 본다. 다시 만지면 선 편집이 켜진다
             self.crop_edit_var.set(False)
@@ -1752,8 +1757,21 @@ class PDFLevelPreviewApp:
         name = self._region_of(event.widget)
         if name is None or isinstance(event.widget, str):  # 메뉴 복제본 등은 이름(str)으로 온다
             return
+        # 오른쪽은 빈 곳·버튼을 눌러도 포커스가 패널 전체로 가서, Enter가 어느 구간 것인지 여기서 기억한다
+        path, box = str(event.widget), str(self._edit_box)
+        self._pressed_edit_box = path == box or path.startswith(box + ".")
         if event.widget.winfo_class() not in ("Entry", "TEntry", "Text", "TCombobox", "Spinbox"):
             self._regions[name][1].focus_set()
+
+    def _on_return(self, event):
+        """Enter: 편집 쪽(왼쪽 썸네일·가운데 미리보기·편집 구간·자르기 칸)이면 [적용], 설정 파일 구간이면 레벨 추가.
+        분할 범위 칸(줄 바꿈)·회전 칸·설정 자르기 칸에서는 아무것도 안 한다"""
+        w = event.widget
+        if (w in self._crop_entries or w in (self.thumb_canvas, self.preview_canvas)
+                or (w is self._settings_canvas and self._pressed_edit_box)):
+            self.apply_crop_range()
+        elif not (isinstance(w, tk.Text) or w in self._edit_entries):
+            self.add_level()
 
     def _draw_focus_region(self):
         try:
@@ -2686,7 +2704,6 @@ class PDFLevelPreviewApp:
                     self._schedule_thumb_redraw()
                     flagged = True
                     continue
-                self._deskew_prev.setdefault(uid, self._page_edit(idx)["angle"])  # 두 번 돌려도 처음 값
                 self._set_page_edit(idx, angle=angle)
                 cur_changed |= idx == self.current_page
         except queue.Empty:
@@ -2741,27 +2758,6 @@ class PDFLevelPreviewApp:
         self.select_page(idx)
         self._thumb_see(idx)
 
-    def undo_deskew(self):
-        """목록 범위 페이지 중 자동 보정한 페이지의 기울기를 자동 보정 전 각도로 되돌린다.
-
-        자동 보정이 돌고 있으면 먼저 멈춘다 (안 그러면 뒤에 오는 결과가 되돌린 페이지를 다시 바꾼다).
-        """
-        if self.pdf_doc is None:
-            return
-        self._stop_deskew()
-        which = self.crop_range_var.get()
-        n = 0
-        for idx in self._range_pages(which):
-            prev = self._deskew_prev.pop(self.slots[idx][0], None)
-            if prev is not None:
-                self._set_page_edit(idx, angle=prev)
-                n += 1
-        if not n:
-            self._show_toast(f"{self._range_label(which)}에는 되돌릴 자동 보정이 없습니다.")
-            return
-        self._sync_edit_panel()
-        self.update_preview()
-        self._show_toast(f"{self._range_label(which)} {n}쪽의 기울기를 자동 보정 전으로 되돌렸습니다.")
 
     def _stop_deskew(self):
         """기울기 자동 보정 프로세스를 끝낸다 (PDF를 놓게)"""
@@ -2988,6 +2984,7 @@ class PDFLevelPreviewApp:
             self._set_page_edit(self.current_page, crop=self._crop_before_edit)
             self._sync_edit_panel()
         self._crop_before_edit = self._page_edit(self.current_page)["crop"]
+        self._pending_fit_uid = None  # [저장 크기 불러오기]의 박스도 이제 확정
         self.crop_edit_var.set(False)  # 선 편집이 꺼지면 잘린 결과가 보인다
         self.preview_canvas.config(cursor="")
         self._refresh_preview()
@@ -3014,6 +3011,7 @@ class PDFLevelPreviewApp:
             self._set_page_edit(idx, angle=0.0, rot=0, crop=[0.0, 0.0, 0.0, 0.0])
         if self.current_page in pages:
             self._crop_before_edit = [0.0, 0.0, 0.0, 0.0]
+            self._pending_fit_uid = None
         self._sync_edit_panel()
         self._refresh_preview()
         self._show_toast(f"{self._range_label(which)}의 편집을 초기화했습니다.")
@@ -3047,6 +3045,8 @@ class PDFLevelPreviewApp:
         top, left = min(top0, h - sh), min(left0, w - sw)
         self._last_fit_page = self.current_page  # 먼저 정해 둬야 _set_page_edit가 위치를 기록한다
         self._set_page_edit(self.current_page, crop=[top, h - sh - top, left, w - sw - left])
+        # [적용]을 눌러야 확정. 그 전에 다른 페이지로 가면 불러오기 전 값(_crop_before_edit)으로 되돌린다
+        self._pending_fit_uid = self.slots[self.current_page][0]
         # 크기 맞춤은 한 장씩: 이어서 [적용]/[초기화]를 눌러도 다른 페이지를 건드리지 않게
         self._selected = {self.current_page}
         self._sel_anchor = self.current_page
@@ -3055,6 +3055,15 @@ class PDFLevelPreviewApp:
         self._set_drag_mode("crop")
         self._sync_edit_panel()
         self._draw_crop_overlay()
+
+    def _discard_pending_fit(self):
+        """[저장 크기 불러오기]로 놓고 [적용]하지 않은 박스를 없앤다 (그 페이지 자르기를 불러오기 전 값으로)"""
+        idx = self._uid_index(self._pending_fit_uid)
+        self._pending_fit_uid = None
+        if idx is None:  # 그 사이 지운 페이지
+            return
+        self._last_fit_page = None  # 되돌린 값을 다음 불러오기 위치로 기록하지 않게 (끌어 둔 위치는 이어받는다)
+        self._set_page_edit(idx, crop=self._crop_before_edit)
 
     def _crop_canvas_rect(self):
         """현재 페이지 자르기 박스의 캔버스 좌표와 배율(px/pt).
@@ -3177,6 +3186,8 @@ class PDFLevelPreviewApp:
                 self._arrange_pages(out, src)
                 for idx, (uid, _, _) in enumerate(self.slots):
                     e = self.page_edits.get(uid)
+                    if e is not None and uid == self._pending_fit_uid:  # [적용]하지 않은 저장 크기 박스는 빼고
+                        e = dict(e, crop=self._crop_before_edit)
                     if e is not None:
                         _apply_page_edit(out[idx], e["angle"], e["rot"], e["crop"])
                 # [로마자 표기]: 앞쪽 i, ii …, start쪽부터 1, 2 … (첫 페이지면 1쪽부터 그대로).
@@ -3437,7 +3448,8 @@ class PDFLevelPreviewApp:
             self.split_range_text = tk.Text(self.split_detail_frame,
                                             width=16, height=3, font=FNT, wrap=tk.WORD)
             self.split_range_text.pack(fill=tk.X, pady=2)
-            self.split_range_text.insert("1.0", self.split_page_ranges_var.get())
+            # config.json에는 "1-22,23-30"으로 저장되지만 칸에는 범위마다 한 줄로 보인다
+            self.split_range_text.insert("1.0", self.split_page_ranges_var.get().replace(",", ",\n"))
             # 안에서 스크롤하지 않고 내용만큼 칸이 커진다 (오른쪽 패널 전체 스크롤로 내려 본다)
             for evt in ("<KeyRelease>", "<Configure>"):
                 self.split_range_text.bind(evt, lambda e: self._fit_split_range_height())
@@ -3476,11 +3488,10 @@ class PDFLevelPreviewApp:
         except ValueError as e:
             messagebox.showwarning("설정 저장", str(e), parent=self.root)
             return False
-        if config["scan_type"] == "고급":  # 레벨을 안 맞추고 저장하는 실수를 막는다
-            defaults = [f"{name} {value}" for name, value, default in
-                        (("검은색", config["black_point"], 0), ("흰색", config["white_point"], 255)) if value == default]
-            if defaults and not messagebox.askyesno(
-                    "설정 저장", f"스캔타입이 고급인데 {' · '.join(defaults)}(기본값)입니다.\n이대로 저장할까요?",
+        # 고급인데 레벨을 하나도 안 바꾸고 저장하는 실수를 막는다 (하나라도 바꿨으면 묻지 않는다)
+        if config["scan_type"] == "고급" and (config["black_point"], config["white_point"]) == (0, 255):
+            if not messagebox.askyesno(
+                    "설정 저장", "스캔타입이 고급인데 검은색 0 · 흰색 255(기본값)입니다.\n이대로 저장할까요?",
                     parent=self.root):
                 return False
         pdf_dir = os.path.dirname(self.pdf_doc.name)
