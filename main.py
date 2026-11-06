@@ -4390,6 +4390,9 @@ def main():
     except ImportError:
         root = tk.Tk()
         has_dnd = False
+    # 화면을 다 만들 때까지 창을 숨긴다. 만드는 도중 update_idletasks가 창을 원래 크기로 먼저 띄워서,
+    # PDF를 열 때 원래 크기로 떴다가 최대화되는 게 보였다. 맨 끝에서 deiconify로 띄운다
+    root.withdraw()
 
     # 창·작업 표시줄 아이콘. default= 는 팝업(Toplevel)용이고, 창이 화면에 뜨기 전에 부르면 이 창에는 안 들어갈 수 있어서
     # 이 창에는 따로 넣는다 (Tk가 창을 띄울 때 넣는다). 창이 뜬 뒤 Win32로도 한 번 더 넣는다 (_set_window_icon)
@@ -4413,9 +4416,11 @@ def main():
     # 맞춤 크기와 썸네일 열 수가 제대로 계산된다
     pdf = _pdf_arg(sys.argv)
     if pdf:
-        # 파일을 눌러 열 때는 창을 최대화해서 띄운다
+        # 파일을 눌러 열 때는 창을 최대화해서 띄운다. 숨긴 채로 최대화를 정해 두면 처음부터 최대화로 뜬다
+        # (Windows Tk의 deiconify는 최대화 상태를 그대로 둔다)
         root.state("zoomed")
         root.after(100, lambda: app._load_pdf(pdf))
+    root.deiconify()
     root.mainloop()
     # 남은 스레드(썸네일, 워커 결과 수신, Queue)를 기다리지 않고 바로 끝낸다.
     # 기다리다 멈추면 보이지 않는 프로세스가 남아 PDF를 계속 쥐고 있다

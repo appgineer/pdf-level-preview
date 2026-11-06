@@ -19,6 +19,10 @@ set "OPENCMD=\"%SystemRoot%\System32\wscript.exe\" \"%~dp0run.vbs\" \"%%1\""
 if exist "%LAUNCHER%" set "OPENCMD=\"%LAUNCHER%\" \"%%1\""
 if not exist "%LAUNCHER%" echo 아이콘을 넣은 실행 파일을 만들지 못해 예전 방식(스크립트 실행기 아이콘)으로 등록합니다.
 
+REM PDF를 이 폴더의 bat 파일(pdf_*.bat)로 연 적이 있으면 "연결 프로그램" 목록에 그 bat이 남는다. 그 기록을 지운다:
+REM 최근 연 프로그램 목록(FileExts\.pdf\OpenWithList의 a, b, c … 값과 순서 MRUList)과 Windows가 만든 Applications\pdf_*.bat 등록
+powershell -NoProfile -Command "$k='HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.pdf\OpenWithList'; if (Test-Path $k) { foreach ($q in (Get-ItemProperty $k).PSObject.Properties) { if ($q.Name.Length -eq 1 -and [string]$q.Value -like 'pdf_*.bat') { Remove-ItemProperty $k -Name $q.Name; $m=[string](Get-ItemProperty $k).MRUList; if ($m) { Set-ItemProperty $k -Name MRUList -Value $m.Replace($q.Name, '') } } } }; Get-ChildItem 'HKCU:\Software\Classes\Applications' -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -like 'pdf_*.bat' } | Remove-Item -Recurse -Force" >nul 2>&1
+
 set "FAIL="
 reg add "%CLS%\%PROGID%" /ve /d "PDF Level Preview" /f >nul || set FAIL=1
 reg add "%CLS%\%PROGID%\shell\open" /v FriendlyAppName /d "PDF Level Preview" /f >nul || set FAIL=1
