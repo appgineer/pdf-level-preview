@@ -8,6 +8,8 @@ set "CLS=HKCU\Software\Classes"
 reg delete "%CLS%\PDFLevelPreview.PDF" /f >nul 2>&1
 reg delete "%CLS%\.pdf\OpenWithProgids" /v PDFLevelPreview.PDF /f >nul 2>&1
 reg delete "%CLS%\SystemFileAssociations\.pdf\shell\PDFLevelPreview" /f >nul 2>&1
+REM 탐색기가 기억해 둔 PDF 아이콘(icon.ico)을 새로 읽게 한다
+ie4uinit.exe -show >nul 2>&1
 
 echo.
 echo 등록을 해제했습니다.

@@ -4077,6 +4077,11 @@ def main():
     _cleanup_temp_files()
     _cleanup_save_dirs()
     _cleanup_clipboard()
+    # 작업 표시줄에 python 아이콘 대신 이 프로그램 아이콘이 보이게 python.exe와 따로 묶는다 (창을 만들기 전에)
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("PDFLevelPreview")
+    except Exception:
+        pass
     try:
         from tkinterdnd2 import TkinterDnD
         root = TkinterDnD.Tk()
@@ -4084,6 +4089,12 @@ def main():
     except ImportError:
         root = tk.Tk()
         has_dnd = False
+
+    # 창·팝업·작업 표시줄 아이콘. default= 로 주면 팝업(Toplevel)도 같은 아이콘이 된다
+    try:
+        root.iconbitmap(default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.ico"))
+    except tk.TclError:
+        pass
 
     # Windows HiDPI 스케일링 비활성화 (이미지 원본 화질 유지)
     try:

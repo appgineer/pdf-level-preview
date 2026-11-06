@@ -20,6 +20,7 @@ python main.py 파일.pdf   # 그 PDF를 연 상태로, 창 최대화 (PDF 더�
 - Windows에서는 `run.vbs`(창 숨김) → `run.bat`(패키지가 없을 때만 pip 설치) → `main.py` 순서이고, 넘겨받은 파일 경로를 그대로 전달한다.
 - PDF 더블클릭으로 열기: `pdf_기본실행파일.bat`을 한 번 실행한다(현재 사용자 레지스트리에 등록, 관리자 권한 불필요). 그다음 PDF 오른쪽 클릭 → 연결 프로그램 → 다른 앱 선택 → "PDF Level Preview" → "항상". 오른쪽 클릭 메뉴 "PDF Level Preview로 열기"도 생긴다. 폴더를 옮기면 다시 실행하고, 해제는 `pdf_기본실행해제.bat`.
 - 이미 켜져 있을 때 다른 PDF를 더블클릭하면 창이 하나 더 뜬다(열린 창과 통신하는 기능은 없음).
+- 아이콘은 `icon.ico`(16~256px). 창·팝업·작업 표시줄은 `main()`의 `iconbitmap(default=…)`(작업 표시줄에 python 아이콘이 안 뜨게 AppUserModelID를 따로 둔다), 탐색기의 PDF 파일 아이콘은 `pdf_기본실행파일.bat`이 등록하는 `DefaultIcon`이라 이 프로그램을 PDF 기본 프로그램으로 정했을 때만 바뀐다(그러면 모든 PDF가 이 아이콘).
 
 ## 의존성
 

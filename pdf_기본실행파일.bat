@@ -14,6 +14,8 @@ set "FAIL="
 reg add "%CLS%\%PROGID%" /ve /d "PDF Level Preview" /f >nul || set FAIL=1
 reg add "%CLS%\%PROGID%\shell\open" /v FriendlyAppName /d "PDF Level Preview" /f >nul || set FAIL=1
 reg add "%CLS%\%PROGID%\shell\open\command" /ve /d "%OPENCMD%" /f >nul || set FAIL=1
+REM 이 프로그램을 PDF 기본 프로그램으로 정하면 탐색기의 PDF 파일 아이콘이 icon.ico 가 된다
+reg add "%CLS%\%PROGID%\DefaultIcon" /ve /d "%~dp0icon.ico" /f >nul || set FAIL=1
 reg add "%CLS%\.pdf\OpenWithProgids" /v %PROGID% /t REG_NONE /f >nul || set FAIL=1
 reg add "%CLS%\SystemFileAssociations\.pdf\shell\PDFLevelPreview" /ve /d "PDF Level Preview로 열기" /f >nul || set FAIL=1
 reg add "%CLS%\SystemFileAssociations\.pdf\shell\PDFLevelPreview\command" /ve /d "%OPENCMD%" /f >nul || set FAIL=1
@@ -23,6 +25,9 @@ if defined FAIL (
     pause
     exit /b 1
 )
+
+REM 탐색기가 기억해 둔 아이콘을 새로 읽게 한다
+ie4uinit.exe -show >nul 2>&1
 
 echo.
 echo 등록했습니다.
