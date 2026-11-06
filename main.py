@@ -3307,15 +3307,9 @@ class PDFLevelPreviewApp:
         """[문자 읽기]: PowerToys 텍스트 추출기 단축키 Win+Shift+T를 대신 눌러, 화면에서 끌어 고른 곳의 글자를 읽게 한다.
 
         읽은 글자는 PowerToys가 클립보드에 넣는다(Ctrl+V로 붙여넣기). 일본어 등은 PowerToys 설정의 언어와
-        Windows OCR 언어팩이 있어야 한다. PowerToys가 꺼져 있으면 Win+Shift+T는 Windows 기본 동작(작업 표시줄 앱을
-        거꾸로 옮겨 다님)이 되므로 보내지 않고 알린다.
+        Windows OCR 언어팩이 있어야 한다. PowerToys가 꺼져 있으면 Windows 기본 동작(작업 표시줄 앱을 거꾸로 옮겨 다님)이
+        된다. 켜져 있는지 tasklist로 PowerToys.exe를 찾아 보던 확인은 켜져 있는데도 못 찾는 컴퓨터가 있어서 없앴다.
         """
-        out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq PowerToys.exe", "/NH"],
-                             capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW).stdout
-        if b"PowerToys.exe" not in out:
-            messagebox.showinfo("문자 읽기", "PowerToys가 실행 중이 아닙니다.\n"
-                                "PowerToys를 켜고 텍스트 추출기를 사용으로 둔 뒤 다시 누르세요.", parent=self.root)
-            return
         user32 = ctypes.windll.user32
         # (가상 키, 확장 키 표시): 왼쪽 Win은 확장 키라 KEYEVENTF_EXTENDEDKEY(1)를 붙인다. 뗄 때는 KEYEVENTF_KEYUP(2)
         keys = ((0x5B, 1), (0x10, 0), (0x54, 0))  # 왼쪽 Win, Shift, T
