@@ -40,7 +40,7 @@ UI_FONT_BOLD = ("맑은 고딕", 20, "bold")
 THUMB_W = 280
 THUMB_MARGIN = 16
 THUMB_LABEL_FONT = ("맑은 고딕", 16)
-THUMB_OCR_W = 64  # 글자를 뽑을 수 있는(OCR된) 페이지 썸네일 오른쪽 아래 OCR 표시(ocr.png) 너비 (px)
+THUMB_OCR_W = 40  # 글자를 뽑을 수 있는(OCR된) 페이지 썸네일 오른쪽 아래 OCR 표시(ocr.png, 둥근 아이콘) 지름 (px)
 INDICATOR_SIZE = 24  # 체크박스/라디오버튼 인디케이터 크기
 INDICATOR_MARK = "#e00000"  # 선택 표시(체크마크/라디오 점) 색. 검은색은 눈에 잘 안 띈다
 # 오른쪽 패널 구간 색: 편집(PDF 직접 수정) / 설정 파일(config.json)
@@ -534,14 +534,12 @@ class PDFLevelPreviewApp:
         self.thumbnail_cache = {}
         # 글자를 뽑을 수 있는(OCR된) 페이지 {(파일 경로, 페이지 번호)}. 썸네일과 같이 알아낸다
         self._text_pages = set()
-        # 그 썸네일 오른쪽 아래에 올리는 OCR 표시. 페이지 글자 위에서도 보이게 흰 바탕을 깐다
+        # 그 썸네일 오른쪽 아래에 올리는 OCR 표시. 둥근 파란 바탕이 있는 아이콘이라 그대로 올린다
         try:
             badge = Image.open(os.path.join(APP_DIR, "ocr.png")).convert("RGBA")
             badge = badge.crop(badge.getbbox())
             badge = badge.resize((THUMB_OCR_W, round(badge.height * THUMB_OCR_W / badge.width)), Image.LANCZOS)
-            bg = Image.new("RGBA", (badge.width + 8, badge.height + 8), "white")
-            bg.alpha_composite(badge, (4, 4))
-            self._ocr_badge = ImageTk.PhotoImage(bg)
+            self._ocr_badge = ImageTk.PhotoImage(badge)
         except OSError:
             self._ocr_badge = None
         self.preview_cache = {}  # key -> (PIL Image, 상태문구)
