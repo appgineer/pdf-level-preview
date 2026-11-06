@@ -22,6 +22,9 @@ import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
+# main.py가 있는 폴더 (icon.ico, ocr.png)
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # 100% = 원본 이미지 픽셀 1:1
 # index 0 = "맞춤(Fit)" 모드, 이후 50%,75%,100%,125%
 ZOOM_LEVELS = [0, 50, 75, 100, 125]  # 0 = fit
@@ -37,6 +40,7 @@ UI_FONT_BOLD = ("맑은 고딕", 20, "bold")
 THUMB_W = 280
 THUMB_MARGIN = 16
 THUMB_LABEL_FONT = ("맑은 고딕", 16)
+THUMB_OCR_W = 64  # 글자를 뽑을 수 있는(OCR된) 페이지 썸네일 오른쪽 아래 OCR 표시(ocr.png) 너비 (px)
 INDICATOR_SIZE = 24  # 체크박스/라디오버튼 인디케이터 크기
 INDICATOR_MARK = "#e00000"  # 선택 표시(체크마크/라디오 점) 색. 검은색은 눈에 잘 안 띈다
 # 오른쪽 패널 구간 색: 편집(PDF 직접 수정) / 설정 파일(config.json)
@@ -527,6 +531,18 @@ class PDFLevelPreviewApp:
         self._undo_stack = []  # [(slots, current_page, selected)] 페이지 구조를 바꾸기 전 상태
         self.saved_levels = []
         self.thumbnail_cache = {}
+        # 글자를 뽑을 수 있는(OCR된) 페이지 {(파일 경로, 페이지 번호)}. 썸네일과 같이 알아낸다
+        self._text_pages = set()
+        # 그 썸네일 오른쪽 아래에 올리는 OCR 표시. 페이지 글자 위에서도 보이게 흰 바탕을 깐다
+        try:
+            badge = Image.open(os.path.join(APP_DIR, "ocr.png")).convert("RGBA")
+            badge = badge.crop(badge.getbbox())
+            badge = badge.resize((THUMB_OCR_W, round(badge.height * THUMB_OCR_W / badge.width)), Image.LANCZOS)
+            bg = Image.new("RGBA", (badge.width + 8, badge.height + 8), "white")
+            bg.alpha_composite(badge, (4, 4))
+            self._ocr_badge = ImageTk.PhotoImage(bg)
+        except OSError:
+            self._ocr_badge = None
         self.preview_cache = {}  # key -> (PIL Image, 상태문구)
         self.thumbnail_photo_refs = {}
         self._drawn_pages = {}
@@ -1197,6 +1213,7 @@ class PDFLevelPreviewApp:
         self._undo_stack.clear()
         _remember_dir(path)  # 저장 도중 강제 종료로 남는 임시 파일을 다음 실행 때 지우려고
         self.thumbnail_cache.clear()
+        self._text_pages.clear()
         self.preview_cache.clear()
         self.page_edits.clear()
         self._skew_flagged.clear()
@@ -1261,6 +1278,7 @@ class PDFLevelPreviewApp:
                     "m=fitz.Matrix(0.6,0.6);"
                     "x=p.get_pixmap(matrix=m);"
                     "x.save(sys.argv[3]);"
+                    "print(int(bool(p.get_text().strip())));"  # 글자를 뽑을 수 있으면(OCR됨) 1
                     "d.close()"
                 )
                 proc = subprocess.Popen(
@@ -1269,14 +1287,16 @@ class PDFLevelPreviewApp:
                 )
                 self._thumb_procs.add(proc)
                 try:
-                    proc.communicate(timeout=30)
+                    out, _ = proc.communicate(timeout=30)
                 except subprocess.TimeoutExpired:
                     proc.kill()
-                    proc.communicate()
+                    out, _ = proc.communicate()
                 finally:
                     self._thumb_procs.discard(proc)
                 if proc.returncode != 0 or gen != self._thumb_generation:
                     return
+                if out.strip() == b"1":  # 썸네일을 넣기 전에 (그리면서 이 값을 본다)
+                    self._text_pages.add(page)
                 raw = Image.open(tmp)
                 raw.load()
                 # 세로로 긴 페이지가 셀 밖으로 넘치지 않도록 박스 안에 맞춘다
@@ -1409,6 +1429,12 @@ class PDFLevelPreviewApp:
                 image=photo, anchor=tk.CENTER
             )
             items.append(img_id)
+            # 글자를 뽑을 수 있는(OCR된) 페이지는 오른쪽 아래에 OCR 표시 (자르기 빨간 선은 그 위에)
+            if page in self._text_pages and self._ocr_badge:
+                items.append(self.thumb_canvas.create_image(
+                    x + THUMB_W // 2 - img.width // 2 + img.width - 6,
+                    y + thumb_h // 2 - img.height // 2 + img.height - 6,
+                    image=self._ocr_badge, anchor=tk.SE))
             # 설정 파일의 자르기(mm) 자리를 빨간 선으로 (미리보기와 같은 표시)
             cfg_sides = self._crop_cfg_sides()
             if cfg_sides and any(cfg_sides):
@@ -4092,7 +4118,7 @@ def main():
 
     # 창·팝업·작업 표시줄 아이콘. default= 로 주면 팝업(Toplevel)도 같은 아이콘이 된다
     try:
-        root.iconbitmap(default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.ico"))
+        root.iconbitmap(default=os.path.join(APP_DIR, "icon.ico"))
     except tk.TclError:
         pass
 
