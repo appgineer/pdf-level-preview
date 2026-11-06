@@ -555,6 +555,8 @@ class PDFLevelPreviewApp:
         self._page_count = 0
         self._thumb_cols = 1
         self._thumb_cell_h = 0
+        self._thumb_row_pad = 0  # [보기 변경]에서 줄마다 더한 위아래 여백 (합)
+        self._thumb_page_rows = 1  # [보기 변경]에서 패널에 딱 들어가는 줄 수 (Page Up/Down 한 번에 넘기는 줄)
         self._thumb_total_height = 0
         self._thumb_offset_x = 0
         self._selection_rect_id = None
@@ -1365,8 +1367,20 @@ class PDFLevelPreviewApp:
         self._thumb_offset_x = max(0, (canvas_w - total_grid_w) // 2)
 
         self._thumb_cell_h = int(self._thumb_w * 1.4) + 8 + self._thumb_label_h + THUMB_MARGIN * 2
+        self._thumb_row_pad = 0
         rows = (self._page_count + self._thumb_cols - 1) // self._thumb_cols if self._page_count > 0 else 0
-        self._thumb_total_height = rows * self._thumb_cell_h
+        view_h = self.thumb_canvas.winfo_height()
+        extra = 0
+        if self._grid_view and view_h > 1:
+            # [보기 변경]: 패널에 다 들어가는 줄 수(N)로 줄 높이를 늘려 딱 N줄이 반쪽 줄 없이 보이게 한다.
+            # 남는 높이는 줄마다 위아래 여백(_thumb_row_pad). 끝도 N줄 묶음(빈 줄)까지 늘려 Page Up/Down 자리가 늘 같게
+            n = max(1, view_h // self._thumb_cell_h)
+            self._thumb_row_pad = view_h // n - self._thumb_cell_h
+            self._thumb_cell_h = view_h // n
+            self._thumb_page_rows = n
+            rows = -(-rows // n) * n
+            extra = view_h - n * self._thumb_cell_h  # 몇 px 남는 높이. 이게 없으면 마지막 묶음이 그만큼 덜 내려간다
+        self._thumb_total_height = rows * self._thumb_cell_h + extra
 
         self.thumb_canvas.configure(scrollregion=(0, 0, canvas_w, self._thumb_total_height))
 
@@ -1375,7 +1389,7 @@ class PDFLevelPreviewApp:
         row = page_idx // self._thumb_cols
         col_w = self._thumb_w + THUMB_MARGIN * 2
         x = self._thumb_offset_x + col * col_w + THUMB_MARGIN
-        y = row * self._thumb_cell_h + THUMB_MARGIN
+        y = row * self._thumb_cell_h + THUMB_MARGIN + self._thumb_row_pad // 2
         return x, y
 
     def _draw_visible_thumbs(self):
@@ -1718,6 +1732,14 @@ class PDFLevelPreviewApp:
         if self._page_count == 0:
             return
         self._relayout_thumbs()
+        if self._grid_view:  # 크기가 바뀌면(보기 변경을 켤 때 포함) 지금 페이지가 든 N줄 묶음을 맨 위부터 딱 맞게
+            n = self._thumb_page_rows
+            self._thumb_scroll_to_row(self.current_page // self._thumb_cols // n * n)
+
+    def _thumb_scroll_to_row(self, row):
+        """그 줄이 썸네일 패널 맨 위에 오게 스크롤"""
+        if self._thumb_total_height > 0:
+            self.thumb_canvas.yview_moveto(row * self._thumb_cell_h / self._thumb_total_height)
 
     def _relayout_thumbs(self):
         """칸 배치를 다시 계산하고 보이는 썸네일을 처음부터 다시 그린다 (렌더는 다시 안 한다)"""
@@ -1817,18 +1839,39 @@ class PDFLevelPreviewApp:
         Home/End는 맨 처음/맨 끝 페이지"""
         if self._page_count == 0:
             return "break"
-        if key in ("Home", "End"):
-            new = 0 if key == "Home" else self._page_count - 1
+        cols, last = self._thumb_cols, self._page_count - 1
+        if self._grid_view:
+            # [보기 변경]: N줄 묶음 단위로 넘긴다 (10칸×4줄이면 1→41→81). 휠로 어중간한 자리에 멈춰 있으면
+            # 맨 위에 걸친 줄이 든 묶음에 다시 맞춘다: Page Down = 그다음 묶음, Page Up = 그 묶음(맞춰져 있으면 앞 묶음)
+            n = self._thumb_page_rows
+            view_top = self.thumb_canvas.canvasy(0)
+            block = int((view_top + 1) // self._thumb_cell_h) // n * n
+            if key in ("Home", "End"):
+                new = 0 if key == "Home" else last
+                top_row = new // cols // n * n
+            else:
+                if key == "Next":
+                    top_row = block + n
+                else:
+                    top_row = block - n if abs(view_top - block * self._thumb_cell_h) < 1 else block
+                max_top = self._thumb_total_height // self._thumb_cell_h - n
+                if top_row > max_top:  # 마지막 묶음에서 Page Down = 맨 끝 페이지 (같은 칸으로 가면 뒤로 간다)
+                    top_row, new = max_top, last
+                else:
+                    top_row = max(0, top_row)
+                    new = min(last, top_row * cols + self.current_page % cols)  # 지금 페이지와 같은 칸(열)으로
+        elif key in ("Home", "End"):
+            new = 0 if key == "Home" else last
+            top_row = new // cols
         else:
             rows = max(1, self.thumb_canvas.winfo_height() // self._thumb_cell_h)
-            step = rows * self._thumb_cols
+            step = rows * cols
             new = self.current_page + (-step if key == "Prior" else step)
-            new = max(0, min(self._page_count - 1, new))
+            new = max(0, min(last, new))
+            top_row = new // cols
         if new != self.current_page:
             self._thumb_go(event, new)
-        if self._thumb_total_height > 0:
-            top = new // self._thumb_cols * self._thumb_cell_h
-            self.thumb_canvas.yview_moveto(top / self._thumb_total_height)
+        self._thumb_scroll_to_row(top_row)
         return "break"
 
     def _thumb_go(self, event, new):
