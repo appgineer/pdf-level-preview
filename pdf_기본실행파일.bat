@@ -7,8 +7,17 @@ REM 현재 사용자(HKCU)에만 쓰므로 관리자 권한이 필요 없다. �
 
 set "CLS=HKCU\Software\Classes"
 set "PROGID=PDFLevelPreview.PDF"
-REM 등록되는 명령: wscript.exe "...\run.vbs" "%1"  (%%1 은 bat 안에서 %1 로 바뀐다)
+REM 탐색기의 "열기"·"연결 프로그램"에는 등록한 명령이 실행하는 프로그램의 아이콘이 보인다. wscript.exe(스크립트 실행기)를
+REM 등록하면 그 아이콘이 보이므로, icon.ico를 넣은 작은 실행 파일(launcher.cs → PDFLevelPreview.exe)을 Windows에 들어 있는
+REM C# 컴파일러로 만들어 등록한다. 하는 일은 run.vbs에 PDF 경로를 넘기는 것뿐. 못 만들면 예전처럼 wscript.exe로 등록한다
+set "LAUNCHER=%~dp0PDFLevelPreview.exe"
+set "CSC=%SystemRoot%\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+if not exist "%CSC%" set "CSC=%SystemRoot%\Microsoft.NET\Framework\v4.0.30319\csc.exe"
+"%CSC%" /nologo /codepage:65001 /target:winexe /win32icon:"%~dp0icon.ico" /out:"%LAUNCHER%" "%~dp0launcher.cs" >nul 2>&1
+REM 등록되는 명령: "...\PDFLevelPreview.exe" "%1"  또는  wscript.exe "...\run.vbs" "%1"  (%%1 은 bat 안에서 %1 로 바뀐다)
 set "OPENCMD=\"%SystemRoot%\System32\wscript.exe\" \"%~dp0run.vbs\" \"%%1\""
+if exist "%LAUNCHER%" set "OPENCMD=\"%LAUNCHER%\" \"%%1\""
+if not exist "%LAUNCHER%" echo 아이콘을 넣은 실행 파일을 만들지 못해 예전 방식(스크립트 실행기 아이콘)으로 등록합니다.
 
 set "FAIL="
 reg add "%CLS%\%PROGID%" /ve /d "PDF Level Preview" /f >nul || set FAIL=1

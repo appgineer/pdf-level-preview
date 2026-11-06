@@ -24,6 +24,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 # main.py가 있는 폴더 (icon.ico, ocr.png)
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
+# 작업 표시줄이 이 프로그램 창을 묶는 이름 (AppUserModelID). python.exe와 따로 묶여야 이 프로그램 아이콘이 보인다
+APP_ID = "PDFLevelPreview"
 
 # 100% = 원본 이미지 픽셀 1:1
 # index 0 = "맞춤(Fit)" 모드, 이후 50%,75%,100%,125%
@@ -4271,28 +4273,104 @@ def _pdf_arg(argv):
     return None
 
 
-def _set_window_icon(root, path):
-    """창 바깥 틀(Tk의 wrapper)에 큰·작은 아이콘을 Win32로 직접 넣는다. 작업 표시줄은 큰 아이콘을 쓴다.
+class _GUID(ctypes.Structure):
+    _fields_ = [("Data1", ctypes.c_uint32), ("Data2", ctypes.c_ushort), ("Data3", ctypes.c_ushort),
+                ("Data4", ctypes.c_ubyte * 8)]
 
-    Tk의 iconbitmap만으로는 작업 표시줄에 Python 아이콘이 남는 일이 있었다. 창이 화면에 뜬 뒤에 불러야 한다.
-    전역 ctypes.windll.user32의 argtypes를 건드리지 않게 따로 불러 64비트 핸들을 제대로 넘긴다.
+
+class _PROPERTYKEY(ctypes.Structure):
+    _fields_ = [("fmtid", _GUID), ("pid", ctypes.c_uint32)]
+
+
+class _PROPVARIANT(ctypes.Structure):
+    # vt + 예약 3칸 뒤에 값(여기서는 문자열 포인터). 뒤를 채워 64비트에서 실제 크기 24바이트와 맞춘다
+    _fields_ = [("vt", ctypes.c_ushort), ("r1", ctypes.c_ushort), ("r2", ctypes.c_ushort),
+                ("r3", ctypes.c_ushort), ("pwszVal", ctypes.c_wchar_p), ("pad", ctypes.c_void_p)]
+
+
+def _set_window_app_details(hwnd, icon_path):
+    """창에 직접 AppUserModelID와 다시 실행 정보(이름·아이콘·명령)를 넣는다. 결과 HRESULT(0 = 성공)를 돌려준다.
+
+    작업 표시줄이 같은 앱 창을 묶어 보일 때(Windows 11 기본)는 창 아이콘이 아니라 앱 정보로 아이콘을 고르는데,
+    python.exe로 실행하면 그 정보가 python.exe라 Python 아이콘이 뜬다. 프로세스에 AppUserModelID를 주는 것만으로는
+    안 바뀌어서, Chrome이 웹 앱 창마다 제 아이콘을 보이는 것과 같은 창 속성(System.AppUserModel.*)을 넣는다.
     """
+    shell32, ole32 = ctypes.WinDLL("shell32"), ctypes.WinDLL("ole32")
+    ole32.CoInitialize(None)  # 이미 돼 있으면 아무 일도 안 한다
+
+    def guid(text):
+        g = _GUID()
+        ole32.CLSIDFromString(ctypes.c_wchar_p(text), ctypes.byref(g))
+        return g
+
+    shell32.SHGetPropertyStoreForWindow.argtypes = [ctypes.c_void_p, ctypes.POINTER(_GUID),
+                                                    ctypes.POINTER(ctypes.c_void_p)]
+    store = ctypes.c_void_p()
+    hr = shell32.SHGetPropertyStoreForWindow(hwnd, ctypes.byref(guid("{886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99}")),
+                                             ctypes.byref(store))  # IID_IPropertyStore
+    if hr != 0 or not store:
+        return hr
+    vtbl = ctypes.cast(store, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+    set_value = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(_PROPERTYKEY),
+                                   ctypes.POINTER(_PROPVARIANT))(vtbl[6])  # IPropertyStore::SetValue
+    commit = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p)(vtbl[7])
+    release = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(vtbl[2])
+    launcher = os.path.join(APP_DIR, "PDFLevelPreview.exe")  # pdf_기본실행파일.bat이 만든다
+    if os.path.isfile(launcher):
+        relaunch = f'"{launcher}"'
+    else:
+        wscript = os.path.join(os.environ.get("SystemRoot", "C:\\Windows"), "System32", "wscript.exe")
+        relaunch = f'"{wscript}" "{os.path.join(APP_DIR, "run.vbs")}"'
+    fmtid = guid("{9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3}")  # System.AppUserModel.*
+    # 2 RelaunchCommand, 4 RelaunchDisplayNameResource, 3 RelaunchIconResource, 5 ID. VT_LPWSTR = 31
+    for pid, value in ((2, relaunch), (4, "PDF Level Preview"), (3, icon_path + ",0"), (5, APP_ID)):
+        hr = set_value(store, ctypes.byref(_PROPERTYKEY(fmtid, pid)),
+                       ctypes.byref(_PROPVARIANT(vt=31, pwszVal=value)))
+        if hr != 0:
+            break
+    else:
+        hr = commit(store)
+    release(store)
+    return hr
+
+
+def _set_window_icon(root, path, appid_hr):
+    """창 바깥 틀(Tk의 wrapper)에 큰·작은 아이콘(WM_SETICON)과 작업 표시줄용 앱 정보를 넣는다. 창이 뜬 뒤에 부른다.
+
+    Tk의 iconbitmap만으로는 작업 표시줄에 Python 아이콘이 남았다. 전역 ctypes.windll.user32의 argtypes를 건드리지 않게
+    따로 불러 64비트 핸들을 제대로 넘긴다. 단계마다 결과를 icon_log.txt에 적는다 (작업 표시줄 아이콘이 또 안 맞으면
+    어느 단계가 실패했는지 보려고)
+    """
+    log = [f"process AppUserModelID hr={appid_hr}"]
     try:
         user32 = ctypes.WinDLL("user32")
         user32.GetParent.argtypes = [ctypes.c_void_p]
         user32.GetParent.restype = ctypes.c_void_p
+        user32.GetClassNameW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
         user32.LoadImageW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint,
                                       ctypes.c_int, ctypes.c_int, ctypes.c_uint]
         user32.LoadImageW.restype = ctypes.c_void_p
         user32.SendMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_void_p]
         hwnd = user32.GetParent(root.winfo_id())
+        cls = ctypes.create_unicode_buffer(64)
+        user32.GetClassNameW(hwnd, cls, 64)
+        log.append(f"hwnd={hwnd} class={cls.value}")
         # (ICON_BIG 1 ← SM_CXICON 11), (ICON_SMALL 0 ← SM_CXSMICON 49). IMAGE_ICON 1, LR_LOADFROMFILE 0x10
         for which, metric in ((1, 11), (0, 49)):
             size = user32.GetSystemMetrics(metric)
             hicon = user32.LoadImageW(None, path, 1, size, size, 0x10)
             if hwnd and hicon:
                 user32.SendMessageW(hwnd, 0x80, which, hicon)  # WM_SETICON
-    except Exception:
+            log.append(f"WM_SETICON {which}: size={size} icon={'ok' if hicon else 'FAIL'}")
+        log.append(f"window AppUserModel hr={_set_window_app_details(hwnd, path)}")
+    except Exception as e:
+        log.append(f"error: {e!r}")
+    try:
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+        os.makedirs(os.path.join(base, "pdf-level-preview"), exist_ok=True)
+        with open(os.path.join(base, "pdf-level-preview", "icon_log.txt"), "w", encoding="utf-8") as f:
+            f.write("\n".join(log) + "\n")
+    except OSError:
         pass
 
 
@@ -4302,9 +4380,9 @@ def main():
     _cleanup_clipboard()
     # 작업 표시줄에 python 아이콘 대신 이 프로그램 아이콘이 보이게 python.exe와 따로 묶는다 (창을 만들기 전에)
     try:
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("PDFLevelPreview")
-    except Exception:
-        pass
+        appid_hr = ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)
+    except Exception as e:
+        appid_hr = repr(e)
     try:
         from tkinterdnd2 import TkinterDnD
         root = TkinterDnD.Tk()
@@ -4321,7 +4399,7 @@ def main():
         root.iconbitmap(default=icon_path)
     except tk.TclError:
         pass
-    root.after(300, lambda: _set_window_icon(root, icon_path))
+    root.after(300, lambda: _set_window_icon(root, icon_path, appid_hr))
 
     # Windows HiDPI 스케일링 비활성화 (이미지 원본 화질 유지)
     try:
