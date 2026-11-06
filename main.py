@@ -40,9 +40,8 @@ UI_FONT_BOLD = ("맑은 고딕", 20, "bold")
 THUMB_W = 280
 THUMB_MARGIN = 16
 THUMB_LABEL_FONT = ("맑은 고딕", 20, "bold")
-# 썸네일 아래 "p.11 (1)" 글씨: 파랑 글씨 + 글씨 뒤 흰 바탕. 진회색(PREVIEW_BG)과 선택한 칸(연파랑)에서 다 보이는
-# 한 가지 색은 없어서(남색도 진회색 위 대비 2.8로 검정 3.7보다 낮다) 바탕을 깔아 선택과 상관없이 같은 색으로 보인다
-THUMB_LABEL_FG, THUMB_LABEL_BG = "#1565c0", "white"
+# 썸네일 아래 "p.11 (1)" 글씨 색 (파랑, 선택과 상관없이 같은 색)
+THUMB_LABEL_FG = "#1565c0"
 THUMB_OCR_W = 40  # 글자를 뽑을 수 있는(OCR된) 페이지 썸네일 오른쪽 아래 OCR 표시(ocr.png, 네모 아이콘) 한 변 (px)
 # [보기 변경](F2): 가운데 미리보기를 빼고 왼쪽 썸네일 한 줄에 이만큼. 칸이 좁으면 썸네일을 줄인다(넓어도 THUMB_W까지)
 THUMB_GRID_COLS = 10
@@ -1514,10 +1513,7 @@ class PDFLevelPreviewApp:
             x + self._thumb_w // 2, y + thumb_h + 8, anchor=tk.N,
             text=caption, font=THUMB_LABEL_FONT, fill=THUMB_LABEL_FG
         )
-        lx0, ly0, lx1, ly1 = self.thumb_canvas.bbox(label_id)  # 글씨 뒤 흰 바탕
-        bg_id = self.thumb_canvas.create_rectangle(lx0 - 6, ly0, lx1 + 6, ly1, fill=THUMB_LABEL_BG, outline="")
-        self.thumb_canvas.tag_lower(bg_id, label_id)
-        items += [bg_id, label_id]
+        items.append(label_id)
         if self.slots[idx][0] in self._skew_flagged:  # 파란 현재 페이지 테두리 바깥에
             items.append(self.thumb_canvas.create_rectangle(
                 x - 6, y - 6, x + self._thumb_w + 6, y + thumb_h + 6, outline=THUMB_SKEW_LINE, width=3))
