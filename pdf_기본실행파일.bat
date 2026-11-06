@@ -16,6 +16,8 @@ reg add "%CLS%\%PROGID%\shell\open" /v FriendlyAppName /d "PDF Level Preview" /f
 reg add "%CLS%\%PROGID%\shell\open\command" /ve /d "%OPENCMD%" /f >nul || set FAIL=1
 REM 이 프로그램을 PDF 기본 프로그램으로 정하면 탐색기의 PDF 파일 아이콘이 icon.ico 가 된다
 reg add "%CLS%\%PROGID%\DefaultIcon" /ve /d "%~dp0icon.ico" /f >nul || set FAIL=1
+REM 큰 아이콘 보기에서 PDF 1페이지 그림 오른쪽 아래에 Windows가 붙이는 작은 프로그램 아이콘을 없앤다 (빈 값 = 안 붙임)
+reg add "%CLS%\%PROGID%" /v TypeOverlay /t REG_SZ /d "" /f >nul || set FAIL=1
 reg add "%CLS%\.pdf\OpenWithProgids" /v %PROGID% /t REG_NONE /f >nul || set FAIL=1
 reg add "%CLS%\SystemFileAssociations\.pdf\shell\PDFLevelPreview" /ve /d "PDF Level Preview로 열기" /f >nul || set FAIL=1
 reg add "%CLS%\SystemFileAssociations\.pdf\shell\PDFLevelPreview\command" /ve /d "%OPENCMD%" /f >nul || set FAIL=1

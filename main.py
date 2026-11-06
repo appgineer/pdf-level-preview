@@ -111,7 +111,7 @@ THUMB_CUR_LINE = "#1f6fd0"
 THUMB_SKEW_LINE = "#e00000"
 # 툴바: [로마자 표기]로 정한 종이 쪽 번호 글씨 색 (보라. 빨간 페이지 번호·파란 폴더 번호 사이에 괄호로)
 PAPER_NUM_FG = "#8e44ad"
-# 툴바 버튼 [파일 열기] [로마자 표기] [표지 넣기] 사이 간격 (px)
+# 툴바 버튼 [로마자 표기] [표지 넣기] 사이 간격 (px)
 TOOLBAR_BTN_GAP = 16
 # 지금 키보드가 가는 구간(왼쪽 썸네일 / 가운데 미리보기 / 오른쪽 패널) 테두리 색·두께
 FOCUS_LINE = "#e00000"
@@ -644,10 +644,8 @@ class PDFLevelPreviewApp:
         toolbar.pack(side=tk.TOP, fill=tk.X)
 
         # 버튼 사이를 띄운다 (TOOLBAR_BTN_GAP)
-        tk.Button(toolbar, text="파일 열기", command=self.open_pdf, cursor="hand2",
-                  font=UI_FONT).pack(side=tk.LEFT, padx=(6, 0))
         tk.Button(toolbar, text="로마자 표기", command=self.set_roman_labels, cursor="hand2",
-                  font=UI_FONT).pack(side=tk.LEFT, padx=(TOOLBAR_BTN_GAP, 0))
+                  font=UI_FONT).pack(side=tk.LEFT, padx=(6, 0))
         tk.Button(toolbar, text="표지 넣기", command=self.open_cover_dialog, cursor="hand2",
                   font=UI_FONT).pack(side=tk.LEFT, padx=(TOOLBAR_BTN_GAP, 6))
         self.filename_label = tk.Label(toolbar, text="열린 파일 없음", anchor=tk.W, font=UI_FONT_SMALL)
@@ -1194,11 +1192,6 @@ class PDFLevelPreviewApp:
     # ------------------------------------------------------------------ #
     # PDF loading
     # ------------------------------------------------------------------ #
-    def open_pdf(self):
-        path = filedialog.askopenfilename(filetypes=[("PDF 파일", "*.pdf")])
-        if path:
-            self._load_pdf(path)
-
     def _load_pdf(self, path):
         if not self._confirm_discard_edits():
             return
