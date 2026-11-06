@@ -42,9 +42,9 @@ UI_FONT_BOLD = ("맑은 고딕", 20, "bold")
 THUMB_W = 280
 THUMB_MARGIN = 16
 THUMB_LABEL_FONT = ("맑은 고딕", 20, "bold")
-# 썸네일 아래 "p.11 (1)" 글씨 색과 테두리 색 (선택과 상관없이 같은 색). 흰 글씨만으로는 흐릿해 보여서 자막처럼
-# 검은 테두리를 두른다. 선택한 칸의 연파랑 바탕은 이 글씨 아래까지 깔지 않는다 (_draw_selection)
-THUMB_LABEL_FG, THUMB_LABEL_OUTLINE = "white", "black"
+# 썸네일 아래 "p.11 (1)" 글씨 색 (노랑, 선택과 상관없이 같은 색). 진회색 바탕 위 대비 4.4.
+# 선택한 칸의 연파랑 바탕은 이 글씨 아래까지 깔지 않는다 (_draw_selection)
+THUMB_LABEL_FG = "#ffe066"
 THUMB_OCR_W = 40  # 글자를 뽑을 수 있는(OCR된) 페이지 썸네일 오른쪽 아래 OCR 표시(ocr.png, 네모 아이콘) 한 변 (px)
 # [보기 변경](F2): 가운데 미리보기를 빼고 왼쪽 썸네일 한 줄에 이만큼. 칸이 좁으면 썸네일을 줄인다(넓어도 THUMB_W까지)
 THUMB_GRID_COLS = 10
@@ -1512,13 +1512,9 @@ class PDFLevelPreviewApp:
         paper = self._paper_number(idx)
         if paper:  # [로마자 표기]: 종이 쪽 번호도
             caption += f" ({paper})"
-        # 테두리: Tk 글씨에는 테두리가 없어서 같은 글씨를 둘레 8방향으로 2px씩 밀어 테두리 색으로 먼저 그리고 그 위에 본 글씨
-        lx, ly = x + self._thumb_w // 2, y + thumb_h + 8
-        for dx, dy in ((-2, -2), (0, -2), (2, -2), (-2, 0), (2, 0), (-2, 2), (0, 2), (2, 2)):
-            items.append(self.thumb_canvas.create_text(lx + dx, ly + dy, anchor=tk.N, text=caption,
-                                                       font=THUMB_LABEL_FONT, fill=THUMB_LABEL_OUTLINE))
-        items.append(self.thumb_canvas.create_text(lx, ly, anchor=tk.N, text=caption,
-                                                   font=THUMB_LABEL_FONT, fill=THUMB_LABEL_FG))
+        items.append(self.thumb_canvas.create_text(
+            x + self._thumb_w // 2, y + thumb_h + 8, anchor=tk.N,
+            text=caption, font=THUMB_LABEL_FONT, fill=THUMB_LABEL_FG))
         if self.slots[idx][0] in self._skew_flagged:  # 파란 현재 페이지 테두리 바깥에
             items.append(self.thumb_canvas.create_rectangle(
                 x - 6, y - 6, x + self._thumb_w + 6, y + thumb_h + 6, outline=THUMB_SKEW_LINE, width=3))
