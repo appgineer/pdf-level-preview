@@ -114,7 +114,7 @@ THUMB_SKEW_LINE = "#e00000"
 # 툴바: [로마자 표기]로 정한 종이 쪽 번호 글씨 색 (진한 초록. 빨간 페이지 번호·파란 폴더 번호 사이에 괄호로.
 # 보라는 잘 안 보였다)
 PAPER_NUM_FG = "#006b2b"
-# 툴바 버튼 [로마자 표기] [표지 넣기] 사이 간격 (px)
+# 툴바 버튼 [문자 읽기] [로마자 표기] [표지 넣기] 사이 간격 (px)
 TOOLBAR_BTN_GAP = 16
 # 지금 키보드가 가는 구간(왼쪽 썸네일 / 가운데 미리보기 / 오른쪽 패널) 테두리 색·두께
 FOCUS_LINE = "#e00000"
@@ -652,8 +652,10 @@ class PDFLevelPreviewApp:
         toolbar.pack(side=tk.TOP, fill=tk.X)
 
         # 버튼 사이를 띄운다 (TOOLBAR_BTN_GAP)
-        tk.Button(toolbar, text="로마자 표기", command=self.set_roman_labels, cursor="hand2",
+        tk.Button(toolbar, text="문자 읽기", command=self.read_text_on_screen, cursor="hand2",
                   font=UI_FONT).pack(side=tk.LEFT, padx=(6, 0))
+        tk.Button(toolbar, text="로마자 표기", command=self.set_roman_labels, cursor="hand2",
+                  font=UI_FONT).pack(side=tk.LEFT, padx=(TOOLBAR_BTN_GAP, 0))
         tk.Button(toolbar, text="표지 넣기", command=self.open_cover_dialog, cursor="hand2",
                   font=UI_FONT).pack(side=tk.LEFT, padx=(TOOLBAR_BTN_GAP, 6))
         self.filename_label = tk.Label(toolbar, text="열린 파일 없음", anchor=tk.W, font=UI_FONT_SMALL)
@@ -3300,6 +3302,27 @@ class PDFLevelPreviewApp:
         canvas.create_rectangle(ox, y0, x0, y1, **shade)    # 좌
         canvas.create_rectangle(x1, y0, ix1, y1, **shade)   # 우
         canvas.create_rectangle(x0, y0, x1, y1, outline="#1e90ff", width=2, tags="crop")
+
+    def read_text_on_screen(self):
+        """[문자 읽기]: PowerToys 텍스트 추출기 단축키 Win+Shift+T를 대신 눌러, 화면에서 끌어 고른 곳의 글자를 읽게 한다.
+
+        읽은 글자는 PowerToys가 클립보드에 넣는다(Ctrl+V로 붙여넣기). 일본어 등은 PowerToys 설정의 언어와
+        Windows OCR 언어팩이 있어야 한다. PowerToys가 꺼져 있으면 Win+Shift+T는 Windows 기본 동작(작업 표시줄 앱을
+        거꾸로 옮겨 다님)이 되므로 보내지 않고 알린다.
+        """
+        out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq PowerToys.exe", "/NH"],
+                             capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW).stdout
+        if b"PowerToys.exe" not in out:
+            messagebox.showinfo("문자 읽기", "PowerToys가 실행 중이 아닙니다.\n"
+                                "PowerToys를 켜고 텍스트 추출기를 사용으로 둔 뒤 다시 누르세요.", parent=self.root)
+            return
+        user32 = ctypes.windll.user32
+        # (가상 키, 확장 키 표시): 왼쪽 Win은 확장 키라 KEYEVENTF_EXTENDEDKEY(1)를 붙인다. 뗄 때는 KEYEVENTF_KEYUP(2)
+        keys = ((0x5B, 1), (0x10, 0), (0x54, 0))  # 왼쪽 Win, Shift, T
+        for vk, ext in keys:
+            user32.keybd_event(vk, 0, ext, 0)
+        for vk, ext in reversed(keys):
+            user32.keybd_event(vk, 0, ext | 2, 0)
 
     def set_roman_labels(self):
         """보고 있는 페이지를 종이 1쪽으로: 앞쪽은 i, ii …, 이 페이지부터 1, 2 … (PDF 페이지 레이블, 저장할 때 넣는다).
