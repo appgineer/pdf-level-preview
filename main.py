@@ -109,8 +109,9 @@ THUMB_DROP_LINE = "#e00000"
 THUMB_CUR_LINE = "#1f6fd0"
 # 썸네일: 자동 보정 때 DESKEW_MAX°를 넘게 기울어 그대로 둔 페이지 테두리 색 (누르면 없어진다)
 THUMB_SKEW_LINE = "#e00000"
-# 툴바: [로마자 표기]로 정한 종이 쪽 번호 글씨 색 (보라. 빨간 페이지 번호·파란 폴더 번호 사이에 괄호로)
-PAPER_NUM_FG = "#8e44ad"
+# 툴바: [로마자 표기]로 정한 종이 쪽 번호 글씨 색 (진한 초록. 빨간 페이지 번호·파란 폴더 번호 사이에 괄호로.
+# 보라는 잘 안 보였다)
+PAPER_NUM_FG = "#006b2b"
 # 툴바 버튼 [로마자 표기] [표지 넣기] 사이 간격 (px)
 TOOLBAR_BTN_GAP = 16
 # 지금 키보드가 가는 구간(왼쪽 썸네일 / 가운데 미리보기 / 오른쪽 패널) 테두리 색·두께
@@ -651,7 +652,7 @@ class PDFLevelPreviewApp:
         self.filename_label = tk.Label(toolbar, text="열린 파일 없음", anchor=tk.W, font=UI_FONT_SMALL)
         self.filename_label.pack(side=tk.LEFT, padx=6)
 
-        # "11(1) / 100": 빨간 지금 페이지 / 총 페이지, 사이에 보라색 종이 쪽 번호([로마자 표기]가 있을 때).
+        # "11(1) / 100": 빨간 지금 페이지 / 총 페이지, 사이에 진한 초록 종이 쪽 번호([로마자 표기]가 있을 때).
         # 글씨 칸 셋을 여백 없이 붙여 한 줄처럼 보인다
         def num_label(fg, padx=0):
             label = tk.Label(toolbar, text="", fg=fg, font=UI_FONT_BOLD, padx=0, bd=0)
@@ -2595,7 +2596,7 @@ class PDFLevelPreviewApp:
 
     def _update_page_label(self):
         """툴바의 빨간 "선택 페이지 / 총 페이지" + 파란색으로 폴더 PDF 전체 기준 몇 번째 장 / 총 장수.
-        [로마자 표기]가 있으면 번호 뒤에 보라색 괄호로 종이 쪽 번호: "11(1) / 100 | 111(101) / 1000".
+        [로마자 표기]가 있으면 번호 뒤에 진한 초록 괄호로 종이 쪽 번호: "11(1) / 100 | 111(101) / 1000".
         폴더 쪽 번호는 폴더 기준 장 번호에서 로마자 쪽 수(앞 파일들 + 이 파일)를 뺀 것"""
         texts = [""] * 7  # 페이지, 종이 쪽, / 총, 구분선, 폴더 장, 폴더 종이 쪽, / 폴더 총
         if self._page_count:
@@ -2670,6 +2671,8 @@ class PDFLevelPreviewApp:
         if self.pdf_doc is None:
             return
         which = self.crop_range_var.get()
+        if not self._confirm_range(which, f"{'오른쪽' if delta > 0 else '왼쪽'} 90° 회전을"):
+            return
         for idx in self._range_pages(which):
             e = self._page_edit(idx)
             self._set_page_edit(idx, rot=(e["rot"] + delta) % 360,
@@ -2690,7 +2693,7 @@ class PDFLevelPreviewApp:
             return
         which = self.crop_range_var.get()
         jobs = [self.slots[i] + (self._page_edit(i)["rot"],) for i in self._range_pages(which)]
-        if not jobs:
+        if not jobs or not self._confirm_range(which, "자동 보정을"):
             return
         n = min(len(jobs), max(1, ((os.cpu_count() or 4) * 3) // 4))
         res_q = multiprocessing.Queue()
@@ -2993,6 +2996,8 @@ class PDFLevelPreviewApp:
         if self.pdf_doc is None:
             return
         which = self.crop_range_var.get()
+        if not self._confirm_range(which, "자르기를"):
+            return
         margins = self._page_edit(self.current_page)["crop"]
         pages = self._range_pages(which)  # 현재 페이지만이면 여백은 이미 반영돼 있고 잘린 화면만 보여준다
         for idx in pages:
@@ -3019,6 +3024,20 @@ class PDFLevelPreviewApp:
     @staticmethod
     def _range_label(which):
         return which if which == "선택한 페이지" else f"{which} 페이지"
+
+    def _confirm_range(self, which, what):
+        """적용 범위가 홀수·짝수·전체면 한 번 더 묻는다. 전체로 둔 줄 모르고 여러 페이지를 고치는 실수를 막는다.
+
+        선택한 페이지면 묻지 않는다. 기본 단추는 [아니요]라 Enter를 한 번 더 눌러도 적용되지 않는다.
+        what: "자르기를" / "왼쪽 90° 회전을" / "자동 보정을"
+        """
+        if which == "선택한 페이지":
+            return True
+        n = len(self._range_pages(which))
+        return messagebox.askyesno(
+            "적용 범위 확인",
+            f"적용 범위가 [{which}]입니다.\n{self._range_label(which)} {n}쪽에 {what} 적용할까요?",
+            default=messagebox.NO, parent=self.root)
 
     def reset_edits(self):
         """목록 범위(선택한 페이지/홀수/짝수/전체)의 편집을 모두 되돌린다 (자르기·기울기·90° 회전)"""
@@ -3153,7 +3172,7 @@ class PDFLevelPreviewApp:
             return
         self._label_start_uid = self.slots[self.current_page][0]
         self._edits_dirty = True
-        self._update_page_label()  # 툴바 보라색 종이 쪽 번호
+        self._update_page_label()  # 툴바 진한 초록 종이 쪽 번호
         self._thumb_dirty.update(self._drawn_pages)  # 썸네일 아래 쪽 번호
         self._schedule_thumb_redraw()
         start = self.current_page
