@@ -40,8 +40,9 @@ UI_FONT_BOLD = ("맑은 고딕", 20, "bold")
 THUMB_W = 280
 THUMB_MARGIN = 16
 THUMB_LABEL_FONT = ("맑은 고딕", 20, "bold")
-# 썸네일 아래 "p.11 (1)" 글씨 색 (파랑, 선택과 상관없이 같은 색)
-THUMB_LABEL_FG = "#1565c0"
+# 썸네일 아래 "p.11 (1)" 글씨 색 (흰색, 선택과 상관없이 같은 색). 진회색 바탕 위 대비 5.7.
+# 선택한 칸의 연파랑 바탕은 이 글씨 아래까지 깔지 않는다 (연파랑 위 흰 글씨는 안 보인다, _draw_selection)
+THUMB_LABEL_FG = "white"
 THUMB_OCR_W = 40  # 글자를 뽑을 수 있는(OCR된) 페이지 썸네일 오른쪽 아래 OCR 표시(ocr.png, 네모 아이콘) 한 변 (px)
 # [보기 변경](F2): 가운데 미리보기를 빼고 왼쪽 썸네일 한 줄에 이만큼. 칸이 좁으면 썸네일을 줄인다(넓어도 THUMB_W까지)
 THUMB_GRID_COLS = 10
@@ -1546,8 +1547,9 @@ class PDFLevelPreviewApp:
         for idx in self._selected:
             if idx in self._drawn_pages:
                 x, y = self._get_thumb_pos(idx)
+                # 썸네일 둘레까지만 (아래 흰 쪽 번호 글씨는 진회색 바탕 위에 둔다)
                 self.thumb_canvas.create_rectangle(
-                    x - pad, y - pad, x + self._thumb_w + pad, y + thumb_h + 8 + self._thumb_label_h + pad,
+                    x - pad, y - pad, x + self._thumb_w + pad, y + thumb_h + pad,
                     fill=THUMB_SEL_BG, outline="", tags="thumbsel")
         self.thumb_canvas.tag_lower("thumbsel")  # 썸네일 그림 밑으로
 
@@ -4269,6 +4271,31 @@ def _pdf_arg(argv):
     return None
 
 
+def _set_window_icon(root, path):
+    """창 바깥 틀(Tk의 wrapper)에 큰·작은 아이콘을 Win32로 직접 넣는다. 작업 표시줄은 큰 아이콘을 쓴다.
+
+    Tk의 iconbitmap만으로는 작업 표시줄에 Python 아이콘이 남는 일이 있었다. 창이 화면에 뜬 뒤에 불러야 한다.
+    전역 ctypes.windll.user32의 argtypes를 건드리지 않게 따로 불러 64비트 핸들을 제대로 넘긴다.
+    """
+    try:
+        user32 = ctypes.WinDLL("user32")
+        user32.GetParent.argtypes = [ctypes.c_void_p]
+        user32.GetParent.restype = ctypes.c_void_p
+        user32.LoadImageW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint,
+                                      ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+        user32.LoadImageW.restype = ctypes.c_void_p
+        user32.SendMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_void_p]
+        hwnd = user32.GetParent(root.winfo_id())
+        # (ICON_BIG 1 ← SM_CXICON 11), (ICON_SMALL 0 ← SM_CXSMICON 49). IMAGE_ICON 1, LR_LOADFROMFILE 0x10
+        for which, metric in ((1, 11), (0, 49)):
+            size = user32.GetSystemMetrics(metric)
+            hicon = user32.LoadImageW(None, path, 1, size, size, 0x10)
+            if hwnd and hicon:
+                user32.SendMessageW(hwnd, 0x80, which, hicon)  # WM_SETICON
+    except Exception:
+        pass
+
+
 def main():
     _cleanup_temp_files()
     _cleanup_save_dirs()
@@ -4286,11 +4313,15 @@ def main():
         root = tk.Tk()
         has_dnd = False
 
-    # 창·팝업·작업 표시줄 아이콘. default= 로 주면 팝업(Toplevel)도 같은 아이콘이 된다
+    # 창·작업 표시줄 아이콘. default= 는 팝업(Toplevel)용이고, 창이 화면에 뜨기 전에 부르면 이 창에는 안 들어갈 수 있어서
+    # 이 창에는 따로 넣는다 (Tk가 창을 띄울 때 넣는다). 창이 뜬 뒤 Win32로도 한 번 더 넣는다 (_set_window_icon)
+    icon_path = os.path.join(APP_DIR, "icon.ico")
     try:
-        root.iconbitmap(default=os.path.join(APP_DIR, "icon.ico"))
+        root.iconbitmap(icon_path)
+        root.iconbitmap(default=icon_path)
     except tk.TclError:
         pass
+    root.after(300, lambda: _set_window_icon(root, icon_path))
 
     # Windows HiDPI 스케일링 비활성화 (이미지 원본 화질 유지)
     try:
