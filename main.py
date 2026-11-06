@@ -41,6 +41,8 @@ THUMB_W = 280
 THUMB_MARGIN = 16
 THUMB_LABEL_FONT = ("맑은 고딕", 16)
 THUMB_OCR_W = 40  # 글자를 뽑을 수 있는(OCR된) 페이지 썸네일 오른쪽 아래 OCR 표시(ocr.png, 네모 아이콘) 한 변 (px)
+# [보기 변경](F2): 가운데 미리보기를 빼고 왼쪽 썸네일 한 줄에 이만큼. 칸이 좁으면 썸네일을 줄인다(넓어도 THUMB_W까지)
+THUMB_GRID_COLS = 10
 INDICATOR_SIZE = 24  # 체크박스/라디오버튼 인디케이터 크기
 INDICATOR_MARK = "#e00000"  # 선택 표시(체크마크/라디오 점) 색. 검은색은 눈에 잘 안 띈다
 # 오른쪽 패널 구간 색: 편집(PDF 직접 수정) / 설정 파일(config.json)
@@ -535,16 +537,18 @@ class PDFLevelPreviewApp:
         # 글자를 뽑을 수 있는(OCR된) 페이지 {(파일 경로, 페이지 번호)}. 썸네일과 같이 알아낸다
         self._text_pages = set()
         # 그 썸네일 오른쪽 아래에 올리는 OCR 표시. 테두리 안쪽이 투명한 아이콘이라 페이지 글자가 비치지 않게
-        # 아이콘과 같은 크기의 흰 바탕에 올린다
+        # 아이콘과 같은 크기의 흰 바탕에 올린다. 크기는 썸네일 크기에 맞춰 그릴 때 줄인다 (_ocr_badge)
         try:
             badge = Image.open(os.path.join(APP_DIR, "ocr.png")).convert("RGBA")
             badge = badge.crop(badge.getbbox())
-            badge = badge.resize((THUMB_OCR_W, round(badge.height * THUMB_OCR_W / badge.width)), Image.LANCZOS)
-            bg = Image.new("RGBA", badge.size, "white")
-            bg.alpha_composite(badge)
-            self._ocr_badge = ImageTk.PhotoImage(bg)
+            self._ocr_badge_src = Image.new("RGBA", badge.size, "white")
+            self._ocr_badge_src.alpha_composite(badge)
         except OSError:
-            self._ocr_badge = None
+            self._ocr_badge_src = None
+        self._ocr_badges = {}  # 한 변(px) → PhotoImage
+        self._thumb_w = THUMB_W  # 썸네일 칸 너비. [보기 변경](F2)에서 한 줄 THUMB_GRID_COLS칸에 맞춰 줄어든다
+        self._grid_view = False  # [보기 변경](F2) 상태: 가운데 미리보기 없이 썸네일만 넓게
+        self._grid_popup = False  # [보기 변경]에서 썸네일을 눌러 띄운 미리보기 팝업이 열려 있는지
         self.preview_cache = {}  # key -> (PIL Image, 상태문구)
         self.thumbnail_photo_refs = {}
         self._drawn_pages = {}
@@ -677,6 +681,10 @@ class PDFLevelPreviewApp:
         self.zoom_label.pack(side=tk.RIGHT)
         tk.Button(toolbar, text="-", width=2, command=self.zoom_out, cursor="hand2", font=UI_FONT).pack(side=tk.RIGHT, padx=2)
         tk.Button(toolbar, text="+", width=2, command=self.zoom_in, cursor="hand2", font=UI_FONT).pack(side=tk.RIGHT, padx=2)
+        # [보기 변경] (F2): 가운데 미리보기 없이 썸네일만 한 줄 THUMB_GRID_COLS칸. 켜져 있으면 눌린 모양
+        self._grid_btn = tk.Button(toolbar, text="보기 변경 (F2)", command=self.toggle_grid_view,
+                                   cursor="hand2", font=UI_FONT)
+        self._grid_btn.pack(side=tk.RIGHT, padx=(2, TOOLBAR_BTN_GAP))
 
         # Resizable split
         paned = tk.PanedWindow(
@@ -685,9 +693,11 @@ class PDFLevelPreviewApp:
             sashcursor="sb_h_double_arrow"
         )
         paned.pack(fill=tk.BOTH, expand=True)
+        self._paned = paned  # [보기 변경]에서 가운데 칸을 빼고 넣는다
 
         # ── Left: thumbnail panel ──────────────────────────────────────
         left = tk.Frame(paned, bd=1, relief=tk.SUNKEN, highlightthickness=FOCUS_LINE_W)
+        self._thumb_frame = left
         # 초기 4열. +60 = 스크롤바/테두리 여유
         paned.add(left, minsize=160, width=4 * (THUMB_W + THUMB_MARGIN * 2) + 60)
         self._thumb_label_h = tkfont.Font(font=THUMB_LABEL_FONT).metrics("linespace")
@@ -742,6 +752,21 @@ class PDFLevelPreviewApp:
         # ── Center: preview ────────────────────────────────────────────
         preview_frame = tk.Frame(paned, highlightthickness=FOCUS_LINE_W)
         paned.add(preview_frame, minsize=400, stretch="always")
+        self._preview_frame = preview_frame
+
+        # [보기 변경] 팝업 맨 위 줄 (팝업일 때만 보인다, _open_grid_popup). 선 편집·90° 회전·닫기.
+        # 선 편집 체크는 오른쪽 편집 구간의 것과 같은 변수라 함께 바뀐다
+        self._popup_bar = tk.Frame(preview_frame, padx=8, pady=6)
+        tk.Checkbutton(self._popup_bar, text="선 편집", variable=self.crop_edit_var,
+                       command=self._on_crop_edit_toggle, cursor="hand2", font=UI_FONT,
+                       image=self._ind_tk['cb_off'], selectimage=self._ind_tk['cb_on'],
+                       indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
+                       selectcolor=self._bg_color).pack(side=tk.LEFT)
+        for text, delta in (("왼쪽 90°", -90), ("오른쪽 90°", 90)):
+            tk.Button(self._popup_bar, text=text, command=lambda d=delta: self.rotate_90(d),
+                      cursor="hand2", font=UI_FONT).pack(side=tk.LEFT, padx=(TOOLBAR_BTN_GAP, 0))
+        tk.Button(self._popup_bar, text="닫기 (Esc)", command=self._close_grid_popup,
+                  cursor="hand2", font=UI_FONT).pack(side=tk.RIGHT)
 
         prev_vscroll = ttk.Scrollbar(preview_frame, orient=tk.VERTICAL)
         prev_hscroll = ttk.Scrollbar(preview_frame, orient=tk.HORIZONTAL)
@@ -907,6 +932,9 @@ class PDFLevelPreviewApp:
         self.root.bind("<Up>",    lambda e: self._nudge_angle_key(e, +0.1))
         # F1: 어느 구간에 있든(입력칸 안에서도) "격자 보기"를 켜고 끈다
         self.root.bind("<F1>", lambda e: (self.grid_var.set(not self.grid_var.get()), self._on_grid_toggle()))
+        # F2: [보기 변경] (어느 구간에서든). Esc: 그 상태에서 띄운 미리보기 팝업 닫기
+        self.root.bind("<F2>", lambda e: self.toggle_grid_view())
+        self.root.bind("<Escape>", lambda e: self._close_grid_popup())
         # Ctrl+W: 창 닫기 (오른쪽 위 X와 같다). 한글 입력 상태나 CapsLock이어도 되게 Windows 키 코드로도 본다
         self.root.bind("<Control-KeyPress>",
                        lambda e: self._on_close() if e.keycode == 87 or e.keysym.lower() == "w" else None)
@@ -1327,12 +1355,16 @@ class PDFLevelPreviewApp:
         if canvas_w <= 1:
             canvas_w = 220
 
-        col_w = THUMB_W + THUMB_MARGIN * 2
-        self._thumb_cols = max(1, canvas_w // col_w)
+        if self._grid_view:  # [보기 변경]: 한 줄에 THUMB_GRID_COLS칸. 칸이 넓어도 썸네일은 원래 크기까지만
+            self._thumb_w = max(40, min(THUMB_W, canvas_w // THUMB_GRID_COLS - THUMB_MARGIN * 2))
+        else:
+            self._thumb_w = THUMB_W
+        col_w = self._thumb_w + THUMB_MARGIN * 2
+        self._thumb_cols = THUMB_GRID_COLS if self._grid_view else max(1, canvas_w // col_w)
         total_grid_w = self._thumb_cols * col_w
         self._thumb_offset_x = max(0, (canvas_w - total_grid_w) // 2)
 
-        self._thumb_cell_h = int(THUMB_W * 1.4) + 8 + self._thumb_label_h + THUMB_MARGIN * 2
+        self._thumb_cell_h = int(self._thumb_w * 1.4) + 8 + self._thumb_label_h + THUMB_MARGIN * 2
         rows = (self._page_count + self._thumb_cols - 1) // self._thumb_cols if self._page_count > 0 else 0
         self._thumb_total_height = rows * self._thumb_cell_h
 
@@ -1341,7 +1373,7 @@ class PDFLevelPreviewApp:
     def _get_thumb_pos(self, page_idx):
         col = page_idx % self._thumb_cols
         row = page_idx // self._thumb_cols
-        col_w = THUMB_W + THUMB_MARGIN * 2
+        col_w = self._thumb_w + THUMB_MARGIN * 2
         x = self._thumb_offset_x + col * col_w + THUMB_MARGIN
         y = row * self._thumb_cell_h + THUMB_MARGIN
         return x, y
@@ -1391,7 +1423,7 @@ class PDFLevelPreviewApp:
                 self.thumb_canvas.delete(item_id)
 
         x, y = self._get_thumb_pos(idx)
-        thumb_h = int(THUMB_W * 1.4)
+        thumb_h = int(self._thumb_w * 1.4)
         items = []
 
         page = self.slots[idx][1:]
@@ -1413,30 +1445,31 @@ class PDFLevelPreviewApp:
                 img = img.crop((round(left * s), round(top * s),
                                 round(img.width - right * s), round(img.height - bottom * s)))
             # 90° 돌리면 가로로 길어져 칸을 넘으므로 항상 칸 안에 맞춘다 (겹침 방지)
-            ratio = min(THUMB_W / img.width, thumb_h / img.height)
+            ratio = min(self._thumb_w / img.width, thumb_h / img.height)
             if abs(ratio - 1) > 0.01:
                 img = img.resize((max(1, int(img.width * ratio)), max(1, int(img.height * ratio))),
                                  Image.LANCZOS)
             photo = ImageTk.PhotoImage(img)
             self.thumbnail_photo_refs[idx] = photo
             img_id = self.thumb_canvas.create_image(
-                x + THUMB_W // 2, y + thumb_h // 2,
+                x + self._thumb_w // 2, y + thumb_h // 2,
                 image=photo, anchor=tk.CENTER
             )
             items.append(img_id)
             # 글자를 뽑을 수 있는(OCR된) 페이지는 오른쪽 아래에 OCR 표시 (자르기 빨간 선은 그 위에)
-            if page in self._text_pages and self._ocr_badge:
+            badge = self._ocr_badge() if page in self._text_pages else None
+            if badge:
                 items.append(self.thumb_canvas.create_image(
-                    x + THUMB_W // 2 - img.width // 2 + img.width - 6,
+                    x + self._thumb_w // 2 - img.width // 2 + img.width - 6,
                     y + thumb_h // 2 - img.height // 2 + img.height - 6,
-                    image=self._ocr_badge, anchor=tk.SE))
+                    image=badge, anchor=tk.SE))
             # 설정 파일의 자르기(mm) 자리를 빨간 선으로 (미리보기와 같은 표시)
             cfg_sides = self._crop_cfg_sides()
             if cfg_sides and any(cfg_sides):
                 page_w = self._page_disp_size(idx)[0] - left - right
                 scale = img.width / page_w
                 ct, cb, cl, cr = (_mm_to_pt(v) * scale for v in cfg_sides)
-                ix0 = x + THUMB_W // 2 - img.width // 2
+                ix0 = x + self._thumb_w // 2 - img.width // 2
                 iy0 = y + thumb_h // 2 - img.height // 2
                 if img.width > cl + cr and img.height > ct + cb:
                     items.append(self.thumb_canvas.create_rectangle(
@@ -1444,12 +1477,12 @@ class PDFLevelPreviewApp:
                         outline=CFG_CROP_LINE, width=2))
         else:
             rect_id = self.thumb_canvas.create_rectangle(
-                x, y, x + THUMB_W, y + thumb_h,
+                x, y, x + self._thumb_w, y + thumb_h,
                 fill="#d0d0d0", outline="#d0d0d0"
             )
             items.append(rect_id)
             txt_id = self.thumb_canvas.create_text(
-                x + THUMB_W // 2, y + thumb_h // 2,
+                x + self._thumb_w // 2, y + thumb_h // 2,
                 text=f"p.{idx + 1}", font=THUMB_LABEL_FONT, fill="#888"
             )
             items.append(txt_id)
@@ -1459,15 +1492,26 @@ class PDFLevelPreviewApp:
         if paper:  # [로마자 표기]: 종이 쪽 번호도
             caption += f" ({paper})"
         label_id = self.thumb_canvas.create_text(
-            x + THUMB_W // 2, y + thumb_h + 8, anchor=tk.N,
+            x + self._thumb_w // 2, y + thumb_h + 8, anchor=tk.N,
             text=caption, font=THUMB_LABEL_FONT, fill="#000"
         )
         items.append(label_id)
         if self.slots[idx][0] in self._skew_flagged:  # 파란 현재 페이지 테두리 바깥에
             items.append(self.thumb_canvas.create_rectangle(
-                x - 6, y - 6, x + THUMB_W + 6, y + thumb_h + 6, outline=THUMB_SKEW_LINE, width=3))
+                x - 6, y - 6, x + self._thumb_w + 6, y + thumb_h + 6, outline=THUMB_SKEW_LINE, width=3))
 
         self._drawn_pages[idx] = items
+
+    def _ocr_badge(self):
+        """지금 썸네일 크기에 맞춘 OCR 표시. 원래 크기(THUMB_W) 썸네일에서 THUMB_OCR_W px, 작아지면 같이 작게"""
+        if self._ocr_badge_src is None:
+            return None
+        w = max(16, round(THUMB_OCR_W * self._thumb_w / THUMB_W))
+        if w not in self._ocr_badges:
+            src = self._ocr_badge_src
+            self._ocr_badges[w] = ImageTk.PhotoImage(
+                src.resize((w, round(src.height * w / src.width)), Image.LANCZOS))
+        return self._ocr_badges[w]
 
     def _draw_selection(self):
         """선택한 페이지는 분홍 바탕, 현재 페이지(미리보기에 보이는 페이지)는 빨간 테두리"""
@@ -1479,13 +1523,13 @@ class PDFLevelPreviewApp:
         if self._page_count == 0:
             return
 
-        thumb_h = int(THUMB_W * 1.4)
+        thumb_h = int(self._thumb_w * 1.4)
         pad = THUMB_MARGIN // 2
         for idx in self._selected:
             if idx in self._drawn_pages:
                 x, y = self._get_thumb_pos(idx)
                 self.thumb_canvas.create_rectangle(
-                    x - pad, y - pad, x + THUMB_W + pad, y + thumb_h + 8 + self._thumb_label_h + pad,
+                    x - pad, y - pad, x + self._thumb_w + pad, y + thumb_h + 8 + self._thumb_label_h + pad,
                     fill=THUMB_SEL_BG, outline="", tags="thumbsel")
         self.thumb_canvas.tag_lower("thumbsel")  # 썸네일 그림 밑으로
 
@@ -1493,7 +1537,7 @@ class PDFLevelPreviewApp:
             return
         x, y = self._get_thumb_pos(self.current_page)
         self._selection_rect_id = self.thumb_canvas.create_rectangle(
-            x - 2, y - 2, x + THUMB_W + 2, y + thumb_h + 2,
+            x - 2, y - 2, x + self._thumb_w + 2, y + thumb_h + 2,
             outline=THUMB_CUR_LINE, width=3
         )
 
@@ -1501,10 +1545,10 @@ class PDFLevelPreviewApp:
         """마우스 아래 썸네일의 화면 위치. 없으면 None"""
         cx = self.thumb_canvas.canvasx(event.x)
         cy = self.thumb_canvas.canvasy(event.y)
-        thumb_h = int(THUMB_W * 1.4)
+        thumb_h = int(self._thumb_w * 1.4)
         for idx in self._drawn_pages:
             x, y = self._get_thumb_pos(idx)
-            if x <= cx <= x + THUMB_W and y <= cy <= y + thumb_h + 8 + self._thumb_label_h:
+            if x <= cx <= x + self._thumb_w and y <= cy <= y + thumb_h + 8 + self._thumb_label_h:
                 return idx
         return None
 
@@ -1546,7 +1590,8 @@ class PDFLevelPreviewApp:
         else:
             self._selected = {idx}
             self._sel_anchor = idx
-        self._thumb_press = {"idx": idx, "x": event.x, "y": event.y, "shrink": shrink, "drag": False}
+        self._thumb_press = {"idx": idx, "x": event.x, "y": event.y, "shrink": shrink, "drag": False,
+                             "plain": not (shift or ctrl)}  # 그냥 클릭이면 [보기 변경]에서 팝업을 띄운다
         if idx != self.current_page:
             self.select_page(idx)
         else:
@@ -1580,12 +1625,14 @@ class PDFLevelPreviewApp:
         elif press["shrink"]:
             self._selected = {press["idx"]}
             self._draw_selection()
+        if self._grid_view and not press["drag"] and press["plain"]:
+            self._open_grid_popup()
 
     def _drop_pos(self, ex, ey):
         """드래그를 놓을 자리 (끼워 넣을 화면 위치, 선 x, 선 y). 칸 왼쪽 절반이면 그 앞, 오른쪽 절반이면 그 뒤"""
         cx = self.thumb_canvas.canvasx(ex)
         cy = self.thumb_canvas.canvasy(ey)
-        col_w = THUMB_W + THUMB_MARGIN * 2
+        col_w = self._thumb_w + THUMB_MARGIN * 2
         col = max(0, min(self._thumb_cols - 1, int((cx - self._thumb_offset_x) // col_w)))
         row = max(0, int(cy // self._thumb_cell_h))
         idx = row * self._thumb_cols + col
@@ -1594,16 +1641,16 @@ class PDFLevelPreviewApp:
             after = True
         else:
             x, _ = self._get_thumb_pos(idx)
-            after = cx > x + THUMB_W / 2
+            after = cx > x + self._thumb_w / 2
         x, y = self._get_thumb_pos(idx)
-        line_x = x + THUMB_W + THUMB_MARGIN if after else x - THUMB_MARGIN
+        line_x = x + self._thumb_w + THUMB_MARGIN if after else x - THUMB_MARGIN
         return idx + (1 if after else 0), line_x, y
 
     def _draw_drop_line(self):
         press = self._thumb_press
         self.thumb_canvas.delete("dropline")
         _, x, y = self._drop_pos(press["x"], press["y"])
-        self.thumb_canvas.create_line(x, y, x, y + int(THUMB_W * 1.4),
+        self.thumb_canvas.create_line(x, y, x, y + int(self._thumb_w * 1.4),
                                       fill=THUMB_DROP_LINE, width=6, tags="dropline")
 
     def _thumb_autoscroll(self):
@@ -1680,6 +1727,54 @@ class PDFLevelPreviewApp:
         self.thumbnail_photo_refs.clear()
         self._selection_rect_id = None
         self._draw_visible_thumbs()
+
+    # ------------------------------------------------------------------ #
+    # [보기 변경] (F2): 썸네일만 넓게 + 누르면 미리보기 팝업
+    # ------------------------------------------------------------------ #
+    def toggle_grid_view(self):
+        """가운데 미리보기 칸을 빼고 왼쪽 썸네일을 그 자리까지 넓혀 한 줄에 THUMB_GRID_COLS칸씩 본다. 다시 누르면 원래대로.
+
+        칸 크기가 바뀌면 썸네일 캔버스의 <Configure>가 칸 배치를 다시 계산한다 (_compute_thumb_layout).
+        """
+        paned, left, frame = self._paned, self._thumb_frame, self._preview_frame
+        self._grid_view = not self._grid_view
+        if self._grid_view:
+            self._normal_left_w = left.winfo_width()
+            # 빠지는 가운데 칸 + 경계선(sashwidth 28 + 양쪽 sashpad 4)만큼 왼쪽을 넓힌다
+            wide = left.winfo_width() + frame.winfo_width() + 36
+            paned.forget(frame)
+            paned.paneconfigure(left, width=wide, stretch="always")
+            self.thumb_canvas.focus_set()
+        else:
+            self._close_grid_popup()
+            paned.add(frame, after=left, minsize=400, stretch="always")
+            paned.paneconfigure(left, width=self._normal_left_w, stretch="last")
+            self.preview_canvas.focus_set()
+        self._grid_btn.config(relief=tk.SUNKEN if self._grid_view else tk.RAISED)
+
+    def _open_grid_popup(self):
+        """[보기 변경]에서 누른 썸네일의 미리보기를 썸네일 위에 팝업처럼 띄운다.
+
+        가운데 미리보기 칸을 그대로 옮겨 올리므로 끌어서 기울기 회전, ←→ 회전, 선 편집(자르기), 확대가 그대로 되고,
+        오른쪽 편집 구간도 이 페이지에 그대로 쓴다. 썸네일 칸 안(place in_)에 놓아 같은 창 안에 있다.
+        """
+        if not self._grid_view:
+            return
+        frame = self._preview_frame
+        if not self._grid_popup:
+            self._grid_popup = True
+            self._popup_bar.pack(side=tk.TOP, fill=tk.X, before=frame.pack_slaves()[0])
+            frame.place(in_=self._thumb_frame, relx=0.5, rely=0.5, relwidth=0.8, relheight=0.96, anchor=tk.CENTER)
+            frame.lift()
+        self.preview_canvas.focus_set()  # ←→ 회전이 바로 되게 (구간 빨간 테두리가 팝업 둘레에)
+
+    def _close_grid_popup(self):
+        if not self._grid_popup:
+            return
+        self._grid_popup = False
+        self._preview_frame.place_forget()
+        self._popup_bar.pack_forget()
+        self.thumb_canvas.focus_set()
 
     # ------------------------------------------------------------------ #
     # Page selection
