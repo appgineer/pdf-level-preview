@@ -42,9 +42,10 @@ UI_FONT_BOLD = ("맑은 고딕", 20, "bold")
 THUMB_W = 280
 THUMB_MARGIN = 16
 THUMB_LABEL_FONT = ("맑은 고딕", 20, "bold")
-# 썸네일 아래 "p.11 (1)" 글씨 색 (노랑, 선택과 상관없이 같은 색). 진회색 바탕 위 대비 4.4.
+# 썸네일 아래 "p.11 (1)" 글씨 색 (진한 노랑, 선택과 상관없이 같은 색). 진회색 바탕 위 대비 4.3.
+# 더 어둡게(주황·황토 쪽) 하면 진회색과 밝기가 가까워져 덜 보인다 (#ffc400 3.6, #e6b000 2.9).
 # 선택한 칸의 연파랑 바탕은 이 글씨 아래까지 깔지 않는다 (_draw_selection)
-THUMB_LABEL_FG = "#ffe066"
+THUMB_LABEL_FG = "#ffdd00"
 THUMB_OCR_W = 40  # 글자를 뽑을 수 있는(OCR된) 페이지 썸네일 오른쪽 아래 OCR 표시(ocr.png, 네모 아이콘) 한 변 (px)
 # [보기 변경](F2): 가운데 미리보기를 빼고 왼쪽 썸네일 한 줄에 이만큼. 칸이 좁으면 썸네일을 줄인다(넓어도 THUMB_W까지)
 THUMB_GRID_COLS = 10
@@ -99,7 +100,7 @@ SAVE_TMP_GRACE = 60
 # 편집기 자르기 여백 순서 (화면 기준)
 CROP_SIDES = ("top", "bottom", "left", "right")
 # 설정 파일 구간 기본값 (자르기 전체·안함, 일반, OCR·분할 체크 안 함). config.json이 없을 때 이것과 다르면
-# [다른 이름으로 저장] 때 설정을 저장할지 묻는다 (저장하면 창이 닫혀 설정이 사라지므로)
+# [저장]·[다른 이름으로 저장] 때 설정을 저장할지 묻는다 (저장하면 창이 닫혀 설정이 사라지므로)
 CONFIG_DEFAULT = {"crop_mm": {"top": 0, "bottom": 0, "left": 0, "right": 0}, "scan_type": "일반",
                   "black_point": 0, "white_point": 255, "ocr": False, "ocr_language": [],
                   "is_split": False, "split_method": "none", "split_page_ranges": "", "split_size_mb": 0}
@@ -399,6 +400,89 @@ def _apply_page_edit(page, angle, rot, margins):
     page.set_cropbox(box & crop)
 
 
+def _bake_visible(doc, progress=None):
+    """[다른 이름으로 저장]: 화면에 보이는 그대로 굳힌다. 되돌릴 수 없고 용량이 준다. progress(n, 전체): 그림마다 불린다.
+
+    _apply_page_edit는 숨김(CropBox, 기울기는 좌표 변환)이라 가려진 부분의 그림 데이터가 남는다. 여기서는
+    가려진 그림 부분을 흰색으로 지우고 페이지 크기(MediaBox)를 보이는 영역으로 줄인다. 지운 페이지 등 안 쓰는
+    객체는 저장할 때 garbage로 정리한다(호출부).
+    그림 형식은 지킨다: JPEG은 원래 양자화표 그대로(quality="keep") 다시 압축하고, 무손실(Flate) 8비트 회색·RGB는
+    무손실로. MuPDF 가리기(redaction)는 JPEG도 무손실로 바꿔 스캔은 오히려 커질 수 있어서 쓰지 않는다.
+    그 밖의 그림(JPEG2000, 1비트 흑백, 마스크·투명도·Decode가 있는 것, 여러 자리에 함께 쓰인 것)은 손대지 않고
+    숨김으로 남긴다. 돌려주는 값: 가려진 부분이 있는데 형식 때문에 못 지운 그림 수
+    """
+    uses = {}
+    for pno in range(doc.page_count):
+        for item in doc[pno].get_images(full=True):
+            uses.setdefault(item[0], []).append(pno)
+    corners = [fitz.Point(0, 0), fitz.Point(1, 0), fitz.Point(1, 1), fitz.Point(0, 1)]
+
+    def visible(page):
+        # 그림 위치(get_image_rects)는 자르기 상자 왼쪽 위 기준, 90° 회전 전 좌표라 보이는 영역도 그렇게 잡는다
+        return fitz.Rect(0, 0, page.cropbox.width, page.cropbox.height)
+
+    skipped = 0
+    for n, (xref, pnos) in enumerate(uses.items(), 1):
+        if progress:
+            progress(n, len(uses))
+        places = [(doc[p], m) for p in sorted(set(pnos)) for _, m in doc[p].get_image_rects(xref, transform=True)]
+        if all((c * m) in visible(pg) + (-1, -1, 1, 1) for pg, m in places for c in corners):
+            continue  # 쓰인 모든 자리에서 그림 전체가 보인다 (가려진 데 없음)
+        key = lambda k: doc.xref_get_key(xref, k)
+        if (len(places) != 1 or key("SMask")[0] != "null" or key("Mask")[0] != "null"
+                or key("ImageMask")[1] == "true" or key("Decode")[0] != "null"):
+            skipped += 1  # 여러 자리에 함께 쓰인 그림은 한 자리 기준으로 지우면 다른 자리가 망가진다
+            continue
+        page, mat = places[0]
+        vis = visible(page)
+        filt = key("Filter")[1]
+        try:
+            if filt == "/DCTDecode":
+                im = Image.open(io.BytesIO(doc.xref_stream_raw(xref)))
+                im.load()
+            elif filt in ("/FlateDecode", "null") and key("BitsPerComponent")[1] == "8":  # null = 압축 안 한 그림
+                pix = fitz.Pixmap(doc, xref)
+                # 풀어 낸 데이터가 회색·RGB 픽셀 그대로일 때만 (색인 색상 등은 길이가 달라 걸러진다. ICC 회색·RGB는 된다)
+                if pix.alpha or pix.n not in (1, 3) or len(doc.xref_stream(xref)) != len(pix.samples):
+                    skipped += 1
+                    continue
+                im = Image.frombytes("L" if pix.n == 1 else "RGB", (pix.width, pix.height), pix.samples)
+            else:
+                im = None
+            if im is None or im.mode not in ("L", "RGB"):
+                skipped += 1
+                continue
+            # 보이는 영역(0.5pt 넉넉히) 네 귀퉁이를 그림 픽셀 좌표로. 기울기 보정한 페이지면 기운 사각형이 된다
+            inv = ~mat
+            v = vis + (-0.5, -0.5, 0.5, 0.5)
+            poly = [((p * inv).x * im.width, (p * inv).y * im.height) for p in (v.tl, v.tr, v.br, v.bl)]
+            mask = Image.new("L", im.size, 255)  # 255 = 지울 곳
+            ImageDraw.Draw(mask).polygon(poly, fill=0)
+            im.paste(255 if im.mode == "L" else (255, 255, 255), mask=mask)
+            if filt == "/DCTDecode":
+                buf = io.BytesIO()
+                # optimize: 허프만 표를 새로 짜서, 지운 데가 적어도(기울기만 보정) 다시 압축 때문에 커지지 않게
+                im.save(buf, "JPEG", quality="keep", subsampling="keep", optimize=True,
+                        icc_profile=im.info.get("icc_profile"))
+                doc.update_stream(xref, buf.getvalue(), compress=False)  # 제자리 교체 (그대로 JPEG)
+                doc.xref_set_key(xref, "Filter", "/DCTDecode")
+            else:
+                doc.update_stream(xref, im.tobytes(), compress=True)
+                doc.xref_set_key(xref, "Filter", "/FlateDecode")
+            doc.xref_set_key(xref, "DecodeParms", "null")
+        except Exception:
+            skipped += 1
+    # 페이지 크기(MediaBox)를 보이는 영역(CropBox)으로 (다른 프로그램이 MediaBox를 써도 지운 여백이 안 보이게).
+    # page.cropbox는 위에서 아래로 잰 좌표라 set_mediabox(PDF 좌표)에 넘기면 위아래가 뒤집힌다. 파일에 적힌 값을 그대로 옮긴다
+    for page in doc:
+        kind, box = doc.xref_get_key(page.xref, "CropBox")
+        if kind == "array":
+            doc.xref_set_key(page.xref, "MediaBox", box)
+            for k in ("CropBox", "TrimBox", "BleedBox", "ArtBox"):
+                doc.xref_set_key(page.xref, k, "null")
+    return skipped
+
+
 def _preview_worker(req_q, res_q):
     """미리보기 렌더링 전용 프로세스.
 
@@ -585,7 +669,7 @@ class PDFLevelPreviewApp:
         self._img_origin = (0, 0)  # 캔버스에서 (자르기 전 전체) 이미지 왼쪽 위 좌표
         self._img_clip = (0, 0, 0, 0)  # 캔버스에 실제로 보이는 페이지 영역 (자른 화면이면 자른 부분)
 
-        # 편집기. 원본 pdf_doc는 그대로 두고 값만 들고 있다가 '다른 이름으로 저장' 때 적용
+        # 편집기. 원본 pdf_doc는 그대로 두고 값만 들고 있다가 [저장]·[다른 이름으로 저장] 때 적용
         # 페이지 uid -> {"angle": 기울기 보정(°, 시계방향 양수), "rot": 90° 회전, "crop": [위, 아래, 좌, 우] pt (화면 기준)}.
         # uid 키라 순서를 바꾸거나 지워도 편집값이 페이지를 따라다닌다
         self.page_edits = {}
@@ -944,9 +1028,9 @@ class PDFLevelPreviewApp:
         # F2: [보기 변경] (어느 구간에서든). Esc: 그 상태에서 띄운 미리보기 팝업 닫기
         self.root.bind("<F2>", lambda e: self.toggle_grid_view())
         self.root.bind("<Escape>", lambda e: self._close_grid_popup())
-        # Ctrl+W: 창 닫기 (오른쪽 위 X와 같다). 한글 입력 상태나 CapsLock이어도 되게 Windows 키 코드로도 본다
-        self.root.bind("<Control-KeyPress>",
-                       lambda e: self._on_close() if e.keycode == 87 or e.keysym.lower() == "w" else None)
+        # Ctrl+W: 창 닫기 (오른쪽 위 X와 같다). Ctrl+S: [저장], Ctrl+Shift+S: [다른 이름으로 저장].
+        # 한글 입력 상태나 CapsLock이어도 되게 Windows 키 코드로도 본다
+        self.root.bind("<Control-KeyPress>", self._on_ctrl_key)
 
         # ── 저장된 레벨 리스트 ──
         self.saved_frame = tk.Frame(self.level_frame)
@@ -985,7 +1069,7 @@ class PDFLevelPreviewApp:
             head.config(bg=head_color)
 
     def _build_edit_panel(self, parent):
-        """편집 구간: 회전, 자르기(여백 숫자 / 미리보기 선), 크기 저장·불러오기, 다른 이름으로 저장"""
+        """편집 구간: 회전, 자르기(여백 숫자 / 미리보기 선), 크기 저장·불러오기, 저장·다른 이름으로 저장"""
         FNT = UI_FONT
 
         # 적용 범위: 회전과 자르기 [적용]·[초기화]가 모두 이 범위를 따른다
@@ -1096,10 +1180,16 @@ class PDFLevelPreviewApp:
                   activebackground=SAVE_BTN_ACTIVE, activeforeground="white"
                   ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0))
 
-        tk.Button(parent, text="다른 이름으로 저장", command=self.save_edited_pdf,
-                  padx=12, pady=BTN_PADY, cursor="hand2", font=FNT,
-                  bg=SAVEAS_BTN_BG, fg="white", activebackground=SAVEAS_BTN_ACTIVE,
-                  activeforeground="white").pack(fill=tk.X, pady=(28, 4))
+        # [저장] = 숨김(원본에 덮어씀), [다른 이름으로 저장] = 보이는 그대로 굳힘. 아래에 차이를 짧게 적어 둔다
+        for i, (text, cmd, note) in enumerate((
+                ("저장 (Ctrl+S)", self.save_pdf, "숨김 저장: 가린 부분·지운 페이지 데이터가 남아 용량 그대로"),
+                ("다른 이름으로 저장 (Ctrl+Shift+S)", self.save_edited_pdf,
+                 "보이는 그대로 굳힘: 가린 부분·지운 페이지를 지워 용량이 줄고 되돌릴 수 없음"))):
+            tk.Button(parent, text=text, command=cmd, padx=12, pady=BTN_PADY, cursor="hand2", font=FNT,
+                      bg=SAVEAS_BTN_BG, fg="white", activebackground=SAVEAS_BTN_ACTIVE,
+                      activeforeground="white").pack(fill=tk.X, pady=(28 if i == 0 else 12, 0))
+            tk.Label(parent, text=note, font=UI_FONT_SMALL, fg="#666", anchor=tk.W, justify=tk.LEFT,
+                     wraplength=440).pack(fill=tk.X, pady=(2, 0))
 
     def _build_crop_config(self, parent):
         """자르기 설정 (config.json의 crop_mm, 자동화 프로그램용). 편집기의 자르기와는 별개"""
@@ -1928,6 +2018,17 @@ class PDFLevelPreviewApp:
         if event.widget.winfo_class() not in ("Entry", "TEntry", "Text", "TCombobox", "Spinbox"):
             self._regions[name][1].focus_set()
 
+    def _on_ctrl_key(self, event):
+        """Ctrl+W 창 닫기, Ctrl+S [저장], Ctrl+Shift+S [다른 이름으로 저장]. 키 코드로도 본다(한글 입력·CapsLock)"""
+        key = {87: "w", 83: "s"}.get(event.keycode) or event.keysym.lower()
+        if key == "w":
+            self._on_close()
+        elif key == "s":
+            (self.save_edited_pdf if event.state & 0x0001 else self.save_pdf)()  # 0x0001 = Shift
+        else:
+            return None
+        return "break"
+
     def _on_return(self, event):
         """Enter: 편집 쪽(왼쪽 썸네일·가운데 미리보기·편집 구간·자르기 칸)이면 [적용], 설정 파일 구간이면 레벨 추가.
         분할 범위 칸(줄 바꿈)·회전 칸·설정 자르기 칸에서는 아무것도 안 한다"""
@@ -2347,7 +2448,7 @@ class PDFLevelPreviewApp:
 
     def _insert_covers(self, front, back):
         """앞표지(그림 bytes 또는 None)는 폴더 첫 PDF 맨 앞, 뒷표지는 마지막 PDF 맨 뒤에 넣는다 (PDF가 하나면 그 파일 앞뒤).
-        대상이 지금 열린 파일이면 화면 페이지 목록에 넣고(파일에는 [다른 이름으로 저장] 때 들어간다),
+        대상이 지금 열린 파일이면 화면 페이지 목록에 넣고(파일에는 [저장]·[다른 이름으로 저장] 때 들어간다),
         열려 있지 않은 파일이면 그 파일에 바로 저장한다"""
         files = _folder_pdfs(self._pdf_path)
         me = os.path.normcase(os.path.abspath(self._pdf_path))
@@ -2681,7 +2782,7 @@ class PDFLevelPreviewApp:
         return "break"
 
     # ------------------------------------------------------------------ #
-    # Editor (회전 / 자르기 / 다른 이름으로 저장)
+    # Editor (회전 / 자르기 / 저장·다른 이름으로 저장)
     # ------------------------------------------------------------------ #
     def _new_uid(self):
         self._next_uid += 1
@@ -3352,8 +3453,18 @@ class PDFLevelPreviewApp:
             return None
         return _roman(idx + 1) if idx < start else str(idx - start + 1)
 
+    def save_pdf(self):
+        """[저장] (Ctrl+S): 원본에 덮어쓴다. 자르기·기울기는 숨김(CropBox·좌표 변환)이라 가려진 그림 데이터가 남고,
+        지운 페이지 데이터도 정리하지 않아 용량이 그대로다"""
+        self._save_pdf(bake=False)
+
     def save_edited_pdf(self):
-        """페이지 순서(삭제·붙여넣기·이동)와 회전/자르기를 반영해 저장. 같은 이름을 고르면 원본에 덮어쓴다"""
+        """[다른 이름으로 저장] (Ctrl+Shift+S): 보이는 그대로 굳혀 저장한다(_bake_visible). 가려진 그림 부분을 지우고
+        지운 페이지 데이터까지 정리해(garbage) 용량이 준다. 되돌릴 수 없다. 같은 이름을 고르면 원본에 덮어쓴다"""
+        self._save_pdf(bake=True)
+
+    def _save_pdf(self, bake):
+        """페이지 순서(삭제·붙여넣기·이동)와 회전/기울기/자르기를 반영해 저장하고 창을 닫는다"""
         if self.pdf_doc is None:
             return
         # 저장이 끝나면 창이 닫혀 설정 파일 구간 값이 사라지므로, [설정 저장]을 안 했으면 먼저 묻는다
@@ -3366,13 +3477,17 @@ class PDFLevelPreviewApp:
             if ans is None or (ans and not self._save_config()):
                 return
         src = self._pdf_path
-        path = filedialog.asksaveasfilename(
-            parent=self.root, title="다른 이름으로 저장", defaultextension=".pdf",
-            filetypes=[("PDF 파일", "*.pdf")],
-            initialdir=os.path.dirname(src), initialfile=os.path.basename(src))
-        if not path:
-            return
+        if bake:
+            path = filedialog.asksaveasfilename(
+                parent=self.root, title="다른 이름으로 저장 (보이는 그대로 굳힘)", defaultextension=".pdf",
+                filetypes=[("PDF 파일", "*.pdf")],
+                initialdir=os.path.dirname(src), initialfile=os.path.basename(src))
+            if not path:
+                return
+        else:
+            path = src
         same = os.path.normcase(os.path.abspath(path)) == os.path.normcase(os.path.abspath(src))
+        skipped = 0  # 굳힐 때 형식 때문에 가려진 부분을 못 지운 그림 수
 
         prev_status = self.render_status.cget("text")
         self.render_status.config(text="저장 중...")
@@ -3396,10 +3511,17 @@ class PDFLevelPreviewApp:
                     if start:
                         labels.insert(0, {"startpage": 0, "prefix": "", "style": "r", "firstpagenum": 1})
                     out.set_page_labels(labels)
+                opts = {}
+                if bake:
+                    def progress(n, total):
+                        self.render_status.config(text=f"저장 중... 보이는 그대로 굳히는 중 ({n}/{total})")
+                        self.root.update_idletasks()
+                    skipped = _bake_visible(out, progress)
+                    opts = dict(garbage=3, deflate=True)  # 안 쓰는 객체(지운 페이지의 그림 등)까지 정리
                 if same:
-                    self._overwrite_original(src, out)
+                    self._overwrite_original(src, out, opts)
                 else:
-                    out.save(path)
+                    out.save(path, **opts)
             finally:
                 if not out.is_closed:  # 덮어쓰기는 교체 전에 이미 닫는다
                     out.close()
@@ -3407,6 +3529,10 @@ class PDFLevelPreviewApp:
             self.render_status.config(text=prev_status)
             messagebox.showerror("저장", f"저장 실패: {e}", parent=self.root)
             return
+        if skipped:  # 창이 바로 닫히므로 닫기 전에 알린다
+            messagebox.showinfo(
+                "다른 이름으로 저장", f"그림 {skipped}개는 형식(JPEG2000·흑백 1비트 등)이거나 여러 쪽에 함께 쓰여서\n"
+                "가려진 부분을 지우지 못하고 숨김으로 남겼습니다. 화면에 보이는 모양은 같습니다.", parent=self.root)
         self._edits_dirty = False
         # 창을 닫아 프로세스가 PDF와 폴더를 놓게 한다. 켜 둔 채면 폴더를 옮길 때 "사용 중"이 난다
         self._on_close()
@@ -3431,13 +3557,13 @@ class PDFLevelPreviewApp:
                 seq.append(len(out) - 1)
         out.select(seq)
 
-    def _overwrite_original(self, src, out):
-        """원본에 덮어쓰기: 임시 파일로 저장한 뒤 바꿔치기.
+    def _overwrite_original(self, src, out, opts):
+        """원본에 덮어쓰기: 임시 파일로 저장한 뒤 바꿔치기. opts = out.save 옵션 (굳힐 때 garbage 등)
 
         열어 둔 문서와 미리보기 워커가 파일을 잡고 있으면 Windows에서 교체가 막히므로 먼저 놓아 준다.
         """
         tmp = src + SAVE_TMP_EXT
-        out.save(tmp)
+        out.save(tmp, **opts)
         out.close()
         self._stop_thumbnails()  # 썸네일 프로세스도 원본을 열고 있다
         self._stop_deskew()
