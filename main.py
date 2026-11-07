@@ -20,7 +20,8 @@ import multiprocessing
 import urllib.parse
 import urllib.request
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+import zlib
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, wait, as_completed, FIRST_COMPLETED
 
 # main.py가 있는 폴더 (icon.ico, ocr.png)
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -400,8 +401,38 @@ def _apply_page_edit(page, angle, rot, margins):
     page.set_cropbox(box & crop)
 
 
+def _bake_image_worker(job):
+    """[다른 이름으로 저장] 그림 하나: 보이는 영역 밖을 흰색으로 지우고 다시 압축한다. 여러 프로세스에서 돈다.
+
+    job = (xref, kind, data, mode, size, poly). kind "jpeg": data = 원래 JPEG 그대로,
+    "raw": data = 회색(L)·RGB 픽셀(mode, size). poly = 보이는 영역 네 귀퉁이(그림 단위 좌표 0~1, 기울면 기운 사각형).
+    돌려주는 값 (xref, 새 스트림 또는 None = 손대지 못함). xref를 같이 돌려줘서 끝나는 순서와 상관없이 제자리에 넣는다
+    """
+    xref, kind, data, mode, size, poly = job
+    try:
+        if kind == "jpeg":
+            im = Image.open(io.BytesIO(data))
+            im.load()
+            if im.mode not in ("L", "RGB"):
+                return xref, None
+        else:
+            im = Image.frombytes(mode, size, data)
+        mask = Image.new("L", im.size, 255)  # 255 = 지울 곳
+        ImageDraw.Draw(mask).polygon([(u * im.width, v * im.height) for u, v in poly], fill=0)
+        im.paste(255 if im.mode == "L" else (255, 255, 255), mask=mask)
+        if kind == "jpeg":
+            buf = io.BytesIO()
+            # 원래 양자화표 그대로. optimize: 허프만 표를 새로 짜서, 지운 데가 적어도(기울기만 보정) 커지지 않게
+            im.save(buf, "JPEG", quality="keep", subsampling="keep", optimize=True,
+                    icc_profile=im.info.get("icc_profile"))
+            return xref, buf.getvalue()
+        return xref, zlib.compress(im.tobytes(), 6)
+    except Exception:
+        return xref, None
+
+
 def _bake_visible(doc, progress=None):
-    """[다른 이름으로 저장]: 화면에 보이는 그대로 굳힌다. 되돌릴 수 없고 용량이 준다. progress(n, 전체): 그림마다 불린다.
+    """[다른 이름으로 저장]: 화면에 보이는 그대로 굳힌다. 되돌릴 수 없고 용량이 준다. progress(쪽, 전체 쪽)
 
     _apply_page_edit는 숨김(CropBox, 기울기는 좌표 변환)이라 가려진 부분의 그림 데이터가 남는다. 여기서는
     가려진 그림 부분을 흰색으로 지우고 페이지 크기(MediaBox)를 보이는 영역으로 줄인다. 지운 페이지 등 안 쓰는
@@ -410,68 +441,106 @@ def _bake_visible(doc, progress=None):
     무손실로. MuPDF 가리기(redaction)는 JPEG도 무손실로 바꿔 스캔은 오히려 커질 수 있어서 쓰지 않는다.
     그 밖의 그림(JPEG2000, 1비트 흑백, 마스크·투명도·Decode가 있는 것, 여러 자리에 함께 쓰인 것)은 손대지 않고
     숨김으로 남긴다. 돌려주는 값: 가려진 부분이 있는데 형식 때문에 못 지운 그림 수
+
+    빠르게: 그림 위치는 get_image_info로 찾는다(그림을 풀지 않는다). get_image_rects는 그림마다 두 번 풀어 MD5를
+    내서 40쪽에 8.3초 중 5.6초를 썼다. 쪽 안 그림은 픽셀 크기로 짝짓고, 같은 크기가 둘 이상인 쪽만 get_image_rects.
+    그림 풀기·지우기·압축(_bake_image_worker)은 여러 프로세스로 나눠 돌리고(스레드는 GIL 때문에 1.7배에 그쳤다),
+    결과를 xref로 제자리에 넣어 순서가 섞일 일이 없다. 한꺼번에 내보내는 그림 수를 묶어 800쪽도 메모리가 넘치지 않게 한다.
     """
-    uses = {}
+    places = {}  # xref -> [(쪽 번호, 그림 단위 정사각형 → 쪽 좌표 행렬)]
+    first = {}   # xref -> 처음 나오는 쪽 (진행 표시용)
     for pno in range(doc.page_count):
-        for item in doc[pno].get_images(full=True):
-            uses.setdefault(item[0], []).append(pno)
+        page = doc[pno]
+        imgs = page.get_images(full=True)
+        for it in imgs:
+            first.setdefault(it[0], pno)
+        if not imgs:
+            continue
+        by_size = {}
+        for it in imgs:
+            by_size.setdefault((it[2], it[3]), []).append(it[0])
+        if all(len(v) == 1 for v in by_size.values()):
+            for info in page.get_image_info():
+                xs = by_size.get((info["width"], info["height"]))
+                if xs:
+                    places.setdefault(xs[0], []).append((pno, fitz.Matrix(info["transform"])))
+        else:  # 같은 크기 그림이 둘 이상인 쪽: 느려도 정확한 방법
+            for it in imgs:
+                for _, m in page.get_image_rects(it[0], transform=True):
+                    places.setdefault(it[0], []).append((pno, m))
+
     corners = [fitz.Point(0, 0), fitz.Point(1, 0), fitz.Point(1, 1), fitz.Point(0, 1)]
 
-    def visible(page):
-        # 그림 위치(get_image_rects)는 자르기 상자 왼쪽 위 기준, 90° 회전 전 좌표라 보이는 영역도 그렇게 잡는다
-        return fitz.Rect(0, 0, page.cropbox.width, page.cropbox.height)
+    def visible(pno):
+        # 그림 위치는 자르기 상자 왼쪽 위 기준, 90° 회전 전 좌표라 보이는 영역도 그렇게 잡는다
+        cb = doc[pno].cropbox
+        return fitz.Rect(0, 0, cb.width, cb.height)
 
-    skipped = 0
-    for n, (xref, pnos) in enumerate(uses.items(), 1):
-        if progress:
-            progress(n, len(uses))
-        places = [(doc[p], m) for p in sorted(set(pnos)) for _, m in doc[p].get_image_rects(xref, transform=True)]
-        if all((c * m) in visible(pg) + (-1, -1, 1, 1) for pg, m in places for c in corners):
+    # 손댈 그림 고르기 (자료는 아직 안 읽는다): (xref, 형식, 보이는 영역 귀퉁이를 그림 단위 좌표로)
+    todo, skipped = [], 0
+    for xref, pl in places.items():
+        if all((c * m) in visible(pno) + (-1, -1, 1, 1) for pno, m in pl for c in corners):
             continue  # 쓰인 모든 자리에서 그림 전체가 보인다 (가려진 데 없음)
-        key = lambda k: doc.xref_get_key(xref, k)
-        if (len(places) != 1 or key("SMask")[0] != "null" or key("Mask")[0] != "null"
-                or key("ImageMask")[1] == "true" or key("Decode")[0] != "null"):
+        key = lambda k, x=xref: doc.xref_get_key(x, k)
+        filt = key("Filter")[1]
+        if (len(pl) != 1 or key("SMask")[0] != "null" or key("Mask")[0] != "null"
+                or key("ImageMask")[1] == "true" or key("Decode")[0] != "null"
+                or not (filt == "/DCTDecode"
+                        or (filt in ("/FlateDecode", "null") and key("BitsPerComponent")[1] == "8"))):
             skipped += 1  # 여러 자리에 함께 쓰인 그림은 한 자리 기준으로 지우면 다른 자리가 망가진다
             continue
-        page, mat = places[0]
-        vis = visible(page)
-        filt = key("Filter")[1]
-        try:
+        pno, mat = pl[0]
+        inv = ~mat
+        # 3pt(300dpi 약 12px) 넉넉히 남긴다. 기울기 보정한 그림은 가장자리 픽셀을 그릴 때 바로 바깥 픽셀과 섞는데,
+        # 0.5pt만 남겼더니 바깥이 흰색이라 페이지 가장자리 한 줄이 밝아졌다
+        v = visible(pno) + (-3, -3, 3, 3)
+        todo.append((xref, filt, [((q * inv).x, (q * inv).y) for q in (v.tl, v.tr, v.br, v.bl)]))
+
+    def jobs():  # 자료는 내보낼 때 하나씩 읽는다 (800쪽 JPEG을 한꺼번에 메모리에 올리지 않게)
+        nonlocal skipped
+        for xref, filt, poly in todo:
             if filt == "/DCTDecode":
-                im = Image.open(io.BytesIO(doc.xref_stream_raw(xref)))
-                im.load()
-            elif filt in ("/FlateDecode", "null") and key("BitsPerComponent")[1] == "8":  # null = 압축 안 한 그림
-                pix = fitz.Pixmap(doc, xref)
-                # 풀어 낸 데이터가 회색·RGB 픽셀 그대로일 때만 (색인 색상 등은 길이가 달라 걸러진다. ICC 회색·RGB는 된다)
-                if pix.alpha or pix.n not in (1, 3) or len(doc.xref_stream(xref)) != len(pix.samples):
-                    skipped += 1
-                    continue
-                im = Image.frombytes("L" if pix.n == 1 else "RGB", (pix.width, pix.height), pix.samples)
-            else:
-                im = None
-            if im is None or im.mode not in ("L", "RGB"):
+                yield xref, "jpeg", doc.xref_stream_raw(xref), None, None, poly
+                continue
+            pix = fitz.Pixmap(doc, xref)  # null = 압축 안 한 그림
+            # 풀어 낸 데이터가 회색·RGB 픽셀 그대로일 때만 (색인 색상 등은 길이가 달라 걸러진다. ICC 회색·RGB는 된다)
+            if pix.alpha or pix.n not in (1, 3) or len(doc.xref_stream(xref)) != len(pix.samples):
                 skipped += 1
                 continue
-            # 보이는 영역(0.5pt 넉넉히) 네 귀퉁이를 그림 픽셀 좌표로. 기울기 보정한 페이지면 기운 사각형이 된다
-            inv = ~mat
-            v = vis + (-0.5, -0.5, 0.5, 0.5)
-            poly = [((p * inv).x * im.width, (p * inv).y * im.height) for p in (v.tl, v.tr, v.br, v.bl)]
-            mask = Image.new("L", im.size, 255)  # 255 = 지울 곳
-            ImageDraw.Draw(mask).polygon(poly, fill=0)
-            im.paste(255 if im.mode == "L" else (255, 255, 255), mask=mask)
-            if filt == "/DCTDecode":
-                buf = io.BytesIO()
-                # optimize: 허프만 표를 새로 짜서, 지운 데가 적어도(기울기만 보정) 다시 압축 때문에 커지지 않게
-                im.save(buf, "JPEG", quality="keep", subsampling="keep", optimize=True,
-                        icc_profile=im.info.get("icc_profile"))
-                doc.update_stream(xref, buf.getvalue(), compress=False)  # 제자리 교체 (그대로 JPEG)
-                doc.xref_set_key(xref, "Filter", "/DCTDecode")
-            else:
-                doc.update_stream(xref, im.tobytes(), compress=True)
-                doc.xref_set_key(xref, "Filter", "/FlateDecode")
-            doc.xref_set_key(xref, "DecodeParms", "null")
-        except Exception:
+            yield xref, "raw", pix.samples, "L" if pix.n == 1 else "RGB", (pix.width, pix.height), poly
+
+    done_page = 0
+
+    def put(result):  # 결과를 그 그림 자리(xref)에 넣는다
+        nonlocal skipped, done_page
+        xref, data = result
+        if data is None:
             skipped += 1
+        else:
+            jpeg = doc.xref_get_key(xref, "Filter")[1] == "/DCTDecode"
+            doc.update_stream(xref, data, compress=False)  # 제자리 교체 (이미 압축한 자료)
+            doc.xref_set_key(xref, "Filter", "/DCTDecode" if jpeg else "/FlateDecode")
+            doc.xref_set_key(xref, "DecodeParms", "null")
+        done_page = max(done_page, first[xref] + 1)
+        if progress:
+            progress(done_page, doc.page_count)
+
+    workers = max(1, ((os.cpu_count() or 4) * 3) // 4)
+    if len(todo) < 8 or workers == 1:  # 몇 장 안 되면 프로세스를 띄우는 시간이 더 든다
+        for job in jobs():
+            put(_bake_image_worker(job))
+    else:
+        with ProcessPoolExecutor(workers) as pool:
+            pending = set()
+            for job in jobs():
+                pending.add(pool.submit(_bake_image_worker, job))
+                if len(pending) >= workers * 2:  # 내보낸 채 기다리는 그림 수를 묶는다 (메모리)
+                    finished, pending = wait(pending, return_when=FIRST_COMPLETED)
+                    for f in finished:
+                        put(f.result())
+            for f in as_completed(pending):
+                put(f.result())
+
     # 페이지 크기(MediaBox)를 보이는 영역(CropBox)으로 (다른 프로그램이 MediaBox를 써도 지운 여백이 안 보이게).
     # page.cropbox는 위에서 아래로 잰 좌표라 set_mediabox(PDF 좌표)에 넘기면 위아래가 뒤집힌다. 파일에 적힌 값을 그대로 옮긴다
     for page in doc:
@@ -3514,7 +3583,7 @@ class PDFLevelPreviewApp:
                 opts = {}
                 if bake:
                     def progress(n, total):
-                        self.render_status.config(text=f"저장 중... 보이는 그대로 굳히는 중 ({n}/{total})")
+                        self.render_status.config(text=f"저장 중... 보이는 그대로 굳히는 중 ({n}/{total}쪽)")
                         self.root.update_idletasks()
                     skipped = _bake_visible(out, progress)
                     opts = dict(garbage=3, deflate=True)  # 안 쓰는 객체(지운 페이지의 그림 등)까지 정리
