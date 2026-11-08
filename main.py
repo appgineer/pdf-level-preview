@@ -69,6 +69,20 @@ ROTATE_GRID_COLOR = "#00a0e0"
 DESKEW_DPI = 150
 DESKEW_SEARCH = 20
 DESKEW_MAX = 1
+# [검은 여백 자르기](_detect_black_bands): 스캐너 용지 크기 자동 감지가 실패해 같이 찍힌 검은 배경판 띠(직사각형)만 찾는다.
+# BAND_DPI로 회색으로 그려 가장자리부터 줄(행·열)마다 BAND_LINE 이상이 BAND_DARK보다 어두우면 "검은 줄"로 세고,
+# 이어진 검은 줄 다음 BAND_EDGE_MM 안에서 종이(줄 평균 밝기 BAND_PAPER 이상)가 나와야 띠로 본다(종이 가장자리가
+# 살짝 기울면 1~2mm에 걸쳐 밝아진다. test.pdf p.46). BAND_MIN_MM보다 얕으면 무시(1~1.5mm 얇은 검은 가장자리는
+# 정상 페이지 여럿에도 있어서, 자르면 그 페이지만 작아지고 확인 목록만 늘었다).
+# 띠 깊이에 BAND_SAFE_MM를 더해 자른다. 배경판은 밝기 0~15, 종이는 120 넘게 나왔다(DR-G2110 test.pdf)
+BAND_DPI = 100
+BAND_DARK = 50
+BAND_LINE = 0.97
+BAND_PAPER = 100
+BAND_EDGE_MM = 5.0
+BAND_MIN_MM = 3.0
+BAND_MAX_PART = 0.45  # 띠는 그 방향 길이의 이 비율까지 (test.pdf에서 가장 넓은 띠가 26%. 넘으면 검은 페이지로 본다)
+BAND_SAFE_MM = 0.3
 # 설정 파일의 자르기(mm) 자리를 보여주는 선 색 (미리보기 / 썸네일)
 CFG_CROP_LINE = "#e00000"
 # 눈에 띄어야 하는 버튼/선택창 색
@@ -83,6 +97,7 @@ RANGE_COLORS = {"선택한 페이지": ("#0f8b99", "#0b6d78"),  # 청록
 SAVEAS_BTN_BG, SAVEAS_BTN_ACTIVE = "#3a9d5d", "#2f7f4c"
 CFG_SAVE_BG, CFG_SAVE_ACTIVE = "#7b4fc0", "#653da8"      # 설정 저장 (보라)
 DESKEW_BTN_BG, DESKEW_BTN_ACTIVE = "#8e44ad", "#763a91"  # 자동 보정 (붉은 보라, 짝수 범위색과 구별)
+BAND_BTN_BG, BAND_BTN_ACTIVE = "#333333", "#111111"      # 검은 여백 자르기 (진회색, 흰 글씨)
 BTN_PADY = 4  # 버튼·선택창 높이를 맞추는 세로 여백
 # 내장 이미지가 없는 페이지(벡터/텍스트)의 렌더 스케일. 1.0 = 72 DPI
 BASE_SCALE = 8  # 576 DPI
@@ -118,6 +133,8 @@ THUMB_DROP_LINE = "#e00000"
 THUMB_CUR_LINE = "#1f6fd0"
 # 썸네일: 자동 보정 때 DESKEW_MAX°를 넘게 기울어 그대로 둔 페이지 테두리 색 (누르면 없어진다)
 THUMB_SKEW_LINE = "#e00000"
+# 썸네일: [검은 여백 자르기]로 자른 페이지 테두리 색 (주황, 빨간 1° 테두리보다 한 칸 더 바깥. 누르면 없어진다)
+THUMB_BAND_LINE = "#ff8c00"
 # 툴바: [로마자 표기]로 정한 종이 쪽 번호 글씨 색 (진한 초록. 빨간 페이지 번호·파란 폴더 번호 사이에 괄호로.
 # 보라는 잘 안 보였다)
 PAPER_NUM_FG = "#006b2b"
@@ -359,6 +376,68 @@ def _detect_skew(page, rot=0):
     ties = [a for s, a in fine if s == top]
     a = (ties[0] + ties[-1]) / 2
     return round(-a, 2) or 0.0  # PIL 반시계 → 화면 시계방향 양수 (-0.0은 0으로)
+
+
+def _detect_black_bands(page):
+    """스캐너 검은 배경판 띠(직사각형)의 깊이 (위, 아래, 좌, 우) pt, 화면 기준(페이지 /Rotate 반영). 띠가 없으면 None.
+
+    용지 크기 자동 감지가 실패하면 종이 바깥의 검은 배경판이 가장자리에 띠로 같이 찍힌다. 가장자리부터 줄마다
+    BAND_LINE 이상이 BAND_DARK보다 어두운 줄이 몇 개 이어지는지 세고, 바로 다음 줄이 종이(평균 밝기 BAND_PAPER
+    이상)여야 띠로 본다(검은 표지·끝까지 어두운 사진은 종이로 넘어가지 않아 띠가 아니다). 줄 전체가 검어야 세므로
+    종이가 돌아가 생긴 삼각형은 직사각형 부분까지만 센다(삼각형은 사용자가 직접 자른다). 먼지 세로선처럼 한 줄의
+    0.1%쯤 되는 밝은 점은 BAND_LINE 안이라 띠가 끊기지 않는다.
+    """
+    z = BAND_DPI / 72
+    pix = page.get_pixmap(matrix=fitz.Matrix(z, z), colorspace=fitz.csGRAY)
+    w, h = pix.width, pix.height
+    img = Image.frombytes("L", (w, h), pix.samples)
+    dark = img.point(lambda v: 255 if v < BAND_DARK else 0)
+    # 줄마다 어두운 픽셀 비율·평균 밝기 (BOX로 한 줄을 한 칸으로 줄이면 그 줄의 평균이 된다)
+    row_dark = list(dark.resize((1, h), Image.BOX).getdata())
+    col_dark = list(dark.resize((w, 1), Image.BOX).getdata())
+    row_mean = list(img.resize((1, h), Image.BOX).getdata())
+    col_mean = list(img.resize((w, 1), Image.BOX).getdata())
+    need = 255 * BAND_LINE
+    min_px = BAND_MIN_MM / 25.4 * BAND_DPI
+    edge_px = max(3, round(BAND_EDGE_MM / 25.4 * BAND_DPI))
+
+    def depth(dark_lines, mean_lines):
+        # 맨 끝 한두 줄은 픽셀에 반만 걸쳐 흰 바탕과 섞여 밝게 나올 수 있다(오른쪽·아래에서 띠를 통째로 놓쳤다). 건너뛰고 센다
+        n = next((i for i in range(min(3, len(dark_lines))) if dark_lines[i] >= need), None)
+        if n is None:
+            return 0
+        while n < len(dark_lines) and dark_lines[n] >= need:
+            n += 1
+        if n < min_px or n > len(dark_lines) * BAND_MAX_PART:
+            return 0  # 얕거나, 페이지 절반 가까이 검다 (띠가 아니라 검은 페이지)
+        if max(mean_lines[n:n + edge_px]) < BAND_PAPER:
+            return 0  # 띠 다음에 종이가 안 나온다 (어두운 내용)
+        return n * 72 / BAND_DPI
+
+    bands = (depth(row_dark, row_mean), depth(row_dark[::-1], row_mean[::-1]),
+             depth(col_dark, col_mean), depth(col_dark[::-1], col_mean[::-1]))
+    return bands if any(bands) else None
+
+
+def _band_worker(jobs, res_q):
+    """[검은 여백 자르기] 프로세스: jobs = [(uid, PDF 경로, 페이지 번호, 90° 회전)] → res_q에 (uid, 띠 pt 또는 None).
+    _deskew_worker와 같은 방식 (PyMuPDF는 스레드에서 쓸 수 없어 여러 프로세스로 나눈다)"""
+    docs = {}
+    for uid, path, pno, rot in jobs:
+        try:
+            if path not in docs:
+                docs[path] = fitz.open(path)
+            # V의 90° 회전을 저장할 때처럼 잠깐 넣고 그린다 (위·아래·좌·우가 화면과 같게). 같은 페이지가 또 올 수 있어 되돌린다
+            page = docs[path][pno]
+            orig = page.rotation
+            page.set_rotation((orig + rot) % 360)
+            bands = _detect_black_bands(page)
+            page.set_rotation(orig)
+        except Exception:
+            bands = None
+        res_q.put((uid, bands))
+    for doc in docs.values():
+        doc.close()
 
 
 def _deskew_worker(jobs, res_q):
@@ -766,6 +845,8 @@ class PDFLevelPreviewApp:
         self._thumb_procs = set()  # 돌고 있는 썸네일 프로세스 (닫을 때 끝내야 PDF를 놓는다)
         self._deskew_procs = []  # 돌고 있는 기울기 자동 보정 프로세스 (마찬가지)
         self._skew_flagged = set()  # DESKEW_MAX°를 넘게 기울어 그대로 둔 페이지 uid (썸네일 빨간 테두리)
+        self._band_procs = []  # 돌고 있는 [검은 여백 자르기] 프로세스 (마찬가지)
+        self._band_flagged = set()  # [검은 여백 자르기]로 자른 페이지 uid (썸네일 주황 테두리, 누르면 없어진다)
         # [로마자 표기]로 종이 1쪽이 된 페이지 uid (앞쪽은 i, ii …). None이면 쪽 번호 표기를 건드리지 않는다
         self._label_start_uid = None
         self._pdf_path = None
@@ -1273,6 +1354,12 @@ class PDFLevelPreviewApp:
             self.crop_vars[side] = var
             self._edit_entries.append(entry)
             self._crop_entries.append(entry)
+        # [검은 여백 자르기]: 목록 범위 페이지에서 스캐너 검은 배경 띠(직사각형)를 찾아 자른다. 자른 쪽 번호는 바로 아래
+        self.band_btn = tk.Button(parent, text="검은 여백 자르기", command=self.auto_black_bands, pady=BTN_PADY,
+                                  cursor="hand2", font=FNT, bg=BAND_BTN_BG, fg="white",
+                                  activebackground=BAND_BTN_ACTIVE, activeforeground="white")
+        self.band_btn.pack(fill=tk.X, pady=(4, 0))
+        self._band_flag_frame = tk.Frame(parent)  # 자른 쪽 번호 (있을 때만 보인다, _show_band_flags)
         tk.Button(parent, text="현재 크기 저장", command=self.save_crop_size, pady=BTN_PADY,
                   cursor="hand2", font=FNT).pack(fill=tk.X, pady=(4, 0))
         self.saved_size_label = tk.Label(parent, text="", font=UI_FONT_SMALL, fg="#666", anchor=tk.W)
@@ -1434,6 +1521,7 @@ class PDFLevelPreviewApp:
         if not self._confirm_discard_edits():
             return
         self._stop_deskew()
+        self._stop_bands()
         self._close_src_docs()
         self.pdf_doc = fitz.open(path)
         self._pdf_path = path
@@ -1449,6 +1537,8 @@ class PDFLevelPreviewApp:
         self.page_edits.clear()
         self._skew_flagged.clear()
         self._show_skew_flags()
+        self._band_flagged.clear()
+        self._show_band_flags()
         # [로마자 표기]로 넣은 표기면 이어서 보여 주고 저장 때도 다시 넣는다
         k = _roman_count(self.pdf_doc)
         self._label_start_uid = self.slots[k][0] if 0 < k < len(self.slots) else None
@@ -1718,6 +1808,9 @@ class PDFLevelPreviewApp:
         if self.slots[idx][0] in self._skew_flagged:  # 파란 현재 페이지 테두리 바깥에
             items.append(self.thumb_canvas.create_rectangle(
                 x - 6, y - 6, x + self._thumb_w + 6, y + thumb_h + 6, outline=THUMB_SKEW_LINE, width=3))
+        if self.slots[idx][0] in self._band_flagged:  # [검은 여백 자르기]로 자른 페이지: 빨간 1° 테두리보다 한 칸 더 바깥
+            items.append(self.thumb_canvas.create_rectangle(
+                x - 10, y - 10, x + self._thumb_w + 10, y + thumb_h + 10, outline=THUMB_BAND_LINE, width=3))
 
         self._drawn_pages[idx] = items
 
@@ -1786,6 +1879,11 @@ class PDFLevelPreviewApp:
             self._thumb_dirty.add(idx)
             self._schedule_thumb_redraw()
             self._show_skew_flags()
+        if self.slots[idx][0] in self._band_flagged:  # 검은 여백을 자른 페이지 표시도 누르면 없앤다 (확인했다)
+            self._band_flagged.discard(self.slots[idx][0])
+            self._thumb_dirty.add(idx)
+            self._schedule_thumb_redraw()
+            self._show_band_flags()
         shift = event.state & 0x0001
         ctrl = event.state & 0x0004
         shrink = False
@@ -2176,6 +2274,7 @@ class PDFLevelPreviewApp:
         self._relayout_thumbs()
         self.select_page(current)
         self._show_skew_flags()  # 쪽 번호가 바뀌었을 수 있다
+        self._show_band_flags()
 
     def _push_undo(self):
         self._undo_stack.append((list(self.slots), self.current_page, set(self._selected)))
@@ -3049,7 +3148,7 @@ class PDFLevelPreviewApp:
         페이지가 많으면 오래 걸려서 여러 프로세스로 나눠 돌리고, 찾은 페이지부터 바로 반영한다.
         글자가 거의 없어 못 찾은 페이지는 그대로 둔다.
         """
-        if self.pdf_doc is None or self._deskew_procs:
+        if self.pdf_doc is None or self._deskew_procs or self._band_procs:  # [검은 여백 자르기]와 하나씩
             return
         which = self.crop_range_var.get()
         jobs = [self.slots[i] + (self._page_edit(i)["rot"],) for i in self._range_pages(which)]
@@ -3110,29 +3209,37 @@ class PDFLevelPreviewApp:
 
     def _show_skew_flags(self):
         """DESKEW_MAX°를 넘게 기운 쪽 번호를 [자동 보정] 줄 아래에 보여 준다 (누르면 그 페이지로). 없으면 숨긴다"""
-        frame = self._skew_flag_frame
+        self._show_flag_list(self._skew_flag_frame, self._skew_flagged, f"{DESKEW_MAX}° 넘음:",
+                             THUMB_SKEW_LINE, self._auto_row)
+
+    def _show_band_flags(self):
+        """[검은 여백 자르기]로 자른 쪽 번호를 그 버튼 아래에 보여 준다 (누르면 그 페이지로). 없으면 숨긴다"""
+        self._show_flag_list(self._band_flag_frame, self._band_flagged, "검은 여백 자름:",
+                             THUMB_BAND_LINE, self.band_btn)
+
+    def _show_flag_list(self, frame, uids, head_text, color, below):
+        """표시한 페이지(uids)의 쪽 번호를 below 위젯 바로 아래 frame에 보여 준다. 누르면 그 페이지로. 없으면 숨긴다"""
         for w in frame.winfo_children():
             w.destroy()
-        pages = sorted(i for i in map(self._uid_index, self._skew_flagged) if i is not None)
+        pages = sorted(i for i in map(self._uid_index, uids) if i is not None)
         if not pages:
             frame.pack_forget()
             return
-        head = tk.Label(frame, text=f"{DESKEW_MAX}° 넘음:", font=UI_FONT, fg=THUMB_SKEW_LINE, bg=frame["bg"])
+        head = tk.Label(frame, text=head_text, font=UI_FONT, fg=color, bg=frame["bg"])
         head.grid(row=0, column=0, sticky="nw", padx=(0, 8))
         # 한 줄에 들어가는 만큼 (글꼴 크기는 화면 배율에 따라 달라서 재서 정한다)
         fnt = tkfont.Font(font=UI_FONT)
         cell = fnt.measure("p.0000") + 8
         cols = max(1, (self._auto_row.winfo_width() - fnt.measure(head["text"]) - 8) // cell)
         for k, idx in enumerate(pages):
-            num = tk.Label(frame, text=f"p.{idx + 1}", font=UI_FONT, fg=THUMB_SKEW_LINE, bg=frame["bg"],
-                           cursor="hand2")
+            num = tk.Label(frame, text=f"p.{idx + 1}", font=UI_FONT, fg=color, bg=frame["bg"], cursor="hand2")
             num.grid(row=k // cols, column=1 + k % cols, sticky="w", padx=(0, 8))
             num.bind("<Button-1>", lambda e, i=idx: self._go_skew_flag(i))
-        frame.pack(fill=tk.X, pady=(4, 0), after=self._auto_row)
+        frame.pack(fill=tk.X, pady=(4, 0), after=below)
         self._bind_settings_scroll(frame)  # 휠로 오른쪽 패널 스크롤
 
     def _go_skew_flag(self, idx):
-        """많이 기운 쪽 번호를 누르면 그 페이지를 보여 준다 (빨간 테두리는 썸네일을 눌러야 없어진다)"""
+        """표시한 쪽 번호(1° 넘음·검은 여백 자름)를 누르면 그 페이지를 보여 준다 (테두리는 썸네일을 눌러야 없어진다)"""
         if idx >= self._page_count:
             return
         self._selected = {idx}
@@ -3148,6 +3255,86 @@ class PDFLevelPreviewApp:
             p.join(timeout=2)
         self._deskew_procs = []
         self.deskew_btn.config(text="자동 보정")
+
+    def auto_black_bands(self):
+        """[검은 여백 자르기]: 목록 범위 페이지마다 스캐너 검은 배경 띠(직사각형)를 찾아 자른다 (_detect_black_bands).
+
+        [자동 보정]처럼 여러 프로세스로 나눠 찾고, 찾은 페이지부터 바로 자르고 썸네일 주황 테두리 + 쪽 번호로 알린다.
+        자른 값은 [자동 보정]의 각도처럼 [적용] 없이 바로 확정한다. 이미 더 크게 자른 변은 그대로 둔다.
+        종이가 돌아가 생긴 삼각형은 직사각형 부분까지만 자른다(나머지는 사용자가 직접)
+        """
+        if self.pdf_doc is None or self._band_procs or self._deskew_procs:
+            return  # 둘 다 페이지 편집값을 바꾸므로 하나씩
+        which = self.crop_range_var.get()
+        jobs = [self.slots[i] + (self._page_edit(i)["rot"],) for i in self._range_pages(which)]
+        if not jobs or not self._confirm_range(which, "검은 여백 자르기를"):
+            return
+        n = min(len(jobs), max(1, ((os.cpu_count() or 4) * 3) // 4))
+        res_q = multiprocessing.Queue()
+        procs = [multiprocessing.Process(target=_band_worker, args=(jobs[k::n], res_q), daemon=True)
+                 for k in range(n)]
+        for p in procs:
+            p.start()
+        self._band_procs = procs
+        self._set_drag_mode("rotate")  # 선 편집을 끄고 잘린 결과를 보여 준다
+        self._poll_bands(procs, res_q, which, len(jobs), [0, 0])
+
+    def _poll_bands(self, procs, res_q, which, total, count):
+        """[검은 여백 자르기] 결과를 받아 자른다. count = [받은 수, 자른 수]"""
+        if procs is not self._band_procs:
+            return  # 멈췄다 (다른 파일을 열었거나 덮어쓰기·창 닫기)
+        alive = any(p.is_alive() for p in procs)
+        cur_changed = flagged = False
+        safe = _mm_to_pt(BAND_SAFE_MM)
+        try:
+            while True:
+                uid, bands = res_q.get_nowait()
+                count[0] += 1
+                idx = self._uid_index(uid)
+                if bands is None or idx is None:
+                    continue
+                e = self._page_edit(idx)
+                w, h = self._page_disp_size(idx)
+                # 기울기 보정한 페이지는 띠 경계도 같이 돌아 가는 검은 쐐기가 생긴다: (반대쪽 길이/2)×sin(각도) 더
+                s = abs(math.sin(math.radians(e["angle"])))
+                extra = (w / 2 * s, w / 2 * s, h / 2 * s, h / 2 * s)
+                crop = _clamp_margins([max(old, b + safe + x) if b else old
+                                       for old, b, x in zip(e["crop"], bands, extra)], w, h)
+                if crop == e["crop"]:
+                    continue  # 이미 그만큼 잘려 있다
+                self._set_page_edit(idx, crop=crop)
+                if idx == self.current_page:
+                    # [적용] 없이 확정: 입력 전 값도 바꿔 둬야 다른 페이지로 갈 때 되돌리지 않는다
+                    self._crop_before_edit = self._page_edit(idx)["crop"]
+                    cur_changed = True
+                count[1] += 1
+                self._band_flagged.add(uid)
+                flagged = True
+        except queue.Empty:
+            pass
+        if cur_changed:
+            self._sync_edit_panel()
+            self._refresh_preview()
+        if flagged:
+            self._show_band_flags()
+        if count[0] < total and alive:
+            self.band_btn.config(text=f"찾는 중 {count[0]}/{total}")
+            self.root.after(100, lambda: self._poll_bands(procs, res_q, which, total, count))
+            return
+        self._stop_bands()
+        if count[1]:
+            self._show_toast(f"{self._range_label(which)} {total}쪽 중 {count[1]}쪽의 검은 여백을 잘랐습니다. "
+                             "주황 테두리로 표시했습니다.")
+        else:
+            self._show_toast(f"{self._range_label(which)} {total}쪽에서 자를 검은 여백을 찾지 못했습니다.")
+
+    def _stop_bands(self):
+        """[검은 여백 자르기] 프로세스를 끝낸다 (PDF를 놓게)"""
+        for p in self._band_procs:
+            p.terminate()
+            p.join(timeout=2)
+        self._band_procs = []
+        self.band_btn.config(text="검은 여백 자르기")
 
     def _sync_edit_panel(self):
         """편집 패널의 각도/여백 입력칸과 페이지 크기 표시를 현재 페이지 값으로 맞춘다"""
@@ -3686,6 +3873,7 @@ class PDFLevelPreviewApp:
         out.close()
         self._stop_thumbnails()  # 썸네일 프로세스도 원본을 열고 있다
         self._stop_deskew()
+        self._stop_bands()
         self.pdf_doc.close()
         self.pdf_doc = None
         self._render_req_q.put((None, None, None, False, ()))  # 워커도 파일에서 손 떼게
@@ -4127,6 +4315,7 @@ class PDFLevelPreviewApp:
         # 남은 프로세스가 PDF를 쥐고 있으면 창을 닫아도 파일이 "사용 중"으로 남는다
         self._stop_thumbnails()
         self._stop_deskew()
+        self._stop_bands()
         self._render_proc.terminate()
         self._render_proc.join(timeout=2)
         if self._render_proc.is_alive():
