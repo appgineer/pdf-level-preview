@@ -66,6 +66,9 @@ ROTATE_GRID_PX = 20
 ROTATE_GRID_COLOR = "#00a0e0"
 # 기울기 자동 보정(_detect_skew): 이 해상도(dpi)로 그려 글줄을 보고 ±DESKEW_SEARCH° 안에서 찾는다 (ABBYY도 20°까지).
 # DESKEW_MAX°를 넘게 기운 페이지는 각도를 넣지 않고 썸네일에 빨간 테두리로 알린다 (크게 돌리면 모서리가 많이 잘린다)
+# 저장할 때 페이지 사전에 적어 두는 기울기 보정 합계(°). 다시 열면 회전 칸에 보이고, 바꾸면 차이만큼만 더 돌린다.
+# 일반 PDF 뷰어는 모르는 키를 무시한다
+DESKEW_KEY = "PDFLevelPreviewDeskew"
 DESKEW_DPI = 150
 DESKEW_SEARCH = 20
 DESKEW_MAX = 1
@@ -458,6 +461,15 @@ def _deskew_worker(jobs, res_q):
         doc.close()
 
 
+def _deskew_record(page):
+    """이 페이지에 이미 들어간(저장된) 기울기 보정 각도 합계(°). 적힌 게 없으면 0"""
+    kind, val = page.parent.xref_get_key(page.xref, DESKEW_KEY)
+    try:
+        return float(val) if kind in ("float", "int") else 0.0  # PyMuPDF는 소수를 "float"로 알려 준다 (값은 ".8"처럼)
+    except ValueError:
+        return 0.0
+
+
 def _apply_page_edit(page, angle, rot, margins):
     """화면에서 본 모양(90° 회전 + 기울기 보정 + 화면 기준 여백 pt)을 PDF 페이지에 반영한다.
 
@@ -468,6 +480,9 @@ def _apply_page_edit(page, angle, rot, margins):
         page.set_rotation((page.rotation + rot) % 360)
     if angle:
         _deskew_page(page, angle)
+        # 지금까지 돌린 기울기 합계를 페이지에 적어 둔다 (다시 열면 회전 칸에 보이게, _deskew_record)
+        total = round(_deskew_record(page) + angle, 2)
+        page.parent.xref_set_key(page.xref, DESKEW_KEY, f"{total:g}" if total else "null")
     r = page.rect  # 화면 기준
     top, bottom, left, right = _clamp_margins(margins, r.width, r.height)
     if not (top or bottom or left or right):
@@ -845,6 +860,7 @@ class PDFLevelPreviewApp:
         self._thumb_procs = set()  # 돌고 있는 썸네일 프로세스 (닫을 때 끝내야 PDF를 놓는다)
         self._deskew_procs = []  # 돌고 있는 기울기 자동 보정 프로세스 (마찬가지)
         self._skew_flagged = set()  # DESKEW_MAX°를 넘게 기울어 그대로 둔 페이지 uid (썸네일 빨간 테두리)
+        self._saved_angles = {}  # (파일, 페이지 번호) → 파일에 이미 들어간 기울기 합계 (_saved_angle)
         self._band_procs = []  # 돌고 있는 [검은 여백 자르기] 프로세스 (마찬가지)
         self._band_flagged = set()  # [검은 여백 자르기]로 자른 페이지 uid (썸네일 주황 테두리, 누르면 없어진다)
         # [로마자 표기]로 종이 1쪽이 된 페이지 uid (앞쪽은 i, ii …). None이면 쪽 번호 표기를 건드리지 않는다
@@ -1540,6 +1556,7 @@ class PDFLevelPreviewApp:
         self.preview_cache.clear()
         self.page_edits.clear()
         self._skew_flagged.clear()
+        self._saved_angles = {}
         self._show_skew_flags()
         self._band_flagged.clear()
         self._show_band_flags()
@@ -3343,13 +3360,21 @@ class PDFLevelPreviewApp:
         self._band_procs = []
         self.band_btn.config(text="검은 여백 자르기")
 
+    def _saved_angle(self, idx):
+        """그 페이지 파일에 이미 들어간 기울기 보정 합계(°, 저장할 때 적어 둔 값). 회전 칸은 이 값 + 이번 편집을 보인다"""
+        key = self.slots[idx][1:]
+        if key not in self._saved_angles:
+            path, src = key
+            self._saved_angles[key] = _deskew_record(self._src_docs[path][src])
+        return self._saved_angles[key]
+
     def _sync_edit_panel(self):
         """편집 패널의 각도/여백 입력칸과 페이지 크기 표시를 현재 페이지 값으로 맞춘다"""
         if self.pdf_doc is None:
             return
         e = self._page_edit(self.current_page)
         self._syncing_edit = True
-        self.angle_var.set(f"{e['angle']:g}")
+        self.angle_var.set(f"{round(self._saved_angle(self.current_page) + e['angle'], 2) + 0:g}")  # 저장된 기울기 + 이번 편집
         for side, v, base in zip(CROP_SIDES, e["crop"], self._crop_field_base):  # 칸 = 기준에서 더 자른 양
             self.crop_vars[side].set(f"{round(_pt_to_mm(v - base), 1) + 0:g}")  # 0.1mm 단위, 0은 "0" (+0: -0 막기)
         self._syncing_edit = False
@@ -3361,7 +3386,8 @@ class PDFLevelPreviewApp:
             angle = float(self.angle_var.get())
         except ValueError:
             return  # 입력 중인 빈 칸이나 "-"만 친 상태는 무시
-        self._set_page_edit(self.current_page, angle=angle)
+        # 칸은 합계(파일에 이미 들어간 기울기 + 이번 편집). 파일은 이미 돌아가 있으니 차이만 더 돌린다
+        self._set_page_edit(self.current_page, angle=round(angle - self._saved_angle(self.current_page), 2) + 0.0)
         self._set_drag_mode("rotate")  # 각도를 입력하면 미리보기를 끌어서 돌릴 수 있게
         self._schedule_quick_rotation()  # 바로 임시 화면을 띄우고
         self._on_var_change()  # 정식 미리보기는 레벨 입력처럼 잠깐 뒤에 갱신
@@ -3435,7 +3461,7 @@ class PDFLevelPreviewApp:
         angle = round((a0 + steps * 0.1 + 180) % 360 - 180, 1) + 0.0  # ±180 안, 0.1° 단위, -0 방지
         self._set_page_edit(self.current_page, angle=angle)
         self._syncing_edit = True
-        self.angle_var.set(f"{angle:g}")
+        self.angle_var.set(f"{round(self._saved_angle(self.current_page) + angle, 2) + 0:g}")  # 칸은 합계
         self._syncing_edit = False
         self._schedule_quick_rotation()
 
