@@ -782,7 +782,8 @@ class PDFLevelPreviewApp:
         self._saved_crop_box = None  # (위, 좌, 가로, 세로) pt, 크기 맞춤용. 다른 PDF를 열어도 유지
         self._last_fit_page = None  # 마지막으로 [저장 크기로 자르기]를 누른 페이지
         self._last_fit_pos = None   # 그 페이지 박스의 (위, 좌) pt. 다음 [저장 크기로 자르기]가 이어받는다
-        # [저장 크기 불러오기]로 박스를 놓고 아직 [적용]하지 않은 페이지 uid. 다른 페이지로 가면 되돌리고 저장에도 안 넣는다
+        # [저장 크기 불러오기]로 박스를 놓고 아직 [적용]하지 않은 페이지 uid. 되돌릴 때 그 값을 다음 불러오기 위치로
+        # 기록하지 않으려고 둔다 (되돌리기·저장 제외는 다른 자르기 입력과 같이 _crop_edit_uid 기준)
         self._pending_fit_uid = None
         self._pressed_edit_box = False  # 오른쪽 패널에서 마지막으로 누른 곳이 편집 구간인지 (Enter = [적용])
         self._thumb_dirty = set()   # 편집값이 바뀌어 다시 그릴 썸네일
@@ -794,9 +795,11 @@ class PDFLevelPreviewApp:
         self._rotate_redraw_id = None
         self._rotate_drag_photo = None
         self._syncing_edit = False  # 코드에서 편집 입력칸을 채우는 중 (되먹임 방지)
-        # 현재 페이지의 입력 전 자르기 값. 입력은 바로 현재 페이지에 들어가므로,
-        # [적용] 범위에 현재 페이지가 없으면 이 값으로 되돌린다
+        # 현재 페이지의 입력 전 자르기 값과 그 페이지 uid. 입력(숫자·선 끌기·[저장 크기 불러오기])은 바로 현재 페이지에
+        # 들어가지만 [적용]을 눌러야 확정이다: [적용] 없이 다른 페이지로 가면 이 값으로 되돌리고 저장에도 안 넣는다.
+        # [적용] 범위에 현재 페이지가 없을 때도 이 값으로 되돌린다
         self._crop_before_edit = [0.0, 0.0, 0.0, 0.0]
+        self._crop_edit_uid = None
 
         # 미리보기 렌더 워커 (앱 수명 동안 하나)
         self._render_req_q = multiprocessing.Queue()
@@ -1453,6 +1456,7 @@ class PDFLevelPreviewApp:
         self._pending_fit_uid = None
         self._thumb_dirty.clear()
         self._crop_before_edit = [0.0, 0.0, 0.0, 0.0]
+        self._crop_edit_uid = None
         self._edits_dirty = False
         self._shown_key = None
         self.current_page = 0
@@ -2004,15 +2008,16 @@ class PDFLevelPreviewApp:
     # Page selection
     # ------------------------------------------------------------------ #
     def select_page(self, page_idx):
-        if self._pending_fit_uid is not None and self.slots[page_idx][0] != self._pending_fit_uid:
-            self._discard_pending_fit()
+        uid = self.slots[page_idx][0]
+        if uid != self._crop_edit_uid:  # 다른 페이지로 간다 (같은 페이지를 다시 누르면 입력 전 값을 그대로 지킨다)
+            self._discard_unapplied_crop()
+            self._crop_before_edit = self._page_edit(page_idx)["crop"]
+            self._crop_edit_uid = uid
         if page_idx not in self._selected:
             self._selected = {page_idx}
             self._sel_anchor = page_idx
         self.current_page = page_idx
         self._update_page_label()
-        if self.slots[page_idx][0] != self._pending_fit_uid:  # 같은 페이지를 다시 눌러도 불러오기 전 값은 지킨다
-            self._crop_before_edit = self._page_edit(page_idx)["crop"]
         if self.crop_edit_var.get():
             # 다른 페이지는 저장될 모양(잘린 결과)으로 본다. 다시 만지면 선 편집이 켜진다
             self.crop_edit_var.set(False)
@@ -3025,10 +3030,13 @@ class PDFLevelPreviewApp:
         which = self.crop_range_var.get()
         if not self._confirm_range(which, f"{'오른쪽' if delta > 0 else '왼쪽'} 90° 회전을"):
             return
-        for idx in self._range_pages(which):
+        pages = self._range_pages(which)
+        for idx in pages:
             e = self._page_edit(idx)
             self._set_page_edit(idx, rot=(e["rot"] + delta) % 360,
                                 crop=_rotate_margins(e["crop"], delta))
+        if self.current_page in pages:  # 입력 전 자르기 값도 같이 돌려 둔다 (되돌릴 때 돌아간 모양으로)
+            self._crop_before_edit = _rotate_margins(self._crop_before_edit, delta)
         self._sync_edit_panel()
         self._refresh_preview()
         if which != "선택한 페이지" or len(self._selected) > 1:  # 한 장만 돌릴 때는 조용히
@@ -3396,6 +3404,8 @@ class PDFLevelPreviewApp:
         if self.pdf_doc is None:
             return
         which = self.crop_range_var.get()
+        if not self._confirm_range(which, "초기화를"):
+            return
         pages = self._range_pages(which)
         for idx in pages:
             self._set_page_edit(idx, angle=0.0, rot=0, crop=[0.0, 0.0, 0.0, 0.0])
@@ -3446,13 +3456,16 @@ class PDFLevelPreviewApp:
         self._sync_edit_panel()
         self._draw_crop_overlay()
 
-    def _discard_pending_fit(self):
-        """[저장 크기 불러오기]로 놓고 [적용]하지 않은 박스를 없앤다 (그 페이지 자르기를 불러오기 전 값으로)"""
-        idx = self._uid_index(self._pending_fit_uid)
-        self._pending_fit_uid = None
-        if idx is None:  # 그 사이 지운 페이지
+    def _discard_unapplied_crop(self):
+        """보던 페이지에서 [적용]하지 않은 자르기(숫자 입력·선 끌기·[저장 크기 불러오기])를 입력 전 값으로 되돌린다.
+        다른 페이지로 갈 때 부른다 (select_page)"""
+        uid, self._crop_edit_uid = self._crop_edit_uid, None
+        pending, self._pending_fit_uid = self._pending_fit_uid, None
+        idx = self._uid_index(uid) if uid is not None else None
+        if idx is None or self._page_edit(idx)["crop"] == self._crop_before_edit:  # 그 사이 지운 페이지 / 바뀐 것 없음
             return
-        self._last_fit_page = None  # 되돌린 값을 다음 불러오기 위치로 기록하지 않게 (끌어 둔 위치는 이어받는다)
+        if uid == pending:
+            self._last_fit_page = None  # 되돌린 값을 다음 불러오기 위치로 기록하지 않게 (끌어 둔 위치는 이어받는다)
         self._set_page_edit(idx, crop=self._crop_before_edit)
 
     def _crop_canvas_rect(self):
@@ -3605,8 +3618,8 @@ class PDFLevelPreviewApp:
                 self._arrange_pages(out, src)
                 for idx, (uid, _, _) in enumerate(self.slots):
                     e = self.page_edits.get(uid)
-                    if e is not None and uid == self._pending_fit_uid:  # [적용]하지 않은 저장 크기 박스는 빼고
-                        e = dict(e, crop=self._crop_before_edit)
+                    if uid == self._crop_edit_uid:  # [적용]하지 않은 자르기는 빼고 입력 전 값으로 (지운 경우도)
+                        e = dict(self._page_edit(idx), crop=self._crop_before_edit)
                     if e is not None:
                         _apply_page_edit(out[idx], e["angle"], e["rot"], e["crop"])
                 # [로마자 표기]: 앞쪽 i, ii …, start쪽부터 1, 2 … (첫 페이지면 1쪽부터 그대로).
