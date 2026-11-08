@@ -881,6 +881,10 @@ class PDFLevelPreviewApp:
         # [적용] 범위에 현재 페이지가 없을 때도 이 값으로 되돌린다
         self._crop_before_edit = [0.0, 0.0, 0.0, 0.0]
         self._crop_edit_uid = None
+        # 자르기 칸이 보여 주는 기준 값: 칸 = 현재 자르기 - 이 값 ("지금 상태에서 더 자를 양"). 페이지에 들어갈 때·[적용]·
+        # [초기화]·[검은 여백 자르기] 뒤에는 그때 자르기 값이라 칸이 0이다. [저장 크기 불러오기]는 맞춘 박스가 기준이라
+        # 칸이 0이지만, [적용] 없이 떠나면 되돌릴 값(_crop_before_edit)은 불러오기 전 값이다
+        self._crop_field_base = [0.0, 0.0, 0.0, 0.0]
 
         # 미리보기 렌더 워커 (앱 수명 동안 하나)
         self._render_req_q = multiprocessing.Queue()
@@ -1547,6 +1551,7 @@ class PDFLevelPreviewApp:
         self._thumb_dirty.clear()
         self._crop_before_edit = [0.0, 0.0, 0.0, 0.0]
         self._crop_edit_uid = None
+        self._crop_field_base = [0.0, 0.0, 0.0, 0.0]
         self._edits_dirty = False
         self._shown_key = None
         self.current_page = 0
@@ -2110,6 +2115,7 @@ class PDFLevelPreviewApp:
         if uid != self._crop_edit_uid:  # 다른 페이지로 간다 (같은 페이지를 다시 누르면 입력 전 값을 그대로 지킨다)
             self._discard_unapplied_crop()
             self._crop_before_edit = self._page_edit(page_idx)["crop"]
+            self._crop_field_base = self._crop_before_edit
             self._crop_edit_uid = uid
         if page_idx not in self._selected:
             self._selected = {page_idx}
@@ -3136,6 +3142,7 @@ class PDFLevelPreviewApp:
                                 crop=_rotate_margins(e["crop"], delta))
         if self.current_page in pages:  # 입력 전 자르기 값도 같이 돌려 둔다 (되돌릴 때 돌아간 모양으로)
             self._crop_before_edit = _rotate_margins(self._crop_before_edit, delta)
+            self._crop_field_base = _rotate_margins(self._crop_field_base, delta)
         self._sync_edit_panel()
         self._refresh_preview()
         if which != "선택한 페이지" or len(self._selected) > 1:  # 한 장만 돌릴 때는 조용히
@@ -3305,7 +3312,7 @@ class PDFLevelPreviewApp:
                 self._set_page_edit(idx, crop=crop)
                 if idx == self.current_page:
                     # [적용] 없이 확정: 입력 전 값도 바꿔 둬야 다른 페이지로 갈 때 되돌리지 않는다
-                    self._crop_before_edit = self._page_edit(idx)["crop"]
+                    self._crop_before_edit = self._crop_field_base = self._page_edit(idx)["crop"]  # 칸도 0
                     cur_changed = True
                 count[1] += 1
                 self._band_flagged.add(uid)
@@ -3343,8 +3350,8 @@ class PDFLevelPreviewApp:
         e = self._page_edit(self.current_page)
         self._syncing_edit = True
         self.angle_var.set(f"{e['angle']:g}")
-        for side, v in zip(CROP_SIDES, e["crop"]):
-            self.crop_vars[side].set(f"{round(_pt_to_mm(v), 1):g}")  # 0.1mm 단위, 0은 "0"
+        for side, v, base in zip(CROP_SIDES, e["crop"], self._crop_field_base):  # 칸 = 기준에서 더 자른 양
+            self.crop_vars[side].set(f"{round(_pt_to_mm(v - base), 1) + 0:g}")  # 0.1mm 단위, 0은 "0" (+0: -0 막기)
         self._syncing_edit = False
 
     def _on_angle_var_change(self, *_):
@@ -3364,7 +3371,8 @@ class PDFLevelPreviewApp:
             mm = float(self.crop_vars[side].get())
         except ValueError:
             mm = 0.0
-        self.crop_vars[side].set(f"{max(0.0, round(mm + delta, 1)):g}")
+        low = -round(_pt_to_mm(self._crop_field_base[CROP_SIDES.index(side)]), 1)  # 합계가 0 밑으로는 안 간다
+        self.crop_vars[side].set(f"{max(low, round(mm + delta, 1)) + 0:g}")
         return "break"
 
     def _nudge_angle(self, delta):
@@ -3493,7 +3501,8 @@ class PDFLevelPreviewApp:
         if self._syncing_edit or self.pdf_doc is None:
             return
         try:
-            margins = [_mm_to_pt(float(self.crop_vars[side].get())) for side in CROP_SIDES]
+            margins = [base + _mm_to_pt(float(self.crop_vars[side].get()))  # 칸 = 기준에서 더 자를 양
+                       for side, base in zip(CROP_SIDES, self._crop_field_base)]
         except ValueError:
             return  # 입력 중인 빈 칸/잘못된 값은 무시
         w, h = self._page_disp_size(self.current_page)
@@ -3536,30 +3545,44 @@ class PDFLevelPreviewApp:
         return (round(left * s), round(top * s), round(img.width - right * s), round(img.height - bottom * s))
 
     def apply_crop_range(self):
-        """현재 페이지의 여백을 고른 범위에 복사하고 자른 화면으로 보여준다.
+        """현재 페이지에서 바꾼 여백만큼(입력 전 값과의 차이)을 고른 범위의 페이지마다 더하고 자른 화면으로 보여준다.
 
-        홀수/짝수는 클릭한 페이지와 상관없이 문서 전체의 페이지 번호 기준이다.
+        페이지마다 이미 잘라 둔 값([저장 크기 불러오기]로 맞춘 좌 1.2·우 0.8 등)을 지키고 그 위에 더 자른다.
+        예전에는 현재 페이지 여백을 그대로 복사해서 페이지마다 맞춘 값이 덮어써졌다. 모두 같은 값으로 맞추려면
+        [초기화] 뒤에 적용한다. 0 밑으로는 안 줄어든다. 홀수/짝수는 문서 전체의 페이지 번호 기준이다.
         """
         if self.pdf_doc is None:
             return
         which = self.crop_range_var.get()
         if not self._confirm_range(which, "자르기를"):
             return
-        margins = self._page_edit(self.current_page)["crop"]
-        pages = self._range_pages(which)  # 현재 페이지만이면 여백은 이미 반영돼 있고 잘린 화면만 보여준다
+        cur = self.current_page
+        # 칸에 넣은 양 = 기준과의 차이 ([저장 크기 불러오기]로 맞춘 몫은 그 페이지에만 들어가고 다른 페이지에는 안 더한다)
+        delta = [n - o for n, o in zip(self._page_edit(cur)["crop"], self._crop_field_base)]
+        pages = self._range_pages(which)
         for idx in pages:
+            if idx == cur:
+                continue  # 바꾼 값이 이미 들어 있다
             w, h = self._page_disp_size(idx)
-            self._set_page_edit(idx, crop=_clamp_margins(margins, w, h))
+            old = self._page_edit(idx)["crop"]
+            self._set_page_edit(idx, crop=_clamp_margins([o + d for o, d in zip(old, delta)], w, h))
         if self.current_page not in pages:
             # 예: 짝수 페이지에서 입력하고 "홀수"로 적용 → 보고 있던 짝수 페이지는 잘리지 않게
             self._set_page_edit(self.current_page, crop=self._crop_before_edit)
             self._sync_edit_panel()
-        self._crop_before_edit = self._page_edit(self.current_page)["crop"]
+        self._crop_before_edit = self._crop_field_base = self._page_edit(self.current_page)["crop"]
         self._pending_fit_uid = None  # [저장 크기 불러오기]의 박스도 이제 확정
+        self._sync_edit_panel()  # 확정했으니 칸은 다시 0부터
         self.crop_edit_var.set(False)  # 선 편집이 꺼지면 잘린 결과가 보인다
         self.preview_canvas.config(cursor="")
         self._refresh_preview()
-        self._show_toast(f"자르기를 {self._range_label(which)}에 적용했습니다.")
+        # 무엇을 얼마나 더했는지 (0.1mm 단위, 바꾼 변만)
+        moved = [f"{name} {round(_pt_to_mm(d), 1):+g}" for name, d in zip(("위", "아래", "좌", "우"), delta)
+                 if round(_pt_to_mm(d), 1)]
+        if moved:
+            self._show_toast(f"{self._range_label(which)}에 자르기를 더했습니다 ({', '.join(moved)}mm).")
+        else:
+            self._show_toast("바꾼 자르기 값이 없어 그대로 두었습니다.")
 
     def _range_pages(self, which):
         """목록 범위의 페이지들. 홀수/짝수는 문서 전체의 (화면 순서) 페이지 번호 기준 (p.1 = idx 0)"""
@@ -3598,6 +3621,7 @@ class PDFLevelPreviewApp:
             self._set_page_edit(idx, angle=0.0, rot=0, crop=[0.0, 0.0, 0.0, 0.0])
         if self.current_page in pages:
             self._crop_before_edit = [0.0, 0.0, 0.0, 0.0]
+            self._crop_field_base = [0.0, 0.0, 0.0, 0.0]
             self._pending_fit_uid = None
         self._sync_edit_panel()
         self._refresh_preview()
@@ -3634,6 +3658,7 @@ class PDFLevelPreviewApp:
         self._set_page_edit(self.current_page, crop=[top, h - sh - top, left, w - sw - left])
         # [적용]을 눌러야 확정. 그 전에 다른 페이지로 가면 불러오기 전 값(_crop_before_edit)으로 되돌린다
         self._pending_fit_uid = self.slots[self.current_page][0]
+        self._crop_field_base = self._page_edit(self.current_page)["crop"]  # 칸은 맞춘 박스에서 0부터
         # 크기 맞춤은 한 장씩: 이어서 [적용]/[초기화]를 눌러도 다른 페이지를 건드리지 않게
         self._selected = {self.current_page}
         self._sel_anchor = self.current_page
