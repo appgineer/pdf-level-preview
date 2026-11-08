@@ -825,7 +825,7 @@ class PDFLevelPreviewApp:
         self.split_range_text = None
         self._config_saved = CONFIG_DEFAULT  # 마지막으로 불러오거나 저장한 config.json 값 (없으면 기본값)
         self.crop_edit_var = tk.BooleanVar(value=False)
-        self.grid_var = tk.BooleanVar(value=True)
+        self.grid_var = tk.BooleanVar(value=False)  # 격자 보기: 처음에는 꺼 둔다 (체크 또는 F1로 켠다)
         self.crop_range_var = tk.StringVar(value="선택한 페이지")
 
         self._section_heads = []  # (머리말 라벨, 색) — 구간 색칠 때 제 색을 지킨다
