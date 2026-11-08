@@ -302,7 +302,7 @@ def _deskew_page(page, angle):
     페이지 크기는 그대로라 비는 모서리는 흰색, 밖으로 나간 모서리는 잘린다.
     """
     doc = page.parent
-    c, m = page.cropbox, page.mediabox
+    c, m = _visible_box(page), page.mediabox  # 보이는 영역 가운데 (화면과 같은 중심)
     # MuPDF 좌표(y 아래로, MediaBox 위 기준) → PDF 좌표(y 위로)
     cx = (c.x0 + c.x1) / 2
     cy = m.y1 - (c.y0 + c.y1) / 2
@@ -394,11 +394,48 @@ def _apply_page_edit(page, angle, rot, margins):
     if not (top or bottom or left or right):
         return
     vis = fitz.Rect(r.x0 + left, r.y0 + top, r.x1 - right, r.y1 - bottom)
-    # 화면 좌표 → 회전 전 좌표. 결과는 현재 CropBox 왼쪽 위 기준이라 그만큼 옮긴다
-    box = (vis * page.derotation_matrix).normalize()
-    crop = page.cropbox
+    # 화면 좌표 → 회전 전 좌표. 결과는 보이는 영역 왼쪽 위 기준이라 그만큼 옮긴다
+    crop = _visible_box(page)
+    box = (vis * _derotation(page, crop)).normalize()
     box = fitz.Rect(box.x0 + crop.x0, box.y0 + crop.y0, box.x1 + crop.x0, box.y1 + crop.y0)
-    page.set_cropbox(box & crop)
+    _set_cropbox(page, box & crop)
+
+
+def _visible_box(page):
+    """실제로 보이는 영역 = CropBox ∩ MediaBox (page.cropbox와 같은 좌표: x는 그대로, y는 MediaBox 위에서 아래로).
+
+    여러 프로그램을 거친 스캔 중에 CropBox가 MediaBox 밖으로 나간 파일이 있다. 화면(MuPDF)은 겹치는 부분만
+    보여 주는데 CropBox를 그대로 기준으로 쓰면 여백이 나간 만큼 어긋나고, 손대지 않은 변이 밖에 남아
+    "CropBox not in MediaBox"로 저장이 실패했다
+    """
+    mb = page.mediabox  # PDF 좌표 (y 위로)
+    return page.cropbox & fitz.Rect(mb.x0, 0, mb.x1, mb.y1 - mb.y0)
+
+
+def _derotation(page, vb):
+    """화면(90° 회전 후) 좌표 → 회전 전 좌표. vb = 보이는 영역(_visible_box).
+
+    page.derotation_matrix는 CropBox 크기로 만들어서, CropBox가 MediaBox 밖으로 나간 파일을 90°·270° 돌리면
+    나간 만큼(시험에서 6pt) 어긋났다. 같은 식을 보이는 영역 크기로 만든다 (보통 파일은 page.derotation_matrix와 같다)
+    """
+    w, h = vb.width, vb.height
+    rot = {0: (1, 0, 0, 1, 0, 0), 90: (0, 1, -1, 0, h, 0),
+           180: (-1, 0, 0, -1, w, h), 270: (0, -1, 1, 0, 0, w)}[page.rotation % 360]
+    return ~fitz.Matrix(*rot)
+
+
+def _set_cropbox(page, box):
+    """CropBox를 넣는다. box는 page.cropbox와 같은 좌표.
+
+    PyMuPDF set_cropbox는 PDF 좌표로 바꾼 값이 소수점 오차로라도 MediaBox를 벗어나면 막는다. 직접 PDF 좌표로 바꿔
+    MediaBox 안으로 맞추고, 소수 넷째 자리에서 안쪽으로 반올림해 쓴다 (0.0001pt 줄어드는 것은 보이지 않는다)
+    """
+    mb = page.mediabox
+    x0, x1 = max(box.x0, mb.x0), min(box.x1, mb.x1)
+    y0, y1 = max(mb.y1 - box.y1, mb.y0), min(mb.y1 - box.y0, mb.y1)
+    x0, y0 = math.ceil(x0 * 1e4) / 1e4, math.ceil(y0 * 1e4) / 1e4
+    x1, y1 = math.floor(x1 * 1e4) / 1e4, math.floor(y1 * 1e4) / 1e4
+    page.parent.xref_set_key(page.xref, "CropBox", f"[{x0:.4f} {y0:.4f} {x1:.4f} {y1:.4f}]")
 
 
 def _bake_image_worker(job):
@@ -472,8 +509,8 @@ def _bake_visible(doc, progress=None):
     corners = [fitz.Point(0, 0), fitz.Point(1, 0), fitz.Point(1, 1), fitz.Point(0, 1)]
 
     def visible(pno):
-        # 그림 위치는 자르기 상자 왼쪽 위 기준, 90° 회전 전 좌표라 보이는 영역도 그렇게 잡는다
-        cb = doc[pno].cropbox
+        # 그림 위치는 보이는 영역(CropBox ∩ MediaBox) 왼쪽 위 기준, 90° 회전 전 좌표라 보이는 영역도 그렇게 잡는다
+        cb = _visible_box(doc[pno])
         return fitz.Rect(0, 0, cb.width, cb.height)
 
     # 손댈 그림 고르기 (자료는 아직 안 읽는다): (xref, 형식, 보이는 영역 귀퉁이를 그림 단위 좌표로)
@@ -544,9 +581,9 @@ def _bake_visible(doc, progress=None):
     # 페이지 크기(MediaBox)를 보이는 영역(CropBox)으로 (다른 프로그램이 MediaBox를 써도 지운 여백이 안 보이게).
     # page.cropbox는 위에서 아래로 잰 좌표라 set_mediabox(PDF 좌표)에 넘기면 위아래가 뒤집힌다. 파일에 적힌 값을 그대로 옮긴다
     for page in doc:
-        kind, box = doc.xref_get_key(page.xref, "CropBox")
-        if kind == "array":
-            doc.xref_set_key(page.xref, "MediaBox", box)
+        if doc.xref_get_key(page.xref, "CropBox")[0] == "array":
+            _set_cropbox(page, _visible_box(page))  # MediaBox 밖으로 나간 CropBox는 겹치는 부분으로
+            doc.xref_set_key(page.xref, "MediaBox", doc.xref_get_key(page.xref, "CropBox")[1])
             for k in ("CropBox", "TrimBox", "BleedBox", "ArtBox"):
                 doc.xref_set_key(page.xref, k, "null")
     return skipped
