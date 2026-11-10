@@ -1377,14 +1377,8 @@ class PDFLevelPreviewApp:
         rot90_row.columnconfigure((0, 1), weight=1, uniform="half")
         tk.Button(rot90_row, text="왼쪽 90°", command=lambda: self.rotate_90(-90), pady=BTN_PADY,
                   cursor="hand2", font=FNT).grid(row=0, column=0, sticky="ew", padx=(0, 2))
-        ref_btn = tk.Button(rot90_row, text="오른쪽 90°", command=lambda: self.rotate_90(90), pady=BTN_PADY,
-                            cursor="hand2", font=FNT)
-        ref_btn.grid(row=0, column=1, sticky="ew", padx=(2, 0))
-        # 선택창은 버튼과 기본 여백이 달라 더 낮게 나온다. 실제 높이를 재서 맞춘다
-        parent.update_idletasks()
-        gap = ref_btn.winfo_reqheight() - range_menu.winfo_reqheight()
-        if gap > 0:
-            range_menu.config(pady=BTN_PADY + (gap + 1) // 2)
+        tk.Button(rot90_row, text="오른쪽 90°", command=lambda: self.rotate_90(90), pady=BTN_PADY,
+                  cursor="hand2", font=FNT).grid(row=0, column=1, sticky="ew", padx=(2, 0))
 
         # 자르기 여백 (mm, 화면 기준). 제목 줄 오른쪽에 "선 편집"
         crop_head = tk.Frame(parent)
