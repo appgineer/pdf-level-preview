@@ -55,6 +55,11 @@ THUMB_GRID_COLS = 10
 THUMB_BIG_COLS, THUMB_BIG_ROWS = 5, 2
 THUMB_BIG_W = 720
 THUMB_BIG_CACHE = 60
+# 큰 썸네일 전용 프로세스 수 (_big_thumb_worker, 앱 수명 동안 켜 둔다). 페이지마다 프로세스를 새로 띄우면 Windows에서
+# 시작이 느려 F3을 처음 열 때 CPU가 몰려 버벅였다
+BIG_THUMB_WORKERS = 2
+# 기본 보기·F2에서 페이지를 고르면 이만큼 뒤(ms)에 F3에서 보일 묶음과 그다음 묶음의 큰 썸네일을 미리 그려 둔다
+BIG_PREFETCH_MS = 300
 # 툴바 보기 선택: (이름, 한 줄 칸 수. None = 기본 보기)
 VIEW_MODES = (("기본 보기", None), ("10개씩 보기 (F2)", THUMB_GRID_COLS), ("5개씩 크게 보기 (F3)", THUMB_BIG_COLS))
 INDICATOR_SIZE = 24  # 체크박스/라디오버튼 인디케이터 크기
@@ -97,16 +102,10 @@ BAND_SAFE_MM = 0.3
 CFG_CROP_LINE = "#e00000"
 # 눈에 띄어야 하는 버튼/선택창 색
 SAVE_BTN_BG, SAVE_BTN_ACTIVE = "#1f6fd0", "#17559f"      # 적용 / 저장 크기 불러오기 (파랑)
-# 적용 범위 선택창: 고른 범위마다 (바탕, 눌렀을 때) 색. 글씨는 흰색
-# 아래 버튼들(적용·불러오기 파랑, 다른 이름으로 저장 초록)과 겹치지 않는 색
-RANGE_COLORS = {"선택한 페이지": ("#0f8b99", "#0b6d78"),  # 청록
-                "홀수": ("#e0861a", "#bf7014"),          # 주황
-                "짝수": ("#7b5cc4", "#6447a8"),          # 보라
-                "전체": ("#566170", "#414a56")}          # 회청색
 # 다른 이름으로 저장: 초록, 흰 글씨
 SAVEAS_BTN_BG, SAVEAS_BTN_ACTIVE = "#3a9d5d", "#2f7f4c"
 CFG_SAVE_BG, CFG_SAVE_ACTIVE = "#7b4fc0", "#653da8"      # 설정 저장 (보라)
-DESKEW_BTN_BG, DESKEW_BTN_ACTIVE = "#8e44ad", "#763a91"  # 자동 보정 (붉은 보라, 짝수 범위색과 구별)
+DESKEW_BTN_BG, DESKEW_BTN_ACTIVE = "#8e44ad", "#763a91"  # 자동 보정 (붉은 보라)
 BAND_BTN_BG, BAND_BTN_ACTIVE = "#333333", "#111111"      # 검은 여백 자르기 (진회색, 흰 글씨)
 BTN_PADY = 4  # 버튼·선택창 높이를 맞추는 세로 여백
 # 내장 이미지가 없는 페이지(벡터/텍스트)의 렌더 스케일. 1.0 = 72 DPI
@@ -693,6 +692,35 @@ def _bake_visible(doc, progress=None):
     return skipped
 
 
+def _big_thumb_worker(k, req_q, res_q):
+    """[5개씩 크게 보기] 큰 썸네일 전용 프로세스 (앱 수명 동안 켜 둔다). PDF를 열어 둔 채 요청을 차례로 그린다.
+
+    요청: (세대, PDF 경로, 페이지 번호). 경로가 None이면 열어 둔 파일을 모두 놓는다(다른 파일 열기·덮어쓰기).
+    응답: (프로세스 번호 k, 세대, PDF 경로, 페이지 번호, mode, size, bytes 또는 None, 글자 있음). THUMB_BIG_W 폭 박스에 맞춘다.
+    """
+    docs = {}
+    while True:
+        gen, path, pno = req_q.get()
+        if path is None:
+            for d in docs.values():
+                d.close()
+            docs.clear()
+            continue
+        try:
+            if path not in docs:
+                docs[path] = fitz.open(path)
+            page = docs[path][pno]
+            z = THUMB_BIG_W / page.rect.width
+            pix = page.get_pixmap(matrix=fitz.Matrix(z, z))
+            img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+            ratio = min(THUMB_BIG_W / img.width, int(THUMB_BIG_W * 1.4) / img.height)  # 세로로 긴 페이지도 박스 안에
+            if ratio < 1:
+                img = img.resize((int(img.width * ratio), int(img.height * ratio)), Image.LANCZOS)
+            res_q.put((k, gen, path, pno, img.mode, img.size, img.tobytes(), bool(page.get_text().strip())))
+        except Exception:
+            res_q.put((k, gen, path, pno, None, None, None, False))
+
+
 def _preview_worker(req_q, res_q):
     """미리보기 렌더링 전용 프로세스.
 
@@ -848,8 +876,12 @@ class PDFLevelPreviewApp:
         self._thumb_w = THUMB_W  # 썸네일 칸 너비. 넓은 보기(F2·F3)에서 한 줄 칸 수에 맞춰 바뀐다
         self._grid_cols = None  # 넓은 보기 한 줄 칸 수 (None = 기본 보기, THUMB_GRID_COLS = F2, THUMB_BIG_COLS = F3)
         self._big_thumbs = {}  # (파일, 페이지 번호) → 큰 썸네일 (THUMB_BIG_W 폭, 최근 THUMB_BIG_CACHE장)
-        self._big_pending = set()  # 그려 달라고 한 큰 썸네일
-        self._big_after_id = None
+        # 큰 썸네일 요청: 보이는 페이지 먼저(_big_want), 미리 그리기는 그다음(_big_prefetch). 프로세스마다 한 장씩만 맡긴다
+        self._big_want = []      # [(파일, 페이지 번호)] 화면에 보이는데 큰 것이 없는 페이지
+        self._big_prefetch = []  # 미리 그려 둘 페이지
+        self._big_inflight = {}  # (파일, 페이지 번호) → (맡긴 프로세스 번호, 세대)
+        self._big_prefetch_id = None
+        self._big_pump_id = None  # 칸을 다 그린 뒤 한 번에 맡기려고 미뤄 둔 _pump_big
         self._thumb_return = False  # [보기 변경]에서 막 돌아왔다: 보던 페이지가 썸네일 두 번째 줄에 오게 (_on_thumb_canvas_resize)
         self.preview_cache = {}  # key -> (PIL Image, 상태문구)
         self.thumbnail_photo_refs = {}
@@ -925,6 +957,16 @@ class PDFLevelPreviewApp:
         )
         self._render_proc.start()
         threading.Thread(target=self._read_preview_results, daemon=True).start()
+        # 큰 썸네일 프로세스 (앱 수명 동안). 프로세스마다 요청 줄을 따로 둬야 '파일 놓기'가 모두에게 간다
+        self._big_res_q = multiprocessing.Queue()
+        self._big_workers = []  # [(프로세스, 요청 줄)]
+        for k in range(BIG_THUMB_WORKERS):
+            q = multiprocessing.Queue()
+            proc = multiprocessing.Process(target=_big_thumb_worker, args=(k, q, self._big_res_q), daemon=True)
+            proc.start()
+            self._big_workers.append((proc, q))
+        self._big_busy = [0] * BIG_THUMB_WORKERS  # 프로세스마다 맡겨 둔 수 (답이 오면 줄인다)
+        threading.Thread(target=self._read_big_results, daemon=True).start()
 
         # Config variables
         self.selected_level_idx = tk.IntVar(value=-1)
@@ -947,7 +989,6 @@ class PDFLevelPreviewApp:
         self._crop_quick_prev = "0"  # 바로 전 값 (켜진 라디오를 다시 눌렀는지 알려고)
         self._crop_quick_setting = False  # 체크로 네 칸을 채우는 중 (칸이 하나씩 바뀌는 사이에 체크를 끄지 않게)
         self.grid_var = tk.BooleanVar(value=False)  # 격자 보기: 처음에는 꺼 둔다 (체크 또는 F1로 켠다)
-        self.crop_range_var = tk.StringVar(value="선택한 페이지")
 
         self._section_heads = []  # (머리말 라벨, 색) — 구간 색칠 때 제 색을 지킨다
         self._build_ui()
@@ -1064,6 +1105,8 @@ class PDFLevelPreviewApp:
                                   ("삭제", "Delete", self.delete_selected),
                                   (None, None, None),
                                   ("전체 선택", "Ctrl+A", self.select_all),
+                                  ("홀수 선택", None, lambda: self.select_parity(0)),
+                                  ("짝수 선택", None, lambda: self.select_parity(1)),
                                   ("되돌리기", "Ctrl+Z", self.undo)):
             if label is None:
                 self._thumb_menu.add_separator()
@@ -1291,24 +1334,12 @@ class PDFLevelPreviewApp:
         """편집 구간: 회전, 자르기(여백 숫자 / 미리보기 선), 크기 저장·불러오기, 저장·다른 이름으로 저장"""
         FNT = UI_FONT
 
-        # 적용 범위: 회전과 자르기 [적용]·[초기화]가 모두 이 범위를 따른다
-        range_menu = tk.OptionMenu(parent, self.crop_range_var, *RANGE_COLORS)
-        range_menu.config(font=FNT, cursor="hand2", fg="white", activeforeground="white",
-                          highlightthickness=0, pady=BTN_PADY)  # 다른 버튼과 높이 맞춤
-        range_menu["menu"].config(font=FNT, fg="white", activeforeground="white")
-        for i, (bg, active) in enumerate(RANGE_COLORS.values()):  # 목록 항목도 제 색
-            range_menu["menu"].entryconfig(i, background=bg, activebackground=active)
-
-        def _paint_range(*_):  # 고른 범위에 맞춰 바탕색
-            bg, active = RANGE_COLORS[self.crop_range_var.get()]
-            range_menu.config(bg=bg, activebackground=active)
-        self.crop_range_var.trace_add("write", _paint_range)
-        _paint_range()
-        range_menu.pack(fill=tk.X)
+        # 회전·[자동 보정]·[검은 여백 자르기]·[적용]·[초기화]는 모두 썸네일에서 선택한 페이지에 한다
+        # (전체·홀수·짝수는 썸네일 오른쪽 클릭 메뉴로 선택)
 
         # 격자 보기: 페이지 위에 가로세로 격자만 그린다 (회전·자르기와 무관)
         grid_row = tk.Frame(parent)
-        grid_row.pack(fill=tk.X, pady=(16, 12))  # 아래를 띄워 회전 줄과 구분
+        grid_row.pack(fill=tk.X, pady=(0, 12))  # 아래를 띄워 회전 줄과 구분
         tk.Checkbutton(grid_row, text="격자 보기 (F1)", variable=self.grid_var,
                        command=self._on_grid_toggle, cursor="hand2", font=FNT,
                        image=self._ind_tk['cb_off'], selectimage=self._ind_tk['cb_on'],
@@ -1333,7 +1364,7 @@ class PDFLevelPreviewApp:
         angle_entry.bind("<Up>",    lambda e: self._nudge_angle(+0.1))
         angle_entry.bind("<Down>",  lambda e: self._nudge_angle(-0.1))
         self._edit_entries = [angle_entry]
-        # [자동 보정]: 목록 범위 페이지마다 글줄을 보고 기울기를 넣는다
+        # [자동 보정]: 선택한 페이지마다 글줄을 보고 기울기를 넣는다
         self.deskew_btn = tk.Button(rot_row, text="자동 보정", command=self.auto_deskew, pady=BTN_PADY,
                                     cursor="hand2", font=FNT, bg=DESKEW_BTN_BG, fg="white",
                                     activebackground=DESKEW_BTN_ACTIVE, activeforeground="white")
@@ -1390,7 +1421,7 @@ class PDFLevelPreviewApp:
                            image=self._ind_tk['rb_off'], selectimage=self._ind_tk['rb_on'],
                            indicatoron=False, compound=tk.RIGHT, bd=0, relief=tk.FLAT,
                            selectcolor=self._bg_color).grid(row=row, column=4, sticky=tk.W, padx=(28, 0), pady=2)
-        # [검은 여백 자르기]: 목록 범위 페이지에서 스캐너 검은 배경 띠(직사각형)를 찾아 자른다. 자른 쪽 번호는 바로 아래
+        # [검은 여백 자르기]: 선택한 페이지에서 스캐너 검은 배경 띠(직사각형)를 찾아 자른다. 자른 쪽 번호는 바로 아래
         self.band_btn = tk.Button(parent, text="검은 여백 자르기", command=self.auto_black_bands, pady=BTN_PADY,
                                   cursor="hand2", font=FNT, bg=BAND_BTN_BG, fg="white",
                                   activebackground=BAND_BTN_ACTIVE, activeforeground="white")
@@ -1559,6 +1590,7 @@ class PDFLevelPreviewApp:
         self._stop_deskew()
         self._stop_bands()
         self._close_src_docs()
+        self._release_big_workers()
         self.pdf_doc = fitz.open(path)
         self._pdf_path = path
         self._src_docs = {path: self.pdf_doc}
@@ -1603,6 +1635,7 @@ class PDFLevelPreviewApp:
         except ValueError:  # 파일에 이상한 값이 있으면 기본값과 비교
             self._config_saved = CONFIG_DEFAULT
         self.update_preview()
+        self._schedule_big_prefetch()
 
     # ------------------------------------------------------------------ #
     # Thumbnails (canvas-native virtual scrolling)
@@ -1614,7 +1647,9 @@ class PDFLevelPreviewApp:
         self._selection_rect_id = None
 
         self._thumb_generation += 1
-        self._big_pending.clear()  # 이전 세대 큰 썸네일 요청은 버려지므로 다시 청할 수 있게
+        self._big_want.clear()  # 이전 세대 큰 썸네일 요청은 버려지므로 다시 청할 수 있게
+        self._big_prefetch.clear()
+        self._big_inflight.clear()
         self._drop_thumb_photos()  # 다른 파일·새로 그린 썸네일이라 기억해 둔 화면 그림은 못 쓴다
         self._page_count = len(self.slots)
 
@@ -1623,9 +1658,8 @@ class PDFLevelPreviewApp:
         # 같은 페이지를 여러 번 붙여넣었어도 한 번만 그린다
         self._render_thumbs(list(dict.fromkeys((path, src) for _, path, src in self.slots)))
 
-    def _render_thumbs(self, pages, big=False):
-        """[(파일 경로, 페이지 번호)]의 썸네일을 병렬 프로세스로 그려 thumbnail_cache에 넣는다.
-        big: [5개씩 크게 보기]용으로 THUMB_BIG_W 폭으로 그려 _big_thumbs에 넣는다 (최근 THUMB_BIG_CACHE장)"""
+    def _render_thumbs(self, pages):
+        """[(파일 경로, 페이지 번호)]의 썸네일을 병렬 프로세스로 그려 thumbnail_cache에 넣는다"""
         gen = self._thumb_generation
         workers = max(1, ((os.cpu_count() or 4) * 3) // 4)
 
@@ -1639,15 +1673,14 @@ class PDFLevelPreviewApp:
                     "import fitz,sys;"
                     "d=fitz.open(sys.argv[1]);"
                     "p=d[int(sys.argv[2])];"
-                    "w=float(sys.argv[4]);z=w/p.rect.width if w else 0.6;"  # 크게: 그 폭으로, 아니면 0.6배
-                    "m=fitz.Matrix(z,z);"
+                    "m=fitz.Matrix(0.6,0.6);"
                     "x=p.get_pixmap(matrix=m);"
                     "x.save(sys.argv[3]);"
                     "print(int(bool(p.get_text().strip())));"  # 글자를 뽑을 수 있으면(OCR됨) 1
                     "d.close()"
                 )
                 proc = subprocess.Popen(
-                    [sys.executable, '-c', script, pdf_path, str(i), tmp, str(THUMB_BIG_W if big else 0)],
+                    [sys.executable, '-c', script, pdf_path, str(i), tmp],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE
                 )
                 self._thumb_procs.add(proc)
@@ -1665,17 +1698,9 @@ class PDFLevelPreviewApp:
                 raw = Image.open(tmp)
                 raw.load()
                 # 세로로 긴 페이지가 셀 밖으로 넘치지 않도록 박스 안에 맞춘다
-                box = THUMB_BIG_W if big else THUMB_W
-                ratio = min(box / raw.width, int(box * 1.4) / raw.height)
+                ratio = min(THUMB_W / raw.width, int(THUMB_W * 1.4) / raw.height)
                 img = raw.resize((int(raw.width * ratio), int(raw.height * ratio)), Image.LANCZOS)
-                if big:
-                    self._big_thumbs.pop(page, None)
-                    self._big_thumbs[page] = img
-                    while len(self._big_thumbs) > THUMB_BIG_CACHE:  # 오래된 것부터 버린다 (메모리)
-                        self._big_thumbs.pop(next(iter(self._big_thumbs)), None)
-                    self._big_pending.discard(page)
-                else:
-                    self.thumbnail_cache[page] = img
+                self.thumbnail_cache[page] = img
                 if gen != self._thumb_generation:
                     return
                 self.root.after(0, lambda pg=page: self._on_thumb_rendered(pg, gen))
@@ -2179,16 +2204,97 @@ class PDFLevelPreviewApp:
         self.set_view(None if self._grid_cols == cols else cols)
 
     def _want_big_thumb(self, page):
-        """[5개씩 크게 보기]에서 보이는 페이지의 큰 썸네일을 그려 달라고 모아 둔다 (조금 뒤 한꺼번에 _render_thumbs)"""
-        if page in self._big_pending:
+        """[5개씩 크게 보기]에서 그리는 칸인데 큰 썸네일이 없는 페이지: 미리 그리기보다 먼저 맡긴다"""
+        if page in self._big_inflight or page in self._big_thumbs or page in self._big_want:
             return
-        self._big_pending.add(page)
-        if self._big_after_id is None:
-            self._big_after_id = self.root.after(30, self._render_big_pending)
+        self._big_want.append(page)
+        # 이번에 그리는 칸을 모두 모은 뒤 맡긴다 (바로 맡기면 먼저 그려진 위아래 여분 줄이 먼저 간다)
+        if self._big_pump_id is None:
+            self._big_pump_id = self.root.after_idle(self._pump_big)
 
-    def _render_big_pending(self):
-        self._big_after_id = None
-        self._render_thumbs([p for p in self._big_pending if p not in self._big_thumbs], big=True)
+    def _pump_big(self):
+        """쉬는 큰 썸네일 프로세스에 다음 페이지를 맡긴다 (보이는 페이지 먼저, 그다음 미리 그리기). 한 프로세스에 한 장씩"""
+        self._big_pump_id = None
+        if self.pdf_doc is None:  # 덮어쓰기 중·파일 없음
+            return
+        if self._big_want:
+            # 스크롤로 지나간(이제 안 그려진) 페이지는 버리고, 화면에 실제로 보이는 줄을 위에서부터 먼저.
+            # 위아래로 한 줄씩 더 그려 두는 칸(_draw_visible_thumbs)은 그다음
+            first = int(self.thumb_canvas.yview()[0] * self._thumb_total_height // self._thumb_cell_h)
+            last = first + self._thumb_page_rows
+            order = {}
+            for i in sorted(self._drawn_pages):
+                order.setdefault(self.slots[i][1:], (not first <= i // self._thumb_cols < last, i))
+            self._big_want = sorted((pg for pg in self._big_want if pg in order), key=order.get)
+        for k, (_, q) in enumerate(self._big_workers):
+            while self._big_busy[k] == 0 and (self._big_want or self._big_prefetch):
+                page = (self._big_want or self._big_prefetch).pop(0)
+                if page in self._big_thumbs or page in self._big_inflight:
+                    continue
+                self._big_inflight[page] = (k, self._thumb_generation)
+                self._big_busy[k] += 1
+                q.put((self._thumb_generation, page[0], page[1]))
+
+    def _read_big_results(self):
+        """수신 스레드: 큰 썸네일 결과를 화면 스레드로 넘긴다"""
+        while True:
+            try:
+                k, gen, path, pno, mode, size, data, text = self._big_res_q.get()
+            except (EOFError, OSError):
+                return
+            img = Image.frombytes(mode, size, data) if data is not None else None
+            try:
+                self.root.after(0, lambda a=(k, gen, (path, pno), img, text): self._on_big_rendered(*a))
+            except (RuntimeError, tk.TclError):  # 창이 이미 닫힘
+                return
+
+    def _on_big_rendered(self, k, gen, page, img, text):
+        self._big_busy[k] = max(0, self._big_busy[k] - 1)
+        if self._big_inflight.get(page) == (k, gen):  # 썸네일을 다시 만든 뒤 같은 페이지를 또 맡겼으면 그건 남긴다
+            del self._big_inflight[page]
+        if gen == self._thumb_generation and img is not None:
+            self._big_thumbs.pop(page, None)
+            self._big_thumbs[page] = img
+            while len(self._big_thumbs) > THUMB_BIG_CACHE:  # 오래된 것부터 버린다 (메모리)
+                self._big_thumbs.pop(next(iter(self._big_thumbs)))
+            if text:
+                self._text_pages.add(page)
+            if self._thumb_w > THUMB_W:  # [5개씩 크게]에서 보이는 칸이면 큰 것으로 다시 그린다. 미리 그린 것은 그대로 둔다
+                for idx in list(self._drawn_pages):  # (_on_thumb_rendered처럼 작은 썸네일 화면 그림까지 버리지 않게)
+                    if self.slots[idx][1:] == page:
+                        self._draw_thumb_page(idx)
+        self._pump_big()
+
+    def _release_big_workers(self):
+        """큰 썸네일 프로세스가 열어 둔 PDF를 놓게 한다 (다른 파일 열기·덮어쓰기 전)"""
+        for _, q in self._big_workers:
+            q.put((0, None, 0))
+
+    def _schedule_big_prefetch(self):
+        """페이지를 고른 뒤 잠깐 있다가 F3에서 보일 묶음과 그다음 묶음의 큰 썸네일을 미리 그려 둔다"""
+        if self._big_prefetch_id is not None:
+            self.root.after_cancel(self._big_prefetch_id)
+        self._big_prefetch_id = self.root.after(BIG_PREFETCH_MS, self._prefetch_big)
+
+    def _prefetch_big(self):
+        self._big_prefetch_id = None
+        if self.pdf_doc is None or not self._page_count or self._big_view_thumb_w() <= THUMB_W:
+            return  # F3에서도 작은 썸네일로 충분한 화면 (1920 등)
+        block = THUMB_BIG_COLS * THUMB_BIG_ROWS
+        start = self.current_page // block * block
+        pages = [self.slots[i][1:] for i in range(start, min(self._page_count, start + 2 * block))]
+        self._big_prefetch = [pg for pg in dict.fromkeys(pages)
+                              if pg not in self._big_thumbs and pg not in self._big_inflight]
+        self._pump_big()
+
+    def _big_view_thumb_w(self):
+        """[5개씩 크게 보기]일 때의 썸네일 폭 (지금 보기와 상관없이, _compute_thumb_layout과 같은 계산)"""
+        w = self.thumb_canvas.winfo_width()
+        if self._grid_cols is None:  # 기본 보기면 가운데 칸 + 경계선만큼 넓어진다
+            w += self._preview_frame.winfo_width() + 36
+        per_row = max(1, self.thumb_canvas.winfo_height()) // THUMB_BIG_ROWS
+        by_h = (per_row - 8 - self._thumb_label_h - THUMB_MARGIN * 2) / 1.4
+        return int(min(THUMB_BIG_W, w // THUMB_BIG_COLS - THUMB_MARGIN * 2, by_h))
 
     # ------------------------------------------------------------------ #
     # Page selection
@@ -2213,6 +2319,7 @@ class PDFLevelPreviewApp:
         self._draw_selection()
         self._sync_edit_panel()
         self.update_preview()
+        self._schedule_big_prefetch()
 
     def _on_thumb_arrow(self, event, key, step):
         """썸네일 패널 방향키: 보이는 칸 기준으로 옮기고, Shift면 기준 페이지부터 범위 선택"""
@@ -2370,6 +2477,18 @@ class PDFLevelPreviewApp:
             return
         self._selected = set(range(self._page_count))
         self._draw_selection()
+
+    def select_parity(self, start):
+        """오른쪽 클릭 메뉴 [홀수 선택](start 0)·[짝수 선택](start 1): 페이지 번호(p.1 = 맨 앞) 기준.
+        보고 있는 페이지가 빠지면 가장 가까운 선택 페이지로 옮긴다 (현재 페이지는 늘 선택 안에 있다)"""
+        pages = set(range(start, self._page_count, 2))
+        if not pages:
+            return
+        self._selected = pages
+        if self.current_page in pages:
+            self._draw_selection()
+        else:
+            self.select_page(min(sorted(pages), key=lambda i: abs(i - self.current_page)))  # 같은 거리면 앞 페이지
 
     def copy_selected(self):
         """선택한 페이지를 클립보드 PDF로 내보낸다. 다른 창(다른 PDF)에서도 붙여넣을 수 있다.
@@ -3198,16 +3317,15 @@ class PDFLevelPreviewApp:
         return r.width, r.height
 
     def rotate_90(self, delta):
-        """90° 단위 회전. 목록 범위(선택한 페이지/홀수/짝수/전체)에 적용하고, 자르기 여백도 함께 돈다.
+        """90° 단위 회전. 선택한 페이지에 적용하고, 자르기 여백도 함께 돈다.
 
         페이지마다 지금 각도에서 90°씩 더 돌린다. 이미 다르게 돌려 둔 페이지도 관계가 유지된다.
         """
         if self.pdf_doc is None:
             return
-        which = self.crop_range_var.get()
-        if not self._confirm_range(which, f"{'오른쪽' if delta > 0 else '왼쪽'} 90° 회전을"):
+        if not self._confirm_range(f"{'오른쪽' if delta > 0 else '왼쪽'} 90° 회전을"):
             return
-        pages = self._range_pages(which)
+        pages = self._edit_pages()
         for idx in pages:
             e = self._page_edit(idx)
             self._set_page_edit(idx, rot=(e["rot"] + delta) % 360,
@@ -3217,21 +3335,21 @@ class PDFLevelPreviewApp:
             self._crop_field_base = _rotate_margins(self._crop_field_base, delta)
         self._sync_edit_panel()
         self._refresh_preview()
-        if which != "선택한 페이지" or len(self._selected) > 1:  # 한 장만 돌릴 때는 조용히
+        if len(pages) > 1:  # 한 장만 돌릴 때는 조용히
             way = "오른쪽" if delta > 0 else "왼쪽"
-            self._show_toast(f"{self._range_label(which)}를 {way}으로 90° 돌렸습니다.")
+            self._show_toast(f"{self._sel_label()}를 {way}으로 90° 돌렸습니다.")
 
     def auto_deskew(self):
-        """목록 범위(선택한 페이지/홀수/짝수/전체) 페이지마다 글줄을 보고 기울기 각도를 넣는다 (_detect_skew).
+        """선택한 페이지마다 글줄을 보고 기울기 각도를 넣는다 (_detect_skew).
 
         페이지가 많으면 오래 걸려서 여러 프로세스로 나눠 돌리고, 찾은 페이지부터 바로 반영한다.
         글자가 거의 없어 못 찾은 페이지는 그대로 둔다.
         """
         if self.pdf_doc is None or self._deskew_procs or self._band_procs:  # [검은 여백 자르기]와 하나씩
             return
-        which = self.crop_range_var.get()
-        jobs = [self.slots[i] + (self._page_edit(i)["rot"],) for i in self._range_pages(which)]
-        if not jobs or not self._confirm_range(which, "자동 보정을"):
+        label = self._sel_label()
+        jobs = [self.slots[i] + (self._page_edit(i)["rot"],) for i in self._edit_pages()]
+        if not jobs or not self._confirm_range("자동 보정을"):
             return
         n = min(len(jobs), max(1, ((os.cpu_count() or 4) * 3) // 4))
         res_q = multiprocessing.Queue()
@@ -3241,9 +3359,9 @@ class PDFLevelPreviewApp:
             p.start()
         self._deskew_procs = procs
         self._set_drag_mode("rotate")  # 선 편집을 끄고 돌린 결과를 보여 준다
-        self._poll_deskew(procs, res_q, which, len(jobs), [0, 0, 0])
+        self._poll_deskew(procs, res_q, label, len(jobs), [0, 0, 0])
 
-    def _poll_deskew(self, procs, res_q, which, total, count):
+    def _poll_deskew(self, procs, res_q, label, total, count):
         """자동 보정 결과를 받아 페이지에 넣는다. count = [받은 수, 못 찾은 수, DESKEW_MAX° 넘은 수]"""
         if procs is not self._deskew_procs:
             return  # 멈췄다 (다른 파일을 열었거나 덮어쓰기·창 닫기)
@@ -3275,11 +3393,11 @@ class PDFLevelPreviewApp:
             self._show_skew_flags()
         if count[0] < total and alive:
             self.deskew_btn.config(text=f"찾는 중 {count[0]}/{total}")
-            self.root.after(100, lambda: self._poll_deskew(procs, res_q, which, total, count))
+            self.root.after(100, lambda: self._poll_deskew(procs, res_q, label, total, count))
             return
         self._stop_deskew()
         skipped = total - count[0] + count[1]  # 프로세스가 죽어 못 받은 것도
-        msg = f"{self._range_label(which)} {total - skipped - count[2]}쪽의 기울기를 맞췄습니다."
+        msg = f"{label} {total - skipped - count[2]}쪽의 기울기를 맞췄습니다."
         if count[2]:
             msg += f" {DESKEW_MAX}°를 넘게 기운 {count[2]}쪽은 그대로 두고 빨간 테두리로 표시했습니다."
         if skipped:
@@ -3336,7 +3454,7 @@ class PDFLevelPreviewApp:
         self.deskew_btn.config(text="자동 보정")
 
     def auto_black_bands(self):
-        """[검은 여백 자르기]: 목록 범위 페이지마다 스캐너 검은 배경 띠(직사각형)를 찾아 자른다 (_detect_black_bands).
+        """[검은 여백 자르기]: 선택한 페이지마다 스캐너 검은 배경 띠(직사각형)를 찾아 자른다 (_detect_black_bands).
 
         [자동 보정]처럼 여러 프로세스로 나눠 찾고, 찾은 페이지부터 바로 자르고 썸네일 주황 테두리 + 쪽 번호로 알린다.
         자른 값은 [자동 보정]의 각도처럼 [적용] 없이 바로 확정한다. 이미 더 크게 자른 변은 그대로 둔다.
@@ -3344,9 +3462,9 @@ class PDFLevelPreviewApp:
         """
         if self.pdf_doc is None or self._band_procs or self._deskew_procs:
             return  # 둘 다 페이지 편집값을 바꾸므로 하나씩
-        which = self.crop_range_var.get()
-        jobs = [self.slots[i] + (self._page_edit(i)["rot"],) for i in self._range_pages(which)]
-        if not jobs or not self._confirm_range(which, "검은 여백 자르기를"):
+        label = self._sel_label()
+        jobs = [self.slots[i] + (self._page_edit(i)["rot"],) for i in self._edit_pages()]
+        if not jobs or not self._confirm_range("검은 여백 자르기를"):
             return
         n = min(len(jobs), max(1, ((os.cpu_count() or 4) * 3) // 4))
         res_q = multiprocessing.Queue()
@@ -3356,9 +3474,9 @@ class PDFLevelPreviewApp:
             p.start()
         self._band_procs = procs
         self._set_drag_mode("rotate")  # 선 편집을 끄고 잘린 결과를 보여 준다
-        self._poll_bands(procs, res_q, which, len(jobs), [0, 0])
+        self._poll_bands(procs, res_q, label, len(jobs), [0, 0])
 
-    def _poll_bands(self, procs, res_q, which, total, count):
+    def _poll_bands(self, procs, res_q, label, total, count):
         """[검은 여백 자르기] 결과를 받아 자른다. count = [받은 수, 자른 수]"""
         if procs is not self._band_procs:
             return  # 멈췄다 (다른 파일을 열었거나 덮어쓰기·창 닫기)
@@ -3398,14 +3516,14 @@ class PDFLevelPreviewApp:
             self._show_band_flags()
         if count[0] < total and alive:
             self.band_btn.config(text=f"찾는 중 {count[0]}/{total}")
-            self.root.after(100, lambda: self._poll_bands(procs, res_q, which, total, count))
+            self.root.after(100, lambda: self._poll_bands(procs, res_q, label, total, count))
             return
         self._stop_bands()
         if count[1]:
-            self._show_toast(f"{self._range_label(which)} {total}쪽 중 {count[1]}쪽의 검은 여백을 잘랐습니다. "
+            self._show_toast(f"{label} {total}쪽 중 {count[1]}쪽의 검은 여백을 잘랐습니다. "
                              "주황 테두리로 표시했습니다.")
         else:
-            self._show_toast(f"{self._range_label(which)} {total}쪽에서 자를 검은 여백을 찾지 못했습니다.")
+            self._show_toast(f"{label} {total}쪽에서 자를 검은 여백을 찾지 못했습니다.")
 
     def _stop_bands(self):
         """[검은 여백 자르기] 프로세스를 끝낸다 (PDF를 놓게)"""
@@ -3658,23 +3776,18 @@ class PDFLevelPreviewApp:
         """
         if self.pdf_doc is None:
             return
-        which = self.crop_range_var.get()
-        if not self._confirm_range(which, "자르기를"):
+        if not self._confirm_range("자르기를"):
             return
         cur = self.current_page
         # 칸에 넣은 양 = 기준과의 차이 ([저장 크기 불러오기]로 맞춘 몫은 그 페이지에만 들어가고 다른 페이지에는 안 더한다)
         delta = [n - o for n, o in zip(self._page_edit(cur)["crop"], self._crop_field_base)]
-        pages = self._range_pages(which)
+        pages = self._edit_pages()  # 현재 페이지는 늘 들어 있다
         for idx in pages:
             if idx == cur:
                 continue  # 바꾼 값이 이미 들어 있다
             w, h = self._page_disp_size(idx)
             old = self._page_edit(idx)["crop"]
             self._set_page_edit(idx, crop=_clamp_margins([o + d for o, d in zip(old, delta)], w, h))
-        if self.current_page not in pages:
-            # 예: 짝수 페이지에서 입력하고 "홀수"로 적용 → 보고 있던 짝수 페이지는 잘리지 않게
-            self._set_page_edit(self.current_page, crop=self._crop_before_edit)
-            self._sync_edit_panel()
         self._crop_before_edit = self._crop_field_base = self._page_edit(self.current_page)["crop"]
         self._pending_fit_uid = None  # [저장 크기 불러오기]의 박스도 이제 확정
         self._sync_edit_panel()  # 확정했으니 칸은 다시 0부터
@@ -3685,43 +3798,48 @@ class PDFLevelPreviewApp:
         moved = [f"{name} {round(_pt_to_mm(d), 1):+g}" for name, d in zip(("위", "아래", "좌", "우"), delta)
                  if round(_pt_to_mm(d), 1)]
         if moved:
-            self._show_toast(f"{self._range_label(which)}에 자르기를 더했습니다 ({', '.join(moved)}mm).")
+            self._show_toast(f"{self._sel_label()}에 자르기를 더했습니다 ({', '.join(moved)}mm).")
         else:
             self._show_toast("바꾼 자르기 값이 없어 그대로 두었습니다.")
 
-    def _range_pages(self, which):
-        """목록 범위의 페이지들. 홀수/짝수는 문서 전체의 (화면 순서) 페이지 번호 기준 (p.1 = idx 0)"""
-        if which == "선택한 페이지":  # 현재 페이지는 항상 들어 있다
-            return sorted(self._selected)
-        start, step = {"홀수": (0, 2), "짝수": (1, 2), "전체": (0, 1)}[which]
-        return range(start, self._page_count, step)
+    def _edit_pages(self):
+        """편집 버튼이 고칠 페이지 = 썸네일에서 선택한 페이지 (화면 위치 순, 현재 페이지는 늘 들어 있다)"""
+        return sorted(self._selected)
 
-    @staticmethod
-    def _range_label(which):
-        return which if which == "선택한 페이지" else f"{which} 페이지"
+    def _sel_kind(self):
+        """선택이 전체·홀수·짝수 페이지와 똑같으면 그 이름 (오른쪽 클릭 [전체 선택]·[홀수 선택]·[짝수 선택], Ctrl+A).
+        홀수/짝수는 문서 전체의 (화면 순서) 페이지 번호 기준 (p.1 = idx 0). 한 장뿐이면 None"""
+        if len(self._selected) > 1:
+            for name, start, step in (("전체", 0, 1), ("홀수", 0, 2), ("짝수", 1, 2)):
+                if self._selected == set(range(start, self._page_count, step)):
+                    return name
+        return None
 
-    def _confirm_range(self, which, what):
-        """적용 범위가 홀수·짝수·전체면 한 번 더 묻는다. 전체로 둔 줄 모르고 여러 페이지를 고치는 실수를 막는다.
+    def _sel_label(self):
+        kind = self._sel_kind()
+        return f"{kind} 페이지" if kind else "선택한 페이지"
 
-        선택한 페이지면 묻지 않는다. 기본 단추는 [아니요]라 Enter를 한 번 더 눌러도 적용되지 않는다.
-        what: "자르기를" / "왼쪽 90° 회전을" / "자동 보정을"
+    def _confirm_range(self, what):
+        """전체·홀수·짝수 페이지를 선택한 상태면 한 번 더 묻는다. 전체를 고른 줄 모르고 여러 페이지를 고치는 실수를 막는다.
+
+        그 밖의 선택(한 장, Shift·Ctrl로 고른 몇 장)은 묻지 않는다. 기본 단추는 [아니요]라 Enter를 한 번 더 눌러도
+        적용되지 않는다. what: "자르기를" / "왼쪽 90° 회전을" / "자동 보정을"
         """
-        if which == "선택한 페이지":
+        kind = self._sel_kind()
+        if kind is None:
             return True
-        n = len(self._range_pages(which))
         return messagebox.askyesno(
             "적용 범위 확인",
-            f"적용 범위가 [{which}]입니다.\n{self._range_label(which)} {n}쪽에 {what} 적용할까요?",
+            f"{kind} 페이지를 선택한 상태입니다.\n{kind} 페이지 {len(self._selected)}쪽에 {what} 적용할까요?",
             default=messagebox.NO, parent=self.root)
 
     def reset_edits(self):
-        """목록 범위(선택한 페이지/홀수/짝수/전체)의 편집을 모두 되돌린다 (자르기·기울기·90° 회전)"""
+        """선택한 페이지의 편집을 모두 되돌린다 (자르기·기울기·90° 회전)"""
         if self.pdf_doc is None:
             return
-        which = self.crop_range_var.get()
-        if not self._confirm_range(which, "초기화를"):
+        if not self._confirm_range("초기화를"):
             return
-        pages = self._range_pages(which)
+        pages = self._edit_pages()
         for idx in pages:
             self._set_page_edit(idx, angle=0.0, rot=0, crop=[0.0, 0.0, 0.0, 0.0])
         if self.current_page in pages:
@@ -3730,7 +3848,7 @@ class PDFLevelPreviewApp:
             self._pending_fit_uid = None
         self._sync_edit_panel()
         self._refresh_preview()
-        self._show_toast(f"{self._range_label(which)}의 편집을 초기화했습니다.")
+        self._show_toast(f"{self._sel_label()}의 편집을 초기화했습니다.")
 
     def save_crop_size(self):
         """현재 페이지에서 보이는(자른 뒤) 박스의 위치(위·좌)와 크기를 저장"""
@@ -3768,7 +3886,6 @@ class PDFLevelPreviewApp:
         self._selected = {self.current_page}
         self._sel_anchor = self.current_page
         self._draw_selection()
-        self.crop_range_var.set("선택한 페이지")
         self._set_drag_mode("crop")
         self._sync_edit_panel()
         self._draw_crop_overlay()
@@ -4013,6 +4130,9 @@ class PDFLevelPreviewApp:
         self.pdf_doc.close()
         self.pdf_doc = None
         self._render_req_q.put((None, None, None, False, ()))  # 워커도 파일에서 손 떼게
+        self._big_want.clear()
+        self._big_prefetch.clear()
+        self._release_big_workers()
         last = None
         for _ in range(25):  # 워커가 렌더를 마치고 닫을 때까지 (최대 5초)
             try:
@@ -4452,10 +4572,12 @@ class PDFLevelPreviewApp:
         self._stop_thumbnails()
         self._stop_deskew()
         self._stop_bands()
-        self._render_proc.terminate()
-        self._render_proc.join(timeout=2)
-        if self._render_proc.is_alive():
-            self._render_proc.kill()
+        for proc in [self._render_proc] + [w[0] for w in self._big_workers]:
+            proc.terminate()
+        for proc in [self._render_proc] + [w[0] for w in self._big_workers]:
+            proc.join(timeout=2)
+            if proc.is_alive():
+                proc.kill()
         self._close_src_docs()
         self.root.destroy()
 
