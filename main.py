@@ -145,8 +145,9 @@ THUMB_DROP_LINE = "#e00000"
 THUMB_CUR_LINE = "#1f6fd0"
 # 썸네일: 자동 보정 때 DESKEW_MAX°를 넘게 기울어 그대로 둔 페이지 테두리 색 (누르면 없어진다)
 THUMB_SKEW_LINE = "#e00000"
-# 썸네일: [검은 여백 자르기]로 자른 페이지 테두리 색 (주황, 빨간 1° 테두리보다 한 칸 더 바깥. 누르면 없어진다)
-THUMB_BAND_LINE = "#ff8c00"
+# 썸네일: [검은 여백 자르기]로 자른 페이지 테두리 색 (진한 보라, 빨간 1° 테두리보다 한 칸 더 바깥. 누르면 없어진다).
+# 쪽 번호 목록 글씨도 이 색. 밝은 보라(#9b30ff 등)는 진회색 바탕과 밝기가 같아(대비 1.0~1.2) 색으로만 구별돼서 진하게
+THUMB_BAND_LINE = "#5a189a"
 # 툴바: [로마자 표기]로 정한 종이 쪽 번호 글씨 색 (진한 초록. 빨간 페이지 번호·파란 폴더 번호 사이에 괄호로.
 # 보라는 잘 안 보였다)
 PAPER_NUM_FG = "#006b2b"
@@ -909,7 +910,7 @@ class PDFLevelPreviewApp:
         self._skew_flagged = set()  # DESKEW_MAX°를 넘게 기울어 그대로 둔 페이지 uid (썸네일 빨간 테두리)
         self._saved_angles = {}  # (파일, 페이지 번호) → 파일에 이미 들어간 기울기 합계 (_saved_angle)
         self._band_procs = []  # 돌고 있는 [검은 여백 자르기] 프로세스 (마찬가지)
-        self._band_flagged = set()  # [검은 여백 자르기]로 자른 페이지 uid (썸네일 주황 테두리, 누르면 없어진다)
+        self._band_flagged = set()  # [검은 여백 자르기]로 자른 페이지 uid (썸네일 보라 테두리, 누르면 없어진다)
         # [로마자 표기]로 종이 1쪽이 된 페이지 uid (앞쪽은 i, ii …). None이면 쪽 번호 표기를 건드리지 않는다
         self._label_start_uid = None
         self._pdf_path = None
@@ -1063,7 +1064,9 @@ class PDFLevelPreviewApp:
         self._paned = paned  # [보기 변경]에서 가운데 칸을 빼고 넣는다
 
         # ── Left: thumbnail panel ──────────────────────────────────────
-        left = tk.Frame(paned, bd=1, relief=tk.SUNKEN, highlightthickness=FOCUS_LINE_W)
+        # cursor="arrow": 커서를 정하지 않은 안쪽 위젯(썸네일 스크롤바·테두리)은 위로 올라가며 커서를 찾는다. 경계선(sash)에서
+        # 바로 넘어오면 PanedWindow에 좌우 화살표 커서가 남아 있어서, 위아래로 끄는 스크롤바에 좌우 화살표가 보였다
+        left = tk.Frame(paned, bd=1, relief=tk.SUNKEN, highlightthickness=FOCUS_LINE_W, cursor="arrow")
         self._thumb_frame = left
         # 초기 4열. +60 = 스크롤바/테두리 여유
         paned.add(left, minsize=160, width=4 * (THUMB_W + THUMB_MARGIN * 2) + 60)
@@ -1119,7 +1122,8 @@ class PDFLevelPreviewApp:
         self.thumb_canvas.bind("<Button-5>",   self._on_thumb_scroll)
 
         # ── Center: preview ────────────────────────────────────────────
-        preview_frame = tk.Frame(paned, highlightthickness=FOCUS_LINE_W)
+        # cursor="arrow": 왼쪽 칸과 같은 까닭 (미리보기 캔버스는 보통 cursor=""라 경계선의 좌우 화살표가 넘어올 수 있다)
+        preview_frame = tk.Frame(paned, highlightthickness=FOCUS_LINE_W, cursor="arrow")
         paned.add(preview_frame, minsize=400, stretch="always")
         self._preview_frame = preview_frame
 
@@ -3450,7 +3454,7 @@ class PDFLevelPreviewApp:
     def auto_black_bands(self):
         """[검은 여백 자르기]: 선택한 페이지마다 스캐너 검은 배경 띠(직사각형)를 찾아 자른다 (_detect_black_bands).
 
-        [자동 보정]처럼 여러 프로세스로 나눠 찾고, 찾은 페이지부터 바로 자르고 썸네일 주황 테두리 + 쪽 번호로 알린다.
+        [자동 보정]처럼 여러 프로세스로 나눠 찾고, 찾은 페이지부터 바로 자르고 썸네일 보라 테두리 + 쪽 번호로 알린다.
         자른 값은 [자동 보정]의 각도처럼 [적용] 없이 바로 확정한다. 이미 더 크게 자른 변은 그대로 둔다.
         종이가 돌아가 생긴 삼각형은 직사각형 부분까지만 자른다(나머지는 사용자가 직접)
         """
@@ -3515,7 +3519,7 @@ class PDFLevelPreviewApp:
         self._stop_bands()
         if count[1]:
             self._show_toast(f"{label} {total}쪽 중 {count[1]}쪽의 검은 여백을 잘랐습니다. "
-                             "주황 테두리로 표시했습니다.")
+                             "보라 테두리로 표시했습니다.")
         else:
             self._show_toast(f"{label} {total}쪽에서 자를 검은 여백을 찾지 못했습니다.")
 
