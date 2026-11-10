@@ -837,7 +837,7 @@ class PDFLevelPreviewApp:
         self._ocr_badges = {}  # 한 변(px) → PhotoImage
         self._thumb_w = THUMB_W  # 썸네일 칸 너비. [보기 변경](F2)에서 한 줄 THUMB_GRID_COLS칸에 맞춰 줄어든다
         self._grid_view = False  # [보기 변경](F2) 상태: 가운데 미리보기 없이 썸네일만 넓게
-        self._grid_popup = False  # [보기 변경]에서 썸네일을 눌러 띄운 미리보기 팝업이 열려 있는지
+        self._thumb_return = False  # [보기 변경]에서 막 돌아왔다: 보던 페이지가 썸네일 두 번째 줄에 오게 (_on_thumb_canvas_resize)
         self.preview_cache = {}  # key -> (PIL Image, 상태문구)
         self.thumbnail_photo_refs = {}
         self._drawn_pages = {}
@@ -926,6 +926,9 @@ class PDFLevelPreviewApp:
         self.split_range_text = None
         self._config_saved = CONFIG_DEFAULT  # 마지막으로 불러오거나 저장한 config.json 값 (없으면 기본값)
         self.crop_edit_var = tk.BooleanVar(value=False)
+        # 자르기 칸 옆 [1mm]·[2mm] 체크 (한 변수라 하나만 켜진다): 켜면 위·아래·좌·우 칸을 모두 그 값으로, 끄면 0으로
+        self.crop_quick_var = tk.StringVar(value="")
+        self._crop_quick_setting = False  # 체크로 네 칸을 채우는 중 (칸이 하나씩 바뀌는 사이에 체크를 끄지 않게)
         self.grid_var = tk.BooleanVar(value=False)  # 격자 보기: 처음에는 꺼 둔다 (체크 또는 F1로 켠다)
         self.crop_range_var = tk.StringVar(value="선택한 페이지")
 
@@ -1056,20 +1059,6 @@ class PDFLevelPreviewApp:
         preview_frame = tk.Frame(paned, highlightthickness=FOCUS_LINE_W)
         paned.add(preview_frame, minsize=400, stretch="always")
         self._preview_frame = preview_frame
-
-        # [보기 변경] 팝업 맨 위 줄 (팝업일 때만 보인다, _open_grid_popup). 선 편집·90° 회전·닫기.
-        # 선 편집 체크는 오른쪽 편집 구간의 것과 같은 변수라 함께 바뀐다
-        self._popup_bar = tk.Frame(preview_frame, padx=8, pady=6)
-        tk.Checkbutton(self._popup_bar, text="선 편집", variable=self.crop_edit_var,
-                       command=self._on_crop_edit_toggle, cursor="hand2", font=UI_FONT,
-                       image=self._ind_tk['cb_off'], selectimage=self._ind_tk['cb_on'],
-                       indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
-                       selectcolor=self._bg_color).pack(side=tk.LEFT)
-        for text, delta in (("왼쪽 90°", -90), ("오른쪽 90°", 90)):
-            tk.Button(self._popup_bar, text=text, command=lambda d=delta: self.rotate_90(d),
-                      cursor="hand2", font=UI_FONT).pack(side=tk.LEFT, padx=(TOOLBAR_BTN_GAP, 0))
-        tk.Button(self._popup_bar, text="닫기 (Esc)", command=self._close_grid_popup,
-                  cursor="hand2", font=UI_FONT).pack(side=tk.RIGHT)
 
         prev_vscroll = ttk.Scrollbar(preview_frame, orient=tk.VERTICAL)
         prev_hscroll = ttk.Scrollbar(preview_frame, orient=tk.HORIZONTAL)
@@ -1235,9 +1224,8 @@ class PDFLevelPreviewApp:
         self.root.bind("<Up>",    lambda e: self._nudge_angle_key(e, +0.1))
         # F1: 어느 구간에 있든(입력칸 안에서도) "격자 보기"를 켜고 끈다
         self.root.bind("<F1>", lambda e: (self.grid_var.set(not self.grid_var.get()), self._on_grid_toggle()))
-        # F2: [보기 변경] (어느 구간에서든). Esc: 그 상태에서 띄운 미리보기 팝업 닫기
+        # F2: [보기 변경] (어느 구간에서든)
         self.root.bind("<F2>", lambda e: self.toggle_grid_view())
-        self.root.bind("<Escape>", lambda e: self._close_grid_popup())
         # Ctrl+W: 창 닫기 (오른쪽 위 X와 같다). Ctrl+S: [저장], Ctrl+Shift+S: [다른 이름으로 저장].
         # 한글 입력 상태나 CapsLock이어도 되게 Windows 키 코드로도 본다
         self.root.bind("<Control-KeyPress>", self._on_ctrl_key)
@@ -1374,6 +1362,13 @@ class PDFLevelPreviewApp:
             self.crop_vars[side] = var
             self._edit_entries.append(entry)
             self._crop_entries.append(entry)
+        # "아래" 옆 [1mm], "우" 옆 [2mm]
+        for row, mm in ((0, "1"), (1, "2")):
+            tk.Checkbutton(grid, text=f"{mm}mm", variable=self.crop_quick_var, onvalue=mm, offvalue="",
+                           command=self._on_crop_quick, cursor="hand2", font=FNT,
+                           image=self._ind_tk['cb_off'], selectimage=self._ind_tk['cb_on'],
+                           indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
+                           selectcolor=self._bg_color).grid(row=row, column=4, sticky=tk.W, padx=(12, 0), pady=2)
         # [검은 여백 자르기]: 목록 범위 페이지에서 스캐너 검은 배경 띠(직사각형)를 찾아 자른다. 자른 쪽 번호는 바로 아래
         self.band_btn = tk.Button(parent, text="검은 여백 자르기", command=self.auto_black_bands, pady=BTN_PADY,
                                   cursor="hand2", font=FNT, bg=BAND_BTN_BG, fg="white",
@@ -1690,8 +1685,8 @@ class PDFLevelPreviewApp:
         rows = (self._page_count + self._thumb_cols - 1) // self._thumb_cols if self._page_count > 0 else 0
         view_h = self.thumb_canvas.winfo_height()
         extra = 0
-        if self._grid_view and view_h > 1:
-            # [보기 변경]: 패널에 다 들어가는 줄 수(N)로 줄 높이를 늘려 딱 N줄이 반쪽 줄 없이 보이게 한다.
+        if view_h > 1:
+            # 기본 보기·[보기 변경] 모두: 패널에 다 들어가는 줄 수(N)로 줄 높이를 늘려 딱 N줄이 반쪽 줄 없이 보이게 한다.
             # 남는 높이는 줄마다 위아래 여백(_thumb_row_pad). 끝도 N줄 묶음(빈 줄)까지 늘려 Page Up/Down 자리가 늘 같게
             n = max(1, view_h // self._thumb_cell_h)
             self._thumb_row_pad = view_h // n - self._thumb_cell_h
@@ -1930,8 +1925,7 @@ class PDFLevelPreviewApp:
         else:
             self._selected = {idx}
             self._sel_anchor = idx
-        self._thumb_press = {"idx": idx, "x": event.x, "y": event.y, "shrink": shrink, "drag": False,
-                             "plain": not (shift or ctrl)}  # 그냥 클릭이면 [보기 변경]에서 팝업을 띄운다
+        self._thumb_press = {"idx": idx, "x": event.x, "y": event.y, "shrink": shrink, "drag": False}
         if idx != self.current_page:
             self.select_page(idx)
         else:
@@ -1965,8 +1959,6 @@ class PDFLevelPreviewApp:
         elif press["shrink"]:
             self._selected = {press["idx"]}
             self._draw_selection()
-        if self._grid_view and not press["drag"] and press["plain"]:
-            self._open_grid_popup()
 
     def _drop_pos(self, ex, ey):
         """드래그를 놓을 자리 (끼워 넣을 화면 위치, 선 x, 선 y). 칸 왼쪽 절반이면 그 앞, 오른쪽 절반이면 그 뒤"""
@@ -2058,9 +2050,12 @@ class PDFLevelPreviewApp:
         if self._page_count == 0:
             return
         self._relayout_thumbs()
-        if self._grid_view:  # 크기가 바뀌면(보기 변경을 켤 때 포함) 지금 페이지가 든 N줄 묶음을 맨 위부터 딱 맞게
+        row = self.current_page // self._thumb_cols
+        if self._thumb_return:  # [보기 변경]에서 막 돌아왔다: 보던(고른) 페이지가 두 번째 줄에 오게
+            self._thumb_scroll_to_row(max(0, row - 1))
+        else:  # 크기가 바뀌면(보기 변경을 켤 때 포함) 지금 페이지가 든 N줄 묶음을 맨 위부터 딱 맞게
             n = self._thumb_page_rows
-            self._thumb_scroll_to_row(self.current_page // self._thumb_cols // n * n)
+            self._thumb_scroll_to_row(row // n * n)
 
     def _thumb_scroll_to_row(self, row):
         """그 줄이 썸네일 패널 맨 위에 오게 스크롤"""
@@ -2094,35 +2089,14 @@ class PDFLevelPreviewApp:
             paned.paneconfigure(left, width=wide, stretch="always")
             self.thumb_canvas.focus_set()
         else:
-            self._close_grid_popup()
+            # 돌아오면 [보기 변경]에서 고른 페이지가 썸네일 두 번째 줄에 오게 한다. 칸 크기가 바뀌는 <Configure>가
+            # 한 번에 끝나지 않을 수 있어 잠깐 동안은 매번 그 자리로 맞춘다
+            self._thumb_return = True
+            self.root.after(400, lambda: setattr(self, "_thumb_return", False))
             paned.add(frame, after=left, minsize=400, stretch="always")
             paned.paneconfigure(left, width=self._normal_left_w, stretch="last")
             self.preview_canvas.focus_set()
         self._grid_btn.config(relief=tk.SUNKEN if self._grid_view else tk.RAISED)
-
-    def _open_grid_popup(self):
-        """[보기 변경]에서 누른 썸네일의 미리보기를 썸네일 위에 팝업처럼 띄운다.
-
-        가운데 미리보기 칸을 그대로 옮겨 올리므로 끌어서 기울기 회전, ←→ 회전, 선 편집(자르기), 확대가 그대로 되고,
-        오른쪽 편집 구간도 이 페이지에 그대로 쓴다. 썸네일 칸 안(place in_)에 놓아 같은 창 안에 있다.
-        """
-        if not self._grid_view:
-            return
-        frame = self._preview_frame
-        if not self._grid_popup:
-            self._grid_popup = True
-            self._popup_bar.pack(side=tk.TOP, fill=tk.X, before=frame.pack_slaves()[0])
-            frame.place(in_=self._thumb_frame, relx=0.5, rely=0.5, relwidth=0.8, relheight=0.96, anchor=tk.CENTER)
-            frame.lift()
-        self.preview_canvas.focus_set()  # ←→ 회전이 바로 되게 (구간 빨간 테두리가 팝업 둘레에)
-
-    def _close_grid_popup(self):
-        if not self._grid_popup:
-            return
-        self._grid_popup = False
-        self._preview_frame.place_forget()
-        self._popup_bar.pack_forget()
-        self.thumb_canvas.focus_set()
 
     # ------------------------------------------------------------------ #
     # Page selection
@@ -2163,40 +2137,29 @@ class PDFLevelPreviewApp:
         return "break"
 
     def _on_thumb_page_key(self, event, key):
-        """썸네일 패널 Page Up/Down: 다 보이는 칸 수(줄 수 × 열 수)만큼 넘기고 그 줄을 맨 위로.
-        Home/End는 맨 처음/맨 끝 페이지"""
+        """썸네일 패널 Page Up/Down: 기본 보기·[보기 변경] 모두 N줄 묶음 단위로 넘긴다(4칸×4줄이면 1→17→33,
+        10칸×4줄이면 1→41→81). 휠로 어중간한 자리에 멈춰 있으면 맨 위에 걸친 줄이 든 묶음에 다시 맞춘다:
+        Page Down = 그다음 묶음, Page Up = 그 묶음(맞춰져 있으면 앞 묶음). Home/End는 맨 처음/맨 끝 페이지"""
         if self._page_count == 0:
             return "break"
         cols, last = self._thumb_cols, self._page_count - 1
-        if self._grid_view:
-            # [보기 변경]: N줄 묶음 단위로 넘긴다 (10칸×4줄이면 1→41→81). 휠로 어중간한 자리에 멈춰 있으면
-            # 맨 위에 걸친 줄이 든 묶음에 다시 맞춘다: Page Down = 그다음 묶음, Page Up = 그 묶음(맞춰져 있으면 앞 묶음)
-            n = self._thumb_page_rows
-            view_top = self.thumb_canvas.canvasy(0)
-            block = int((view_top + 1) // self._thumb_cell_h) // n * n
-            if key in ("Home", "End"):
-                new = 0 if key == "Home" else last
-                top_row = new // cols // n * n
-            else:
-                if key == "Next":
-                    top_row = block + n
-                else:
-                    top_row = block - n if abs(view_top - block * self._thumb_cell_h) < 1 else block
-                max_top = self._thumb_total_height // self._thumb_cell_h - n
-                if top_row > max_top:  # 마지막 묶음에서 Page Down = 맨 끝 페이지 (같은 칸으로 가면 뒤로 간다)
-                    top_row, new = max_top, last
-                else:
-                    top_row = max(0, top_row)
-                    new = min(last, top_row * cols + self.current_page % cols)  # 지금 페이지와 같은 칸(열)으로
-        elif key in ("Home", "End"):
+        n = self._thumb_page_rows
+        view_top = self.thumb_canvas.canvasy(0)
+        block = int((view_top + 1) // self._thumb_cell_h) // n * n
+        if key in ("Home", "End"):
             new = 0 if key == "Home" else last
-            top_row = new // cols
+            top_row = new // cols // n * n
         else:
-            rows = max(1, self.thumb_canvas.winfo_height() // self._thumb_cell_h)
-            step = rows * cols
-            new = self.current_page + (-step if key == "Prior" else step)
-            new = max(0, min(last, new))
-            top_row = new // cols
+            if key == "Next":
+                top_row = block + n
+            else:
+                top_row = block - n if abs(view_top - block * self._thumb_cell_h) < 1 else block
+            max_top = self._thumb_total_height // self._thumb_cell_h - n
+            if top_row > max_top:  # 마지막 묶음에서 Page Down = 맨 끝 페이지 (같은 칸으로 가면 뒤로 간다)
+                top_row, new = max_top, last
+            else:
+                top_row = max(0, top_row)
+                new = min(last, top_row * cols + self.current_page % cols)  # 지금 페이지와 같은 칸(열)으로
         if new != self.current_page:
             self._thumb_go(event, new)
         self._thumb_scroll_to_row(top_row)
@@ -3378,6 +3341,7 @@ class PDFLevelPreviewApp:
         for side, v, base in zip(CROP_SIDES, e["crop"], self._crop_field_base):  # 칸 = 기준에서 더 자른 양
             self.crop_vars[side].set(f"{round(_pt_to_mm(v - base), 1) + 0:g}")  # 0.1mm 단위, 0은 "0" (+0: -0 막기)
         self._syncing_edit = False
+        self._sync_crop_quick()
 
     def _on_angle_var_change(self, *_):
         if self._syncing_edit or self.pdf_doc is None:
@@ -3391,6 +3355,21 @@ class PDFLevelPreviewApp:
         self._set_drag_mode("rotate")  # 각도를 입력하면 미리보기를 끌어서 돌릴 수 있게
         self._schedule_quick_rotation()  # 바로 임시 화면을 띄우고
         self._on_var_change()  # 정식 미리보기는 레벨 입력처럼 잠깐 뒤에 갱신
+
+    def _on_crop_quick(self):
+        """[1mm]·[2mm] 체크: 켜면 위·아래·좌·우 칸을 모두 그 값으로(지금 상태에서 더 자를 양), 끄면 0으로"""
+        value = self.crop_quick_var.get() or "0"
+        self._crop_quick_setting = True
+        try:
+            for side in CROP_SIDES:
+                self.crop_vars[side].set(value)
+        finally:
+            self._crop_quick_setting = False
+
+    def _sync_crop_quick(self):
+        """네 칸이 모두 1이면 [1mm], 모두 2면 [2mm]를 켜고 아니면 끈다 (칸을 직접 고치거나 페이지를 옮겼을 때)"""
+        values = {self.crop_vars[side].get().strip() for side in CROP_SIDES}
+        self.crop_quick_var.set(values.pop() if len(values) == 1 and values <= {"1", "2"} else "")
 
     def _nudge_crop(self, side, delta):
         try:
@@ -3533,6 +3512,8 @@ class PDFLevelPreviewApp:
             return  # 입력 중인 빈 칸/잘못된 값은 무시
         w, h = self._page_disp_size(self.current_page)
         self._set_page_edit(self.current_page, crop=_clamp_margins(margins, w, h))
+        if not self._crop_quick_setting:
+            self._sync_crop_quick()
         self._set_drag_mode("crop")  # 여백을 입력하면 선을 끌어서 맞출 수 있게
         self._draw_crop_overlay()
 
@@ -3823,6 +3804,12 @@ class PDFLevelPreviewApp:
     def _save_pdf(self, bake):
         """페이지 순서(삭제·붙여넣기·이동)와 회전/기울기/자르기를 반영해 저장하고 창을 닫는다"""
         if self.pdf_doc is None:
+            return
+        # OCR을 체크했는데 언어가 하나도 없으면 PDF도 저장하지 않는다 ([설정 저장]과 같은 안내. 저장하면 창이 닫혀
+        # 설정을 고칠 수 없고, 자동화가 언어 없이 OCR을 돌리게 된다)
+        if self.ocr_enabled_var.get() and not any(v.get() for v in self.ocr_vars.values()):
+            messagebox.showwarning("다른 이름으로 저장" if bake else "저장",
+                                   "OCR을 체크했는데 언어가 없습니다.\nOCR 언어를 하나 이상 체크하세요.", parent=self.root)
             return
         # 저장이 끝나면 창이 닫혀 설정 파일 구간 값이 사라지므로, [설정 저장]을 안 했으면 먼저 묻는다
         if self._config_changed():
