@@ -64,6 +64,9 @@ BIG_PREFETCH_MS = 300
 VIEW_MODES = (("기본 보기", None), ("10개씩 보기 (F2)", THUMB_GRID_COLS), ("5개씩 크게 보기 (F3)", THUMB_BIG_COLS))
 INDICATOR_SIZE = 24  # 체크박스/라디오버튼 인디케이터 크기
 INDICATOR_MARK = "#e00000"  # 선택 표시(체크마크/라디오 점) 색. 검은색은 눈에 잘 안 띈다
+# 숫자·영문 글씨("0.5mm") 옆 라디오 동그라미를 이만큼(px) 내린다. 한글 글꼴은 숫자·영문이 글자 칸 아래쪽에 앉아서
+# Tk가 글자 칸 가운데에 맞춘 동그라미가 글씨보다 높아 보였다 (자르기 0.5/1/1.5/2mm 라디오, 이미지 "rb_off_low")
+RADIO_TEXT_DROP = 2
 # 오른쪽 패널 구간 색: 편집(PDF 직접 수정) / 설정 파일(config.json)
 SECTION_EDIT_BG, SECTION_EDIT_HEAD = "#eaf2fb", "#b6d3f2"
 SECTION_CONFIG_BG, SECTION_CONFIG_HEAD = "#fcedf2", "#f3c3d4"
@@ -225,6 +228,12 @@ def _make_indicator_images():
     m = int(s * 0.28)
     d.ellipse([m, m, s-m, s-m], fill=INDICATOR_MARK)
     imgs['rb_on'] = img
+
+    # 숫자·영문 글씨 옆 라디오: 위에 투명한 줄을 넣어 동그라미를 RADIO_TEXT_DROP만큼 내린다
+    for k in ('rb_off', 'rb_on'):
+        low = Image.new('RGBA', (s, s + 2 * RADIO_TEXT_DROP), (0, 0, 0, 0))
+        low.paste(imgs[k], (0, 2 * RADIO_TEXT_DROP))
+        imgs[k + '_low'] = low
 
     return imgs
 
@@ -1485,11 +1494,11 @@ class PDFLevelPreviewApp:
             row, col = divmod(i, 2)
             # 여백을 좁게: 오른쪽에 0.5/1/1.5/2mm 라디오가 두 칸씩 들어가 줄이 길다
             tk.Label(grid, text=text, font=FNT).grid(row=row, column=col * 3, sticky=tk.E,
-                                                     padx=(0 if col == 0 else 6, 2), pady=2)
+                                                     padx=(0 if col == 0 else 4, 2), pady=2)
             var = tk.StringVar(value="0")
             entry = tk.Entry(grid, textvariable=var, width=4, font=FNT)
             entry.grid(row=row, column=col * 3 + 1, pady=2)
-            total = tk.Label(grid, text="(0)", width=5, anchor=tk.W, font=UI_FONT_SMALL, fg="#666")
+            total = tk.Label(grid, text="(0)", anchor=tk.W, font=UI_FONT_SMALL, fg="#666", padx=0)
             total.grid(row=row, column=col * 3 + 2, sticky=tk.W, padx=(2, 0), pady=2)
             self.crop_total_labels[side] = total
             var.trace_add("write", self._on_crop_var_change)
@@ -1500,11 +1509,15 @@ class PDFLevelPreviewApp:
             self.crop_vars[side] = var
             self._edit_entries.append(entry)
             self._crop_entries.append(entry)
+        # 괄호 칸은 "(0.0)" 폭이 최소: 숫자가 바뀌어도 줄이 안 움직이고 "아래"·"우"와 붙는다 (10mm 넘으면 그 칸만 넓어진다)
+        num_w = tkfont.Font(font=UI_FONT_SMALL).measure("(0.0)") + 2
+        grid.columnconfigure(2, minsize=num_w)
+        grid.columnconfigure(5, minsize=num_w)
         # 칸 오른쪽에 두 줄 두 칸: [0.5mm ◯] [1mm ◯] / [1.5mm ◯] [2mm ◯] (글씨 다음 동그라미, 칸과 조금 띄운다)
         for row, col, mm in ((0, 6, "0.5"), (0, 7, "1"), (1, 6, "1.5"), (1, 7, "2")):
             tk.Radiobutton(grid, text=f"{mm}mm", variable=self.crop_quick_var, value=mm,
                            command=self._on_crop_quick, cursor="hand2", font=FNT,
-                           image=self._ind_tk['rb_off'], selectimage=self._ind_tk['rb_on'],
+                           image=self._ind_tk['rb_off_low'], selectimage=self._ind_tk['rb_on_low'],
                            indicatoron=False, compound=tk.RIGHT, bd=0, relief=tk.FLAT,
                            selectcolor=self._bg_color).grid(row=row, column=col, sticky=tk.W,
                                                             padx=(16 if col == 6 else 8, 0), pady=2)
