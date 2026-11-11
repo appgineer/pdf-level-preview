@@ -158,6 +158,8 @@ TOOLBAR_BTN_GAP = 16
 # 지금 키보드가 가는 구간(왼쪽 썸네일 / 가운데 미리보기 / 오른쪽 패널) 테두리 색·두께
 FOCUS_LINE = "#e00000"
 FOCUS_LINE_W = 3
+# 오른쪽 설정 칸 처음 폭(px). 글씨·버튼이 이보다 넓게 필요하면 처음 뜰 때 그만큼 넓힌다 (_build_settings_panel 끝)
+SETTINGS_W = 560
 # 썸네일을 누른 뒤 이만큼(px) 움직여야 드래그(순서 바꾸기)로 본다
 THUMB_DRAG_PX = 6
 # 드래그 중 썸네일 패널 위/아래 끝에서 이 거리(px) 안이면 자동 스크롤
@@ -1175,7 +1177,7 @@ class PDFLevelPreviewApp:
 
         # ── Right: 설정 세로 컬럼 ──────────────────────────────────────
         settings_outer = tk.Frame(paned, bd=1, relief=tk.RAISED, highlightthickness=FOCUS_LINE_W)
-        paned.add(settings_outer, minsize=400, width=560, stretch="never")
+        paned.add(settings_outer, minsize=400, width=SETTINGS_W, stretch="never")
         self._build_settings_panel(settings_outer)
 
         # 구간: (테두리 틀, 빈 곳을 눌렀을 때 키보드를 받을 위젯). 키보드가 가는 구간에 빨간 테두리
@@ -1330,6 +1332,14 @@ class PDFLevelPreviewApp:
         self._tint(config_box, SECTION_CONFIG_BG)
         _bind_scroll_recursive(inner)
 
+        # 처음 폭은 SETTINGS_W. 글씨·버튼이 그보다 넓게 필요하면(글꼴·화면 배율에 따라 다르다) 잘리지 않게 그만큼 넓힌다.
+        # 스크롤바 자리와 테두리까지 넣는다. 사용자가 경계선을 끌어 줄이는 것은 그대로 된다(최소 400)
+        inner.update_idletasks()
+        border = 2 * (parent.winfo_pixels(parent["bd"]) + parent.winfo_pixels(parent["highlightthickness"]))
+        need = inner.winfo_reqwidth() + vscroll.winfo_reqwidth() + border
+        if need > SETTINGS_W:
+            self._paned.paneconfigure(parent, width=need)
+
     def _section_header(self, parent, text, color, first=False):
         """오른쪽 패널을 구간으로 나누는 머리말 (편집 / 설정 파일)"""
         head = tk.Label(parent, text=text, font=UI_FONT_BOLD, bg=color, fg="#111",
@@ -1381,21 +1391,21 @@ class PDFLevelPreviewApp:
         tk.Button(rot_row, text="오른쪽 90°", command=lambda: self.rotate_90(90), pady=BTN_PADY,
                   cursor="hand2", font=FNT).grid(row=0, column=2, sticky="ew", padx=(2, 0))
 
-        # 그 아래: 왼쪽에 [자동 보정]이 볼 글줄 방향 ◯ 가로 / ◯ 세로 (가로쓰기 기본, 창을 열 때마다 가로),
-        # 바로 오른쪽 남는 폭 전체에 두 줄 높이의 [자동 보정] (선택한 페이지마다 글줄을 보고 기울기를 넣는다)
+        # 그 아래 한 줄: ◯ 가로 ◯ 세로 = [자동 보정]이 볼 글줄 방향 (가로쓰기 기본, 창을 열 때마다 가로),
+        # 바로 오른쪽 남는 폭 전체에 [자동 보정] (선택한 페이지마다 글줄을 보고 기울기를 넣는다)
         deskew_row = tk.Frame(parent)
-        deskew_row.pack(fill=tk.X, pady=(6, 12))  # 아래를 띄워 자르기 구간과 구분
-        deskew_row.columnconfigure(1, weight=1)
+        deskew_row.pack(fill=tk.X, pady=(16, 12))  # 위를 띄워 회전 줄과, 아래를 띄워 자르기 구간과 구분
+        deskew_row.columnconfigure(2, weight=1)
         self.deskew_dir_var = tk.StringVar(value="가로")
-        for row, text in ((0, "가로"), (1, "세로")):
+        for col, text in enumerate(("가로", "세로")):
             tk.Radiobutton(deskew_row, text=text, variable=self.deskew_dir_var, value=text, cursor="hand2", font=FNT,
                            image=self._ind_tk['rb_off'], selectimage=self._ind_tk['rb_on'],
                            indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
-                           selectcolor=self._bg_color).grid(row=row, column=0, sticky="w")
+                           selectcolor=self._bg_color).grid(row=0, column=col, sticky="w", padx=(0, 12))
         self.deskew_btn = tk.Button(deskew_row, text="자동 보정", command=self.auto_deskew, pady=BTN_PADY,
                                     cursor="hand2", font=FNT, bg=DESKEW_BTN_BG, fg="white",
                                     activebackground=DESKEW_BTN_ACTIVE, activeforeground="white")
-        self.deskew_btn.grid(row=0, column=1, rowspan=2, sticky="nsew", padx=(10, 0))
+        self.deskew_btn.grid(row=0, column=2, sticky="ew")
         self._auto_row = deskew_row  # 1° 넘은 쪽 번호 목록이 이 줄 바로 아래에 붙는다
         # 자동 보정 때 DESKEW_MAX°를 넘게 기운 쪽 번호 (있을 때만 이 자리에 보인다, _show_skew_flags)
         self._skew_flag_frame = tk.Frame(parent)
