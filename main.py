@@ -354,12 +354,17 @@ def _deskew_page(page, angle):
     doc.xref_set_key(page.xref, "Contents", f"[{refs}]")
 
 
-def _detect_skew(page, rot=0):
+def _detect_skew(page, rot=0, vertical=False):
     """글줄을 보고 찾은 기울기 보정 각도(°, 시계방향 양수 = _deskew_page 방향). 글자가 거의 없는 페이지는 None.
 
     ABBYY 같은 자동 기울기 보정과 같은 가로 투영 방식: 글자만 남긴 그림을 조금씩 돌려 보며 줄과 줄 사이가
     가장 또렷하게 갈리는(줄마다 글자 양이 가장 들쭉날쭉한) 각도를 찾는다. rot(90° 회전)는 글줄을 가로로 놓고
     보려는 것뿐이고, 기울기 각도는 90°씩 돌려도 같다.
+
+    vertical(세로쓰기 책): 가로줄 대신 세로 줄(열)마다 글자 양을 센다. 가로 투영은 옆 줄과 글자 위치가 맞는(격자)
+    세로쓰기에서는 맞지만, 작은 가나·문장부호 등으로 어긋나면 0.6~1.1° 틀린 각도를 냈다(합성 시험, 세로 기준은 정확).
+    각도는 같은 식이라 부호도 같다. 가로쓰기 페이지를 세로로 재면 글줄 대신 본문 양 끝선·종이 가장자리를 보게 돼 덜
+    정확하다(test.pdf 27쪽: 평균 0.1°, 보통 0.25° 안, 검은 띠 페이지 0.7° 차이). 가로쓰기 페이지는 가로로 잴 것
     """
     z = DESKEW_DPI / 72
     pix = page.get_pixmap(matrix=fitz.Matrix(z, z).prerotate(rot), colorspace=fitz.csGRAY)
@@ -373,9 +378,12 @@ def _detect_skew(page, rot=0):
         return None
     h = ink.height
 
-    def score(a):  # PIL 각도(반시계 양수)로 돌렸을 때 줄마다 글자 양이 얼마나 들쭉날쭉한지
-        rows = list(ink.rotate(a, resample=Image.NEAREST).resize((1, h), Image.BOX).getdata())
-        return sum((rows[i + 1] - rows[i]) ** 2 for i in range(h - 1))
+    w = ink.width
+
+    def score(a):  # PIL 각도(반시계 양수)로 돌렸을 때 줄마다 글자 양이 얼마나 들쭉날쭉한지 (세로쓰기는 열마다)
+        r = ink.rotate(a, resample=Image.NEAREST)
+        rows = list((r.resize((w, 1), Image.BOX) if vertical else r.resize((1, h), Image.BOX)).getdata())
+        return sum((rows[i + 1] - rows[i]) ** 2 for i in range(len(rows) - 1))
 
     # 1° 간격으로 훑고, 가장 나은 각도 둘레를 0.2°, 다시 0.02° 간격으로
     coarse = [(score(a), a) for a in range(-DESKEW_SEARCH, DESKEW_SEARCH + 1)]
@@ -453,8 +461,9 @@ def _band_worker(jobs, res_q):
         doc.close()
 
 
-def _deskew_worker(jobs, res_q):
+def _deskew_worker(jobs, res_q, vertical=False):
     """기울기 자동 보정 프로세스: jobs = [(uid, PDF 경로, 페이지 번호, 90° 회전)] → res_q에 (uid, 각도 또는 None).
+    vertical: 세로쓰기 기준 ([자동 보정] 옆 "세로" 라디오)
 
     PyMuPDF는 스레드에서 쓸 수 없고 페이지가 많으면 오래 걸려서 여러 프로세스로 나눠 돌린다.
     """
@@ -463,7 +472,7 @@ def _deskew_worker(jobs, res_q):
         try:
             if path not in docs:
                 docs[path] = fitz.open(path)
-            angle = _detect_skew(docs[path][pno], rot)
+            angle = _detect_skew(docs[path][pno], rot, vertical)
         except Exception:
             angle = None
         res_q.put((uid, angle))
@@ -1351,7 +1360,8 @@ class PDFLevelPreviewApp:
                        selectcolor=self._bg_color).pack(side=tk.LEFT)
 
         # 회전 (기울기 보정, °). 페이지마다 따로. + 오른쪽 / - 왼쪽, ←/→로 0.1°씩.
-        # 같은 줄 오른쪽 칸에 [자동 보정] (아래 [왼쪽 90°] [오른쪽 90°]와 같은 너비 두 칸(uniform)이라 위아래가 맞는다)
+        # 그 아래 왼쪽 칸에 글줄 방향 ◯ 가로 / ◯ 세로, 오른쪽 칸에 두 줄 높이의 [자동 보정]
+        # (아래 [왼쪽 90°] [오른쪽 90°]와 같은 너비 두 칸(uniform)이라 [자동 보정]과 [오른쪽 90°]의 위아래가 맞는다)
         rot_row = tk.Frame(parent)
         rot_row.pack(fill=tk.X, pady=(4, 0))
         rot_row.columnconfigure((0, 1), weight=1, uniform="half")
@@ -1368,11 +1378,19 @@ class PDFLevelPreviewApp:
         angle_entry.bind("<Up>",    lambda e: self._nudge_angle(+0.1))
         angle_entry.bind("<Down>",  lambda e: self._nudge_angle(-0.1))
         self._edit_entries = [angle_entry]
-        # [자동 보정]: 선택한 페이지마다 글줄을 보고 기울기를 넣는다
+        # [자동 보정]이 볼 글줄 방향: 가로쓰기(기본) / 세로쓰기 책. 창을 열 때마다 가로
+        self.deskew_dir_var = tk.StringVar(value="가로")
+        for row, text in ((1, "가로"), (2, "세로")):
+            tk.Radiobutton(rot_row, text=text, variable=self.deskew_dir_var, value=text, cursor="hand2", font=FNT,
+                           image=self._ind_tk['rb_off'], selectimage=self._ind_tk['rb_on'],
+                           indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
+                           selectcolor=self._bg_color).grid(row=row, column=0, sticky="w",
+                                                            pady=(6, 0) if row == 1 else 0)
+        # [자동 보정]: 선택한 페이지마다 글줄을 보고 기울기를 넣는다. 가로·세로 두 줄 높이 (rowspan)
         self.deskew_btn = tk.Button(rot_row, text="자동 보정", command=self.auto_deskew, pady=BTN_PADY,
                                     cursor="hand2", font=FNT, bg=DESKEW_BTN_BG, fg="white",
                                     activebackground=DESKEW_BTN_ACTIVE, activeforeground="white")
-        self.deskew_btn.grid(row=0, column=1, sticky="ew", padx=(2, 0))
+        self.deskew_btn.grid(row=1, column=1, rowspan=2, sticky="nsew", padx=(2, 0), pady=(6, 0))
         self._auto_row = rot_row  # 1° 넘은 쪽 번호 목록이 이 줄 바로 아래에 붙는다
         # 자동 보정 때 DESKEW_MAX°를 넘게 기운 쪽 번호 (있을 때만 이 자리에 보인다, _show_skew_flags)
         self._skew_flag_frame = tk.Frame(parent)
@@ -3346,20 +3364,21 @@ class PDFLevelPreviewApp:
         if self.pdf_doc is None or self._deskew_procs or self._band_procs:  # [검은 여백 자르기]와 하나씩
             return
         label = self._sel_label()
+        vertical = self.deskew_dir_var.get() == "세로"
         jobs = [self.slots[i] + (self._page_edit(i)["rot"],) for i in self._edit_pages()]
         if not jobs or not self._confirm_range("자동 보정을"):
             return
         n = min(len(jobs), max(1, ((os.cpu_count() or 4) * 3) // 4))
         res_q = multiprocessing.Queue()
-        procs = [multiprocessing.Process(target=_deskew_worker, args=(jobs[k::n], res_q), daemon=True)
+        procs = [multiprocessing.Process(target=_deskew_worker, args=(jobs[k::n], res_q, vertical), daemon=True)
                  for k in range(n)]
         for p in procs:
             p.start()
         self._deskew_procs = procs
         self._set_drag_mode("rotate")  # 선 편집을 끄고 돌린 결과를 보여 준다
-        self._poll_deskew(procs, res_q, label, len(jobs), [0, 0, 0])
+        self._poll_deskew(procs, res_q, label, len(jobs), [0, 0, 0], vertical)
 
-    def _poll_deskew(self, procs, res_q, label, total, count):
+    def _poll_deskew(self, procs, res_q, label, total, count, vertical=False):
         """자동 보정 결과를 받아 페이지에 넣는다. count = [받은 수, 못 찾은 수, DESKEW_MAX° 넘은 수]"""
         if procs is not self._deskew_procs:
             return  # 멈췄다 (다른 파일을 열었거나 덮어쓰기·창 닫기)
@@ -3391,11 +3410,12 @@ class PDFLevelPreviewApp:
             self._show_skew_flags()
         if count[0] < total and alive:
             self.deskew_btn.config(text=f"찾는 중 {count[0]}/{total}")
-            self.root.after(100, lambda: self._poll_deskew(procs, res_q, label, total, count))
+            self.root.after(100, lambda: self._poll_deskew(procs, res_q, label, total, count, vertical))
             return
         self._stop_deskew()
         skipped = total - count[0] + count[1]  # 프로세스가 죽어 못 받은 것도
-        msg = f"{label} {total - skipped - count[2]}쪽의 기울기를 맞췄습니다."
+        how = "세로 글줄 기준으로 " if vertical else ""
+        msg = f"{label} {total - skipped - count[2]}쪽의 기울기를 {how}맞췄습니다."
         if count[2]:
             msg += f" {DESKEW_MAX}°를 넘게 기운 {count[2]}쪽은 그대로 두고 빨간 테두리로 표시했습니다."
         if skipped:
