@@ -1499,8 +1499,8 @@ class PDFLevelPreviewApp:
             self.crop_vars[side] = var
             self._edit_entries.append(entry)
             self._crop_entries.append(entry)
-        # "아래" 옆 [1mm ◯], "우" 옆 [2mm ◯] (글씨 다음 동그라미, 칸과 조금 띄운다)
-        for row, mm in ((0, "1"), (1, "2")):
+        # 칸 오른쪽에 위에서부터 [0.5mm ◯] [1mm ◯] [2mm ◯] (글씨 다음 동그라미, 칸과 조금 띄운다. 2mm는 칸 아래 셋째 줄)
+        for row, mm in ((0, "0.5"), (1, "1"), (2, "2")):
             tk.Radiobutton(grid, text=f"{mm}mm", variable=self.crop_quick_var, value=mm,
                            command=self._on_crop_quick, cursor="hand2", font=FNT,
                            image=self._ind_tk['rb_off'], selectimage=self._ind_tk['rb_on'],
@@ -3709,7 +3709,7 @@ class PDFLevelPreviewApp:
         self._on_var_change()  # 정식 미리보기는 레벨 입력처럼 잠깐 뒤에 갱신
 
     def _on_crop_quick(self):
-        """[1mm]·[2mm] 라디오: 켜면 위·아래·좌·우 칸을 모두 그 값으로(지금 상태에서 더 자를 양).
+        """[0.5mm]·[1mm]·[2mm] 라디오: 켜면 위·아래·좌·우 칸을 모두 그 값으로(지금 상태에서 더 자를 양).
         켜진 것을 다시 누르면 끄고 0으로 (라디오는 스스로 꺼지지 않는다)"""
         value = self.crop_quick_var.get()
         if value == self._crop_quick_prev:
@@ -3724,9 +3724,9 @@ class PDFLevelPreviewApp:
             self._crop_quick_setting = False
 
     def _sync_crop_quick(self):
-        """네 칸이 모두 1이면 [1mm], 모두 2면 [2mm]를 켜고 아니면 둘 다 끈다 (칸을 직접 고치거나 페이지를 옮겼을 때)"""
+        """네 칸이 모두 0.5·1·2 중 하나로 같으면 그 라디오를 켜고 아니면 모두 끈다 (칸을 직접 고치거나 페이지를 옮겼을 때)"""
         values = {self.crop_vars[side].get().strip() for side in CROP_SIDES}
-        self._crop_quick_prev = values.pop() if len(values) == 1 and values <= {"1", "2"} else "0"
+        self._crop_quick_prev = values.pop() if len(values) == 1 and values <= {"0.5", "1", "2"} else "0"
         self.crop_quick_var.set(self._crop_quick_prev)
 
     def _nudge_crop(self, side, delta):
