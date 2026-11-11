@@ -1483,13 +1483,14 @@ class PDFLevelPreviewApp:
         self.crop_total_labels = {}
         for i, (side, text) in enumerate(zip(CROP_SIDES, ("위", "아래", "좌", "우"))):
             row, col = divmod(i, 2)
+            # 여백을 좁게: 오른쪽에 0.5/1/1.5/2mm 라디오가 두 칸씩 들어가 줄이 길다
             tk.Label(grid, text=text, font=FNT).grid(row=row, column=col * 3, sticky=tk.E,
-                                                     padx=(0 if col == 0 else 12, 4), pady=2)
+                                                     padx=(0 if col == 0 else 6, 2), pady=2)
             var = tk.StringVar(value="0")
-            entry = tk.Entry(grid, textvariable=var, width=6, font=FNT)
+            entry = tk.Entry(grid, textvariable=var, width=4, font=FNT)
             entry.grid(row=row, column=col * 3 + 1, pady=2)
-            total = tk.Label(grid, text="(0)", width=6, anchor=tk.W, font=UI_FONT_SMALL, fg="#666")
-            total.grid(row=row, column=col * 3 + 2, sticky=tk.W, padx=(4, 0), pady=2)
+            total = tk.Label(grid, text="(0)", width=5, anchor=tk.W, font=UI_FONT_SMALL, fg="#666")
+            total.grid(row=row, column=col * 3 + 2, sticky=tk.W, padx=(2, 0), pady=2)
             self.crop_total_labels[side] = total
             var.trace_add("write", self._on_crop_var_change)
             entry.bind("<Right>", lambda e, s=side: self._nudge_crop(s, +1))
@@ -1499,13 +1500,14 @@ class PDFLevelPreviewApp:
             self.crop_vars[side] = var
             self._edit_entries.append(entry)
             self._crop_entries.append(entry)
-        # 칸 오른쪽에 위에서부터 [0.5mm ◯] [1mm ◯] [2mm ◯] (글씨 다음 동그라미, 칸과 조금 띄운다. 2mm는 칸 아래 셋째 줄)
-        for row, mm in ((0, "0.5"), (1, "1"), (2, "2")):
+        # 칸 오른쪽에 두 줄 두 칸: [0.5mm ◯] [1mm ◯] / [1.5mm ◯] [2mm ◯] (글씨 다음 동그라미, 칸과 조금 띄운다)
+        for row, col, mm in ((0, 6, "0.5"), (0, 7, "1"), (1, 6, "1.5"), (1, 7, "2")):
             tk.Radiobutton(grid, text=f"{mm}mm", variable=self.crop_quick_var, value=mm,
                            command=self._on_crop_quick, cursor="hand2", font=FNT,
                            image=self._ind_tk['rb_off'], selectimage=self._ind_tk['rb_on'],
                            indicatoron=False, compound=tk.RIGHT, bd=0, relief=tk.FLAT,
-                           selectcolor=self._bg_color).grid(row=row, column=6, sticky=tk.W, padx=(28, 0), pady=2)
+                           selectcolor=self._bg_color).grid(row=row, column=col, sticky=tk.W,
+                                                            padx=(16 if col == 6 else 8, 0), pady=2)
         # [검은 여백 자르기]: 선택한 페이지에서 스캐너 검은 배경 띠(직사각형)를 찾아 자른다. 자른 쪽 번호는 바로 아래
         self.band_btn = tk.Button(parent, text="검은 여백 자르기", command=self.auto_black_bands, pady=BTN_PADY,
                                   cursor="hand2", font=FNT, bg=BAND_BTN_BG, fg="white",
@@ -3709,7 +3711,7 @@ class PDFLevelPreviewApp:
         self._on_var_change()  # 정식 미리보기는 레벨 입력처럼 잠깐 뒤에 갱신
 
     def _on_crop_quick(self):
-        """[0.5mm]·[1mm]·[2mm] 라디오: 켜면 위·아래·좌·우 칸을 모두 그 값으로(지금 상태에서 더 자를 양).
+        """[0.5mm]·[1mm]·[1.5mm]·[2mm] 라디오: 켜면 위·아래·좌·우 칸을 모두 그 값으로(지금 상태에서 더 자를 양).
         켜진 것을 다시 누르면 끄고 0으로 (라디오는 스스로 꺼지지 않는다)"""
         value = self.crop_quick_var.get()
         if value == self._crop_quick_prev:
@@ -3724,9 +3726,9 @@ class PDFLevelPreviewApp:
             self._crop_quick_setting = False
 
     def _sync_crop_quick(self):
-        """네 칸이 모두 0.5·1·2 중 하나로 같으면 그 라디오를 켜고 아니면 모두 끈다 (칸을 직접 고치거나 페이지를 옮겼을 때)"""
+        """네 칸이 모두 0.5·1·1.5·2 중 하나로 같으면 그 라디오를 켜고 아니면 모두 끈다 (칸을 직접 고치거나 페이지를 옮겼을 때)"""
         values = {self.crop_vars[side].get().strip() for side in CROP_SIDES}
-        self._crop_quick_prev = values.pop() if len(values) == 1 and values <= {"0.5", "1", "2"} else "0"
+        self._crop_quick_prev = values.pop() if len(values) == 1 and values <= {"0.5", "1", "1.5", "2"} else "0"
         self.crop_quick_var.set(self._crop_quick_prev)
 
     def _nudge_crop(self, side, delta):
