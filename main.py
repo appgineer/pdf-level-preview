@@ -81,6 +81,12 @@ ROTATE_GRID_COLOR = "#00a0e0"
 # 저장할 때 페이지 사전에 적어 두는 기울기 보정 합계(°). 다시 열면 회전 칸에 보이고, 바꾸면 차이만큼만 더 돌린다.
 # 일반 PDF 뷰어는 모르는 키를 무시한다
 DESKEW_KEY = "PDFLevelPreviewDeskew"
+# 저장할 때 페이지 사전에 적어 두는 자르기 합계 [위 아래 좌 우] pt (회전 0° 기준, 원래 가장자리에서). 다시 열면 자르기 칸
+# 아래 "자른 양 합계"에 보인다 (칸은 늘 더 자를 양이라 0). [다른 이름으로 저장]은 MediaBox까지 줄여 상자로는 알 수 없어서 적는다
+CROP_KEY = "PDFLevelPreviewCrop"
+# 저장할 때 문서(Catalog)에 적어 두는, 이 프로그램으로 한 편집 종류. 다시 열면 툴바 "격자 보기" 왼쪽에 보인다
+EDITS_KEY = "PDFLevelPreviewEdits"
+EDIT_NAMES = {"rot90": "90° 회전", "deskew": "자동 보정", "angle": "각도 조정", "band": "검은 여백", "crop": "자르기"}
 # 200dpi: test.pdf 16쪽×3각도 시험에서 150dpi보다 90% 오차 0.07°→0.03°(평균 0.023→0.017°), 시간 약 1.4배 (100: 0.07°, 300: 0.01°·3.6배)
 DESKEW_DPI = 200
 DESKEW_SEARCH = 20
@@ -511,6 +517,27 @@ def _deskew_record(page):
         return 0.0
 
 
+def _crop_record(page):
+    """이 페이지에 이미 들어간(저장된) 자르기 합계 [위, 아래, 좌, 우] pt, 회전 0° 기준.
+    적힌 값이 없으면(이 기능 전에 [저장]한 파일 등) MediaBox와 보이는 영역의 차이로 센다"""
+    kind, val = page.parent.xref_get_key(page.xref, CROP_KEY)
+    if kind == "array":
+        try:
+            vals = [float(v) for v in val.strip("[]").split()]
+            if len(vals) == 4:
+                return vals
+        except ValueError:
+            pass
+    mb, vb = page.mediabox, _visible_box(page)  # vb는 page.cropbox 좌표 (y는 MediaBox 위에서 아래로)
+    return [max(0.0, vb.y0), max(0.0, mb.height - vb.y1), max(0.0, vb.x0 - mb.x0), max(0.0, mb.x1 - vb.x1)]
+
+
+def _edits_record(doc):
+    """이 문서를 저장할 때 적어 둔 편집 종류 (EDIT_NAMES의 키 집합)"""
+    kind, val = doc.xref_get_key(doc.pdf_catalog(), EDITS_KEY)
+    return set(val.split(",")) & set(EDIT_NAMES) if kind == "string" else set()
+
+
 def _apply_page_edit(page, angle, rot, margins):
     """화면에서 본 모양(90° 회전 + 기울기 보정 + 화면 기준 여백 pt)을 PDF 페이지에 반영한다.
 
@@ -526,6 +553,11 @@ def _apply_page_edit(page, angle, rot, margins):
         page.parent.xref_set_key(page.xref, DESKEW_KEY, f"{total:g}" if total else "null")
     r = page.rect  # 화면 기준
     top, bottom, left, right = _clamp_margins(margins, r.width, r.height)
+    # 지금까지 자른 양 합계(전에 저장한 값 + 이번 자르기)를 회전 0° 기준으로 적어 둔다 (다시 열면 자르기 칸 아래, _crop_record).
+    # 이번에 안 자른 페이지도 적는다: 옛 [저장] 파일을 굳혀 저장하면 MediaBox가 줄어 상자로는 셀 수 없게 되므로
+    total = [a + b for a, b in zip(_crop_record(page), _rotate_margins([top, bottom, left, right], -page.rotation))]
+    if any(v > 0.005 for v in total):
+        page.parent.xref_set_key(page.xref, CROP_KEY, "[" + " ".join(f"{v:.2f}" for v in total) + "]")
     if not (top or bottom or left or right):
         return
     vis = fitz.Rect(r.x0 + left, r.y0 + top, r.x1 - right, r.y1 - bottom)
@@ -940,6 +972,8 @@ class PDFLevelPreviewApp:
         self._deskew_procs = []  # 돌고 있는 기울기 자동 보정 프로세스 (마찬가지)
         self._skew_flagged = set()  # DESKEW_MAX°를 넘게 기울어 그대로 둔 페이지 uid (썸네일 빨간 테두리)
         self._saved_angles = {}  # (파일, 페이지 번호) → 파일에 이미 들어간 기울기 합계 (_saved_angle)
+        self._saved_crops = {}  # (파일, 페이지 번호) → 파일에 이미 들어간 자르기 합계, 회전 0° 기준 (_saved_crop)
+        self._ops_done = set()  # 이번에 한 편집 종류 (EDIT_NAMES 키). 저장할 때 문서에 적는다
         self._band_procs = []  # 돌고 있는 [검은 여백 자르기] 프로세스 (마찬가지)
         self._band_flagged = set()  # [검은 여백 자르기]로 자른 페이지 uid (썸네일 초록 테두리, 누르면 없어진다)
         # [로마자 표기]로 종이 1쪽이 된 페이지 uid (앞쪽은 i, ii …). None이면 쪽 번호 표기를 건드리지 않는다
@@ -1090,6 +1124,9 @@ class PDFLevelPreviewApp:
                        image=self._ind_tk['cb_off'], selectimage=self._ind_tk['cb_on'],
                        indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
                        selectcolor=self._bg_color).pack(side=tk.RIGHT, padx=(0, 12))
+        # 이 파일을 저장할 때 적어 둔 편집 종류 ("저장한 편집: 자동 보정 · 검은 여백 · 자르기"). 없으면 빈칸
+        self.saved_ops_label = tk.Label(toolbar, text="", fg="#555", font=UI_FONT_SMALL)
+        self.saved_ops_label.pack(side=tk.RIGHT, padx=(0, 16))
 
         # Resizable split
         paned = tk.PanedWindow(
@@ -1463,6 +1500,11 @@ class PDFLevelPreviewApp:
                            image=self._ind_tk['rb_off'], selectimage=self._ind_tk['rb_on'],
                            indicatoron=False, compound=tk.RIGHT, bd=0, relief=tk.FLAT,
                            selectcolor=self._bg_color).grid(row=row, column=4, sticky=tk.W, padx=(28, 0), pady=2)
+        # 이 페이지가 원래 가장자리에서 모두 얼마나 잘렸는지 (전에 저장한 자르기 + 이번 편집, _update_crop_total).
+        # 칸은 늘 "더 자를 양"이라 0이어서 다시 열면 잘린 페이지인지 몰랐다
+        self.crop_total_label = tk.Label(parent, text="자른 양 합계: 없음", font=UI_FONT_SMALL, fg="#666",
+                                         anchor=tk.W, justify=tk.LEFT, wraplength=440)
+        self.crop_total_label.pack(fill=tk.X)
         # [검은 여백 자르기]: 선택한 페이지에서 스캐너 검은 배경 띠(직사각형)를 찾아 자른다. 자른 쪽 번호는 바로 아래
         self.band_btn = tk.Button(parent, text="검은 여백 자르기", command=self.auto_black_bands, pady=BTN_PADY,
                                   cursor="hand2", font=FNT, bg=BAND_BTN_BG, fg="white",
@@ -1653,6 +1695,12 @@ class PDFLevelPreviewApp:
         self.page_edits.clear()
         self._skew_flagged.clear()
         self._saved_angles = {}
+        self._saved_crops = {}
+        self._ops_done = set()
+        # 이 파일을 저장할 때 적어 둔 편집 종류를 툴바 "격자 보기" 왼쪽에
+        ops = _edits_record(self.pdf_doc)
+        self.saved_ops_label.config(
+            text="저장한 편집: " + " · ".join(EDIT_NAMES[op] for op in EDIT_NAMES if op in ops) if ops else "")
         self._show_skew_flags()
         self._band_flagged.clear()
         self._show_band_flags()
@@ -3277,6 +3325,8 @@ class PDFLevelPreviewApp:
             self._last_fit_pos = (new["crop"][0], new["crop"][2])
         self._thumb_dirty.add(idx)
         self._schedule_thumb_redraw()
+        if idx == self.current_page:
+            self._update_crop_total()
 
     def _schedule_thumb_redraw(self):
         if self._thumb_redraw_id is None:
@@ -3377,6 +3427,7 @@ class PDFLevelPreviewApp:
             e = self._page_edit(idx)
             self._set_page_edit(idx, rot=(e["rot"] + delta) % 360,
                                 crop=_rotate_margins(e["crop"], delta))
+        self._ops_done.add("rot90")
         if self.current_page in pages:  # 입력 전 자르기 값도 같이 돌려 둔다 (되돌릴 때 돌아간 모양으로)
             self._crop_before_edit = _rotate_margins(self._crop_before_edit, delta)
             self._crop_field_base = _rotate_margins(self._crop_field_base, delta)
@@ -3431,6 +3482,7 @@ class PDFLevelPreviewApp:
                     flagged = True
                     continue
                 self._set_page_edit(idx, angle=angle)
+                self._ops_done.add("deskew")
                 cur_changed |= idx == self.current_page
         except queue.Empty:
             pass
@@ -3571,6 +3623,7 @@ class PDFLevelPreviewApp:
                     self._crop_before_edit = self._crop_field_base = self._page_edit(idx)["crop"]  # 칸도 0
                     cur_changed = True
                 count[1] += 1
+                self._ops_done.add("band")
                 self._band_flagged.add(uid)
                 flagged = True
         except queue.Empty:
@@ -3618,6 +3671,30 @@ class PDFLevelPreviewApp:
             self.crop_vars[side].set(f"{round(_pt_to_mm(v - base), 1) + 0:g}")  # 0.1mm 단위, 0은 "0" (+0: -0 막기)
         self._syncing_edit = False
         self._sync_crop_quick()
+        self._update_crop_total()
+
+    def _saved_crop(self, idx):
+        """그 페이지 파일에 이미 들어간 자르기 합계 [위, 아래, 좌, 우] pt, 그 파일의 화면 기준 (V의 90° 회전 전)"""
+        key = self.slots[idx][1:]
+        if key not in self._saved_crops:
+            path, src = key
+            page = self._src_docs[path][src]
+            self._saved_crops[key] = _rotate_margins(_crop_record(page), page.rotation)
+        return self._saved_crops[key]
+
+    def _update_crop_total(self):
+        """자르기 칸 아래 "자른 양 합계": 원래 가장자리에서 모두 얼마나 잘렸나 (저장한 자르기 + 이번 편집, 화면 기준 mm)"""
+        if self.pdf_doc is None or not self.slots:  # 파일을 열 때는 _page_count가 아직 이전 값이라 slots로 본다
+            self.crop_total_label.config(text="자른 양 합계: 없음")
+            return
+        e = self._page_edit(self.current_page)
+        saved = _rotate_margins(self._saved_crop(self.current_page), e["rot"])
+        total = [round(_pt_to_mm(a + b), 1) + 0 for a, b in zip(saved, e["crop"])]
+        if not any(total):
+            self.crop_total_label.config(text="자른 양 합계: 없음")
+            return
+        parts = " · ".join(f"{name} {v:g}" for name, v in zip(("위", "아래", "좌", "우"), total))
+        self.crop_total_label.config(text=f"자른 양 합계: {parts} mm")
 
     def _on_angle_var_change(self, *_):
         if self._syncing_edit or self.pdf_doc is None:
@@ -3628,6 +3705,7 @@ class PDFLevelPreviewApp:
             return  # 입력 중인 빈 칸이나 "-"만 친 상태는 무시
         # 칸은 합계(파일에 이미 들어간 기울기 + 이번 편집). 파일은 이미 돌아가 있으니 차이만 더 돌린다
         self._set_page_edit(self.current_page, angle=round(angle - self._saved_angle(self.current_page), 2) + 0.0)
+        self._ops_done.add("angle")
         self._set_drag_mode("rotate")  # 각도를 입력하면 미리보기를 끌어서 돌릴 수 있게
         self._schedule_quick_rotation()  # 바로 임시 화면을 띄우고
         self._on_var_change()  # 정식 미리보기는 레벨 입력처럼 잠깐 뒤에 갱신
@@ -3721,6 +3799,7 @@ class PDFLevelPreviewApp:
         steps = int((self.preview_canvas.canvasx(event.x) - sx) / ROTATE_DRAG_PX)
         angle = round((a0 + steps * 0.1 + 180) % 360 - 180, 1) + 0.0  # ±180 안, 0.1° 단위, -0 방지
         self._set_page_edit(self.current_page, angle=angle)
+        self._ops_done.add("angle")
         self._syncing_edit = True
         self.angle_var.set(f"{round(self._saved_angle(self.current_page) + angle, 2) + 0:g}")  # 칸은 합계
         self._syncing_edit = False
@@ -3856,6 +3935,7 @@ class PDFLevelPreviewApp:
             self._set_page_edit(idx, crop=_clamp_margins([o + d for o, d in zip(old, delta)], w, h))
         self._crop_before_edit = self._crop_field_base = self._page_edit(self.current_page)["crop"]
         self._pending_fit_uid = None  # [저장 크기 불러오기]의 박스도 이제 확정
+        self._ops_done.add("crop")  # 저장할 때 실제로 잘린 페이지가 있을 때만 적힌다
         self._sync_edit_panel()  # 확정했으니 칸은 다시 0부터
         self.crop_edit_var.set(False)  # 선 편집이 꺼지면 잘린 결과가 보인다
         self.preview_canvas.config(cursor="")
@@ -4122,12 +4202,24 @@ class PDFLevelPreviewApp:
             out = fitz.open(src)
             try:
                 self._arrange_pages(out, src)
+                has = {"rot": False, "angle": False, "crop": False}  # 저장되는 편집에 실제로 들어간 것
                 for idx, (uid, _, _) in enumerate(self.slots):
                     e = self.page_edits.get(uid)
                     if uid == self._crop_edit_uid:  # [적용]하지 않은 자르기는 빼고 입력 전 값으로 (지운 경우도)
                         e = dict(self._page_edit(idx), crop=self._crop_before_edit)
-                    if e is not None:
-                        _apply_page_edit(out[idx], e["angle"], e["rot"], e["crop"])
+                    # 편집이 없는 페이지도 부른다: 자르기 합계 기록(CROP_KEY)을 모든 페이지에 남기려고
+                    e = e or {"angle": 0.0, "rot": 0, "crop": [0.0, 0.0, 0.0, 0.0]}
+                    _apply_page_edit(out[idx], e["angle"], e["rot"], e["crop"])
+                    has["rot"] |= bool(e["rot"])
+                    has["angle"] |= bool(e["angle"])
+                    has["crop"] |= any(e["crop"])
+                # 이번에 한 편집 종류를 문서에 적는다 (전에 적힌 것과 합쳐서). [초기화]로 되돌렸으면 빼고
+                valid = {"rot90": has["rot"], "deskew": has["angle"], "angle": has["angle"],
+                         "band": has["crop"], "crop": has["crop"]}
+                ops = _edits_record(out) | {op for op in self._ops_done if valid[op]}
+                if ops:
+                    out.xref_set_key(out.pdf_catalog(), EDITS_KEY,
+                                     fitz.get_pdf_str(",".join(op for op in EDIT_NAMES if op in ops)))
                 # [로마자 표기]: 앞쪽 i, ii …, start쪽부터 1, 2 … (첫 페이지면 1쪽부터 그대로).
                 # 순서를 바꾼 저장(select)은 파일에 있던 표기를 지우므로 마지막에 넣는다
                 start = self._label_start()
