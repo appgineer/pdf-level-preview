@@ -108,12 +108,14 @@ BAND_EDGE_MM = 5.0
 BAND_MIN_MM = 3.0
 BAND_MAX_PART = 0.45  # 띠는 그 방향 길이의 이 비율까지 (test.pdf에서 가장 넓은 띠가 26%. 넘으면 검은 페이지로 본다)
 BAND_SAFE_MM = 0.3
-# 크기 규칙: 위 규칙에 안 맞아도(띠가 3mm보다 얕다, 띠 다음이 검은 표지 디자인이라 종이로 안 넘어간다) 페이지가 문서의
-# 보통 크기(모든 페이지 짧은 변·긴 변 중앙값)보다 BAND_SIZE_MIN_MM 넘게 크면, 가장자리부터 이어진 검은 줄을 자르되
-# 그 방향 합이 (더 큰 만큼 + BAND_SIZE_TOL_MM)을 넘지 않게 한다. 보통 크기 페이지의 검은 디자인은 안 잘린다.
-# 보통 페이지끼리도 ±0.8mm 다르고(testt22.pdf), 딱 보통 크기까지만 자르면 0.2mm 검은 줄이 남아 1mm 여유
+# 보통 크기(문서 모든 페이지 가로·세로 중앙값) 규칙. 보통보다 BAND_SIZE_MIN_MM 넘게 큰 방향만 자르고, 그 방향 합은
+# (더 큰 만큼 + BAND_SIZE_TOL_MM)까지 = 보통 크기보다 2mm 넘게 작아지지 않는다. 위 띠 규칙으로 찾은 것도 이 안에서만 자른다
+# (예전엔 띠 규칙이 길이의 45%까지 잘라, 양옆 띠 페이지의 위아래 검은 디자인까지 잘려 가로 페이지가 됐다). 보통 크기
+# 방향은 아예 안 자른다(검은 디자인). 띠 규칙에 안 맞는 것(띠가 3mm보다 얕다, 띠 다음이 검은 표지 디자인)도 보통보다
+# 큰 방향이면 가장자리부터 이어진 검은 줄을 자른다. 여유 2mm: 종이가 보통보다 1.6mm 좁은 페이지가 있어(test.pdf) 1mm면
+# 0.5mm 검은 줄이 남았다
 BAND_SIZE_MIN_MM = 1.5
-BAND_SIZE_TOL_MM = 1.0
+BAND_SIZE_TOL_MM = 2.0
 # 설정 파일의 자르기(mm) 자리를 보여주는 선 색 (미리보기 / 썸네일)
 CFG_CROP_LINE = "#e00000"
 # 눈에 띄어야 하는 버튼/선택창 색
@@ -3588,10 +3590,11 @@ class PDFLevelPreviewApp:
         jobs = [self.slots[i] + (self._page_edit(i)["rot"],) for i in self._edit_pages()]
         if not jobs or not self._confirm_range("검은 여백 자르기를"):
             return
-        # 크기 규칙의 기준: 문서 모든 페이지(선택과 상관없이)의 짧은 변·긴 변 중앙값 (화면 기준, 90° 회전 반영)
-        sizes = [self._page_disp_size(i) for i in range(self._page_count)]
-        shorts, longs = sorted(min(sz) for sz in sizes), sorted(max(sz) for sz in sizes)
-        ref = (shorts[len(shorts) // 2], longs[len(longs) // 2])
+        # 보통 크기: 문서 모든 페이지(선택과 상관없이)의 가로·세로 중앙값. 파일 기준(V의 90° 회전 전)으로 재고 페이지마다
+        # V 회전만큼 바꿔 본다. 페이지 모양(가로>세로)으로 정하면 양옆 띠로 넓어진 페이지를 가로 페이지로 잘못 봤다
+        rects = [self._src_docs[path][src].rect for _, path, src in self.slots]
+        ws, hs = sorted(r.width for r in rects), sorted(r.height for r in rects)
+        ref = (ws[len(ws) // 2], hs[len(hs) // 2])
         n = min(len(jobs), max(1, ((os.cpu_count() or 4) * 3) // 4))
         res_q = multiprocessing.Queue()
         procs = [multiprocessing.Process(target=_band_worker, args=(jobs[k::n], res_q), daemon=True)
@@ -3603,7 +3606,7 @@ class PDFLevelPreviewApp:
         self._poll_bands(procs, res_q, label, len(jobs), [0, 0], ref)
 
     def _poll_bands(self, procs, res_q, label, total, count, ref):
-        """[검은 여백 자르기] 결과를 받아 자른다. count = [받은 수, 자른 수], ref = 보통 크기 (짧은 변, 긴 변) pt"""
+        """[검은 여백 자르기] 결과를 받아 자른다. count = [받은 수, 자른 수], ref = 보통 크기 (가로, 세로) pt, 파일 기준"""
         if procs is not self._band_procs:
             return  # 멈췄다 (다른 파일을 열었거나 덮어쓰기·창 닫기)
         alive = any(p.is_alive() for p in procs)
@@ -3621,16 +3624,18 @@ class PDFLevelPreviewApp:
                 e = self._page_edit(idx)
                 w, h = self._page_disp_size(idx)
                 cut = [b + safe if b else 0.0 for b in bands]  # 띠 규칙 (검은 배경판 다음에 종이)
-                # 크기 규칙: 보통 크기보다 큰 방향은 가장자리 검은 줄을 자르되, 그 방향 합이 더 큰 만큼(+여유)까지만
-                rw, rh = (ref[0], ref[1]) if w <= h else (ref[1], ref[0])
+                rw, rh = ref if e["rot"] in (0, 180) else (ref[1], ref[0])  # 보통 크기를 이 페이지 화면 방향으로
                 for (a, b), excess in (((0, 1), h - rh), ((2, 3), w - rw)):
-                    if excess <= size_min:
+                    if excess <= size_min:  # 보통 크기 방향은 안 자른다 (띠 규칙이 찾았어도 검은 디자인일 수 있다)
+                        cut[a] = cut[b] = 0.0
                         continue
-                    want = [dark[a] + safe if dark[a] else 0.0, dark[b] + safe if dark[b] else 0.0]
+                    # 보통보다 큰 방향: 띠 규칙 값과 가장자리 검은 줄(크기 규칙) 중 큰 값을, 합이 더 큰 만큼(+여유)까지만
+                    want = [max(cut[a], dark[a] + safe if dark[a] else 0.0),
+                            max(cut[b], dark[b] + safe if dark[b] else 0.0)]
                     room = excess + size_tol
-                    if sum(want) > room:  # 검은 줄이 더 깊다 = 검은 디자인까지 이어진다. 넘는 만큼은 두 변에 비율대로 덜
+                    if sum(want) > room:  # 넘으면 = 검은 디자인까지 이어진다. 두 변에 비율대로 덜 자른다
                         want = [x * room / sum(want) for x in want]
-                    cut[a], cut[b] = max(cut[a], want[0]), max(cut[b], want[1])
+                    cut[a], cut[b] = want
                 # 기울기 보정한 페이지는 띠 경계도 같이 돌아 가는 검은 쐐기가 생긴다: (반대쪽 길이/2)×sin(각도) 더
                 s = abs(math.sin(math.radians(e["angle"])))
                 extra = (w / 2 * s, w / 2 * s, h / 2 * s, h / 2 * s)
