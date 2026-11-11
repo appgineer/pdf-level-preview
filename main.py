@@ -81,7 +81,8 @@ ROTATE_GRID_COLOR = "#00a0e0"
 # 저장할 때 페이지 사전에 적어 두는 기울기 보정 합계(°). 다시 열면 회전 칸에 보이고, 바꾸면 차이만큼만 더 돌린다.
 # 일반 PDF 뷰어는 모르는 키를 무시한다
 DESKEW_KEY = "PDFLevelPreviewDeskew"
-DESKEW_DPI = 150
+# 200dpi: test.pdf 16쪽×3각도 시험에서 150dpi보다 90% 오차 0.07°→0.03°(평균 0.023→0.017°), 시간 약 1.4배 (100: 0.07°, 300: 0.01°·3.6배)
+DESKEW_DPI = 200
 DESKEW_SEARCH = 20
 DESKEW_MAX = 1
 # [검은 여백 자르기](_detect_black_bands): 스캐너 용지 크기 자동 감지가 실패해 같이 찍힌 검은 배경판 띠(직사각형)만 찾는다.
