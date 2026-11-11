@@ -98,6 +98,12 @@ BAND_EDGE_MM = 5.0
 BAND_MIN_MM = 3.0
 BAND_MAX_PART = 0.45  # 띠는 그 방향 길이의 이 비율까지 (test.pdf에서 가장 넓은 띠가 26%. 넘으면 검은 페이지로 본다)
 BAND_SAFE_MM = 0.3
+# 크기 규칙: 위 규칙에 안 맞아도(띠가 3mm보다 얕다, 띠 다음이 검은 표지 디자인이라 종이로 안 넘어간다) 페이지가 문서의
+# 보통 크기(모든 페이지 짧은 변·긴 변 중앙값)보다 BAND_SIZE_MIN_MM 넘게 크면, 가장자리부터 이어진 검은 줄을 자르되
+# 그 방향 합이 (더 큰 만큼 + BAND_SIZE_TOL_MM)을 넘지 않게 한다. 보통 크기 페이지의 검은 디자인은 안 잘린다.
+# 보통 페이지끼리도 ±0.8mm 다르고(testt22.pdf), 딱 보통 크기까지만 자르면 0.2mm 검은 줄이 남아 1mm 여유
+BAND_SIZE_MIN_MM = 1.5
+BAND_SIZE_TOL_MM = 1.0
 # 설정 파일의 자르기(mm) 자리를 보여주는 선 색 (미리보기 / 썸네일)
 CFG_CROP_LINE = "#e00000"
 # 눈에 띄어야 하는 버튼/선택창 색
@@ -404,7 +410,9 @@ def _detect_skew(page, rot=0, vertical=False):
 
 
 def _detect_black_bands(page):
-    """스캐너 검은 배경판 띠(직사각형)의 깊이 (위, 아래, 좌, 우) pt, 화면 기준(페이지 /Rotate 반영). 띠가 없으면 None.
+    """(띠, 검은 줄): 둘 다 (위, 아래, 좌, 우) pt, 화면 기준(페이지 /Rotate 반영).
+    띠 = 아래 규칙을 모두 맞춘 스캐너 검은 배경판 띠(직사각형) 깊이, 없는 변은 0.
+    검은 줄 = 규칙 없이 가장자리부터 이어진 검은 줄 깊이. 페이지 크기 규칙(BAND_SIZE_MIN_MM, _poll_bands)에 쓴다.
 
     용지 크기 자동 감지가 실패하면 종이 바깥의 검은 배경판이 가장자리에 띠로 같이 찍힌다. 가장자리부터 줄마다
     BAND_LINE 이상이 BAND_DARK보다 어두운 줄이 몇 개 이어지는지 세고, 바로 다음 줄이 종이(평균 밝기 BAND_PAPER
@@ -439,13 +447,22 @@ def _detect_black_bands(page):
             return 0  # 띠 다음에 종이가 안 나온다 (어두운 내용)
         return n * 72 / BAND_DPI
 
-    bands = (depth(row_dark, row_mean), depth(row_dark[::-1], row_mean[::-1]),
-             depth(col_dark, col_mean), depth(col_dark[::-1], col_mean[::-1]))
-    return bands if any(bands) else None
+    def dark_depth(dark_lines):  # 규칙 없이 가장자리부터 이어진 검은 줄 깊이 (크기 규칙용)
+        n = next((i for i in range(min(3, len(dark_lines))) if dark_lines[i] >= need), None)
+        if n is None:
+            return 0
+        while n < len(dark_lines) and dark_lines[n] >= need:
+            n += 1
+        return n * 72 / BAND_DPI
+
+    sides = ((row_dark, row_mean), (row_dark[::-1], row_mean[::-1]),
+             (col_dark, col_mean), (col_dark[::-1], col_mean[::-1]))
+    return tuple(depth(d, m) for d, m in sides), tuple(dark_depth(d) for d, _ in sides)
 
 
 def _band_worker(jobs, res_q):
-    """[검은 여백 자르기] 프로세스: jobs = [(uid, PDF 경로, 페이지 번호, 90° 회전)] → res_q에 (uid, 띠 pt 또는 None).
+    """[검은 여백 자르기] 프로세스: jobs = [(uid, PDF 경로, 페이지 번호, 90° 회전)]
+    → res_q에 (uid, (띠, 검은 줄) 또는 실패하면 None). _detect_black_bands 참고.
     _deskew_worker와 같은 방식 (PyMuPDF는 스레드에서 쓸 수 없어 여러 프로세스로 나눈다)"""
     docs = {}
     for uid, path, pno, rot in jobs:
@@ -3497,6 +3514,10 @@ class PDFLevelPreviewApp:
         jobs = [self.slots[i] + (self._page_edit(i)["rot"],) for i in self._edit_pages()]
         if not jobs or not self._confirm_range("검은 여백 자르기를"):
             return
+        # 크기 규칙의 기준: 문서 모든 페이지(선택과 상관없이)의 짧은 변·긴 변 중앙값 (화면 기준, 90° 회전 반영)
+        sizes = [self._page_disp_size(i) for i in range(self._page_count)]
+        shorts, longs = sorted(min(sz) for sz in sizes), sorted(max(sz) for sz in sizes)
+        ref = (shorts[len(shorts) // 2], longs[len(longs) // 2])
         n = min(len(jobs), max(1, ((os.cpu_count() or 4) * 3) // 4))
         res_q = multiprocessing.Queue()
         procs = [multiprocessing.Process(target=_band_worker, args=(jobs[k::n], res_q), daemon=True)
@@ -3505,29 +3526,42 @@ class PDFLevelPreviewApp:
             p.start()
         self._band_procs = procs
         self._set_drag_mode("rotate")  # 선 편집을 끄고 잘린 결과를 보여 준다
-        self._poll_bands(procs, res_q, label, len(jobs), [0, 0])
+        self._poll_bands(procs, res_q, label, len(jobs), [0, 0], ref)
 
-    def _poll_bands(self, procs, res_q, label, total, count):
-        """[검은 여백 자르기] 결과를 받아 자른다. count = [받은 수, 자른 수]"""
+    def _poll_bands(self, procs, res_q, label, total, count, ref):
+        """[검은 여백 자르기] 결과를 받아 자른다. count = [받은 수, 자른 수], ref = 보통 크기 (짧은 변, 긴 변) pt"""
         if procs is not self._band_procs:
             return  # 멈췄다 (다른 파일을 열었거나 덮어쓰기·창 닫기)
         alive = any(p.is_alive() for p in procs)
         cur_changed = flagged = False
         safe = _mm_to_pt(BAND_SAFE_MM)
+        size_min, size_tol = _mm_to_pt(BAND_SIZE_MIN_MM), _mm_to_pt(BAND_SIZE_TOL_MM)
         try:
             while True:
-                uid, bands = res_q.get_nowait()
+                uid, res = res_q.get_nowait()
                 count[0] += 1
                 idx = self._uid_index(uid)
-                if bands is None or idx is None:
+                if res is None or idx is None:
                     continue
+                bands, dark = res
                 e = self._page_edit(idx)
                 w, h = self._page_disp_size(idx)
+                cut = [b + safe if b else 0.0 for b in bands]  # 띠 규칙 (검은 배경판 다음에 종이)
+                # 크기 규칙: 보통 크기보다 큰 방향은 가장자리 검은 줄을 자르되, 그 방향 합이 더 큰 만큼(+여유)까지만
+                rw, rh = (ref[0], ref[1]) if w <= h else (ref[1], ref[0])
+                for (a, b), excess in (((0, 1), h - rh), ((2, 3), w - rw)):
+                    if excess <= size_min:
+                        continue
+                    want = [dark[a] + safe if dark[a] else 0.0, dark[b] + safe if dark[b] else 0.0]
+                    room = excess + size_tol
+                    if sum(want) > room:  # 검은 줄이 더 깊다 = 검은 디자인까지 이어진다. 넘는 만큼은 두 변에 비율대로 덜
+                        want = [x * room / sum(want) for x in want]
+                    cut[a], cut[b] = max(cut[a], want[0]), max(cut[b], want[1])
                 # 기울기 보정한 페이지는 띠 경계도 같이 돌아 가는 검은 쐐기가 생긴다: (반대쪽 길이/2)×sin(각도) 더
                 s = abs(math.sin(math.radians(e["angle"])))
                 extra = (w / 2 * s, w / 2 * s, h / 2 * s, h / 2 * s)
-                crop = _clamp_margins([max(old, b + safe + x) if b else old
-                                       for old, b, x in zip(e["crop"], bands, extra)], w, h)
+                crop = _clamp_margins([max(old, c + x) if c else old
+                                       for old, c, x in zip(e["crop"], cut, extra)], w, h)
                 if crop == e["crop"]:
                     continue  # 이미 그만큼 잘려 있다
                 self._set_page_edit(idx, crop=crop)
@@ -3547,7 +3581,7 @@ class PDFLevelPreviewApp:
             self._show_band_flags()
         if count[0] < total and alive:
             self.band_btn.config(text=f"찾는 중 {count[0]}/{total}")
-            self.root.after(100, lambda: self._poll_bands(procs, res_q, label, total, count))
+            self.root.after(100, lambda: self._poll_bands(procs, res_q, label, total, count, ref))
             return
         self._stop_bands()
         if count[1]:
