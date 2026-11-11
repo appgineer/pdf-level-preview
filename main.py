@@ -1478,13 +1478,19 @@ class PDFLevelPreviewApp:
         grid.pack(anchor=tk.W)
         self.crop_vars = {}
         self._crop_entries = []  # Enter = [적용]
+        # 칸마다 오른쪽에 그 변의 "자른 양 합계"(괄호, 전에 저장한 자르기 + 이번 편집 mm, _update_crop_total).
+        # 칸은 늘 "더 자를 양"이라 0이어서 다시 열면 잘린 페이지인지 몰랐다. 글자 수가 바뀌어도 줄이 안 움직이게 폭 고정
+        self.crop_total_labels = {}
         for i, (side, text) in enumerate(zip(CROP_SIDES, ("위", "아래", "좌", "우"))):
             row, col = divmod(i, 2)
-            tk.Label(grid, text=text, font=FNT).grid(row=row, column=col * 2, sticky=tk.E,
+            tk.Label(grid, text=text, font=FNT).grid(row=row, column=col * 3, sticky=tk.E,
                                                      padx=(0 if col == 0 else 12, 4), pady=2)
             var = tk.StringVar(value="0")
             entry = tk.Entry(grid, textvariable=var, width=6, font=FNT)
-            entry.grid(row=row, column=col * 2 + 1, pady=2)
+            entry.grid(row=row, column=col * 3 + 1, pady=2)
+            total = tk.Label(grid, text="(0)", width=6, anchor=tk.W, font=UI_FONT_SMALL, fg="#666")
+            total.grid(row=row, column=col * 3 + 2, sticky=tk.W, padx=(4, 0), pady=2)
+            self.crop_total_labels[side] = total
             var.trace_add("write", self._on_crop_var_change)
             entry.bind("<Right>", lambda e, s=side: self._nudge_crop(s, +1))
             entry.bind("<Left>",  lambda e, s=side: self._nudge_crop(s, -1))
@@ -1499,12 +1505,7 @@ class PDFLevelPreviewApp:
                            command=self._on_crop_quick, cursor="hand2", font=FNT,
                            image=self._ind_tk['rb_off'], selectimage=self._ind_tk['rb_on'],
                            indicatoron=False, compound=tk.RIGHT, bd=0, relief=tk.FLAT,
-                           selectcolor=self._bg_color).grid(row=row, column=4, sticky=tk.W, padx=(28, 0), pady=2)
-        # 이 페이지가 원래 가장자리에서 모두 얼마나 잘렸는지 (전에 저장한 자르기 + 이번 편집, _update_crop_total).
-        # 칸은 늘 "더 자를 양"이라 0이어서 다시 열면 잘린 페이지인지 몰랐다
-        self.crop_total_label = tk.Label(parent, text="자른 양 합계: 없음", font=UI_FONT_SMALL, fg="#666",
-                                         anchor=tk.W, justify=tk.LEFT, wraplength=440)
-        self.crop_total_label.pack(fill=tk.X)
+                           selectcolor=self._bg_color).grid(row=row, column=6, sticky=tk.W, padx=(28, 0), pady=2)
         # [검은 여백 자르기]: 선택한 페이지에서 스캐너 검은 배경 띠(직사각형)를 찾아 자른다. 자른 쪽 번호는 바로 아래
         self.band_btn = tk.Button(parent, text="검은 여백 자르기", command=self.auto_black_bands, pady=BTN_PADY,
                                   cursor="hand2", font=FNT, bg=BAND_BTN_BG, fg="white",
@@ -3683,18 +3684,15 @@ class PDFLevelPreviewApp:
         return self._saved_crops[key]
 
     def _update_crop_total(self):
-        """자르기 칸 아래 "자른 양 합계": 원래 가장자리에서 모두 얼마나 잘렸나 (저장한 자르기 + 이번 편집, 화면 기준 mm)"""
+        """자르기 칸마다 옆 괄호에 "자른 양 합계": 원래 가장자리에서 모두 얼마나 잘렸나 (저장한 자르기 + 이번 편집, 화면 기준 mm)"""
         if self.pdf_doc is None or not self.slots:  # 파일을 열 때는 _page_count가 아직 이전 값이라 slots로 본다
-            self.crop_total_label.config(text="자른 양 합계: 없음")
-            return
-        e = self._page_edit(self.current_page)
-        saved = _rotate_margins(self._saved_crop(self.current_page), e["rot"])
-        total = [round(_pt_to_mm(a + b), 1) + 0 for a, b in zip(saved, e["crop"])]
-        if not any(total):
-            self.crop_total_label.config(text="자른 양 합계: 없음")
-            return
-        parts = " · ".join(f"{name} {v:g}" for name, v in zip(("위", "아래", "좌", "우"), total))
-        self.crop_total_label.config(text=f"자른 양 합계: {parts} mm")
+            total = [0, 0, 0, 0]
+        else:
+            e = self._page_edit(self.current_page)
+            saved = _rotate_margins(self._saved_crop(self.current_page), e["rot"])
+            total = [round(_pt_to_mm(a + b), 1) + 0 for a, b in zip(saved, e["crop"])]
+        for side, v in zip(CROP_SIDES, total):
+            self.crop_total_labels[side].config(text=f"({v:g})")
 
     def _on_angle_var_change(self, *_):
         if self._syncing_edit or self.pdf_doc is None:
