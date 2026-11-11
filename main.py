@@ -145,9 +145,11 @@ THUMB_DROP_LINE = "#e00000"
 THUMB_CUR_LINE = "#1f6fd0"
 # 썸네일: 자동 보정 때 DESKEW_MAX°를 넘게 기울어 그대로 둔 페이지 테두리 색 (누르면 없어진다)
 THUMB_SKEW_LINE = "#e00000"
-# 썸네일: [검은 여백 자르기]로 자른 페이지 테두리 색 (진한 보라, 빨간 1° 테두리보다 한 칸 더 바깥. 누르면 없어진다).
-# 쪽 번호 목록 글씨도 이 색. 밝은 보라(#9b30ff 등)는 진회색 바탕과 밝기가 같아(대비 1.0~1.2) 색으로만 구별돼서 진하게
-THUMB_BAND_LINE = "#5a189a"
+# 썸네일: [검은 여백 자르기]로 자른 페이지 테두리 색 (밝은 초록, 빨간 1° 테두리보다 한 칸 더 바깥. 누르면 없어진다).
+# 진회색 바탕과 밝기 대비 3.2 (주황 2.5, 진한 보라 1.8은 잘 안 보였다. 밝은 보라는 1.0~1.2). 노랑·주황은 사용자가 뺐다.
+# 밝은 초록은 오른쪽 패널의 밝은 바탕에서 안 읽혀서 쪽 번호 목록 글씨는 같은 계열의 진한 초록 (편집 바탕 대비 4.9)
+THUMB_BAND_LINE = "#22e022"
+BAND_FLAG_FG = "#007a33"
 # 툴바: [로마자 표기]로 정한 종이 쪽 번호 글씨 색 (진한 초록. 빨간 페이지 번호·파란 폴더 번호 사이에 괄호로.
 # 보라는 잘 안 보였다)
 PAPER_NUM_FG = "#006b2b"
@@ -919,7 +921,7 @@ class PDFLevelPreviewApp:
         self._skew_flagged = set()  # DESKEW_MAX°를 넘게 기울어 그대로 둔 페이지 uid (썸네일 빨간 테두리)
         self._saved_angles = {}  # (파일, 페이지 번호) → 파일에 이미 들어간 기울기 합계 (_saved_angle)
         self._band_procs = []  # 돌고 있는 [검은 여백 자르기] 프로세스 (마찬가지)
-        self._band_flagged = set()  # [검은 여백 자르기]로 자른 페이지 uid (썸네일 보라 테두리, 누르면 없어진다)
+        self._band_flagged = set()  # [검은 여백 자르기]로 자른 페이지 uid (썸네일 초록 테두리, 누르면 없어진다)
         # [로마자 표기]로 종이 1쪽이 된 페이지 uid (앞쪽은 i, ii …). None이면 쪽 번호 표기를 건드리지 않는다
         self._label_start_uid = None
         self._pdf_path = None
@@ -1062,6 +1064,12 @@ class PDFLevelPreviewApp:
         view_menu.config(font=UI_FONT, cursor="hand2")
         view_menu["menu"].config(font=UI_FONT)
         view_menu.pack(side=tk.RIGHT, padx=(2, TOOLBAR_BTN_GAP))
+        # 격자 보기: 미리보기 페이지 위에 가로세로 격자만 그린다 (회전·자르기와 무관). 보기 선택 목록 바로 왼쪽
+        tk.Checkbutton(toolbar, text="격자 보기 (F1)", variable=self.grid_var,
+                       command=self._on_grid_toggle, cursor="hand2", font=UI_FONT,
+                       image=self._ind_tk['cb_off'], selectimage=self._ind_tk['cb_on'],
+                       indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
+                       selectcolor=self._bg_color).pack(side=tk.RIGHT, padx=(0, 12))
 
         # Resizable split
         paned = tk.PanedWindow(
@@ -1350,21 +1358,11 @@ class PDFLevelPreviewApp:
         # 회전·[자동 보정]·[검은 여백 자르기]·[적용]·[초기화]는 모두 썸네일에서 선택한 페이지에 한다
         # (전체·홀수·짝수는 썸네일 오른쪽 클릭 메뉴로 선택)
 
-        # 격자 보기: 페이지 위에 가로세로 격자만 그린다 (회전·자르기와 무관)
-        grid_row = tk.Frame(parent)
-        grid_row.pack(fill=tk.X, pady=(0, 12))  # 아래를 띄워 회전 줄과 구분
-        tk.Checkbutton(grid_row, text="격자 보기 (F1)", variable=self.grid_var,
-                       command=self._on_grid_toggle, cursor="hand2", font=FNT,
-                       image=self._ind_tk['cb_off'], selectimage=self._ind_tk['cb_on'],
-                       indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
-                       selectcolor=self._bg_color).pack(side=tk.LEFT)
-
-        # 회전 (기울기 보정, °). 페이지마다 따로. + 오른쪽 / - 왼쪽, ←/→로 0.1°씩.
-        # 그 아래 왼쪽 칸에 글줄 방향 ◯ 가로 / ◯ 세로, 오른쪽 칸에 두 줄 높이의 [자동 보정]
-        # (아래 [왼쪽 90°] [오른쪽 90°]와 같은 너비 두 칸(uniform)이라 [자동 보정]과 [오른쪽 90°]의 위아래가 맞는다)
+        # 회전 (기울기 보정, °). 페이지마다 따로. + 오른쪽 / - 왼쪽, ←/→로 0.1°씩. 같은 줄 오른쪽에 [왼쪽 90°] [오른쪽 90°]
+        # (격자 보기 체크는 툴바의 보기 선택 목록 왼쪽으로 옮겼다)
         rot_row = tk.Frame(parent)
         rot_row.pack(fill=tk.X, pady=(4, 0))
-        rot_row.columnconfigure((0, 1), weight=1, uniform="half")
+        rot_row.columnconfigure((1, 2), weight=1, uniform="rot90")  # 두 90° 버튼이 남는 폭을 반씩
         angle_box = tk.Frame(rot_row)
         angle_box.grid(row=0, column=0, sticky="w")
         tk.Label(angle_box, text="회전 (°)", font=FNT).pack(side=tk.LEFT)
@@ -1378,29 +1376,29 @@ class PDFLevelPreviewApp:
         angle_entry.bind("<Up>",    lambda e: self._nudge_angle(+0.1))
         angle_entry.bind("<Down>",  lambda e: self._nudge_angle(-0.1))
         self._edit_entries = [angle_entry]
-        # [자동 보정]이 볼 글줄 방향: 가로쓰기(기본) / 세로쓰기 책. 창을 열 때마다 가로
+        tk.Button(rot_row, text="왼쪽 90°", command=lambda: self.rotate_90(-90), pady=BTN_PADY,
+                  cursor="hand2", font=FNT).grid(row=0, column=1, sticky="ew", padx=(0, 2))
+        tk.Button(rot_row, text="오른쪽 90°", command=lambda: self.rotate_90(90), pady=BTN_PADY,
+                  cursor="hand2", font=FNT).grid(row=0, column=2, sticky="ew", padx=(2, 0))
+
+        # 그 아래: 왼쪽에 [자동 보정]이 볼 글줄 방향 ◯ 가로 / ◯ 세로 (가로쓰기 기본, 창을 열 때마다 가로),
+        # 바로 오른쪽 남는 폭 전체에 두 줄 높이의 [자동 보정] (선택한 페이지마다 글줄을 보고 기울기를 넣는다)
+        deskew_row = tk.Frame(parent)
+        deskew_row.pack(fill=tk.X, pady=(6, 12))  # 아래를 띄워 자르기 구간과 구분
+        deskew_row.columnconfigure(1, weight=1)
         self.deskew_dir_var = tk.StringVar(value="가로")
-        for row, text in ((1, "가로"), (2, "세로")):
-            tk.Radiobutton(rot_row, text=text, variable=self.deskew_dir_var, value=text, cursor="hand2", font=FNT,
+        for row, text in ((0, "가로"), (1, "세로")):
+            tk.Radiobutton(deskew_row, text=text, variable=self.deskew_dir_var, value=text, cursor="hand2", font=FNT,
                            image=self._ind_tk['rb_off'], selectimage=self._ind_tk['rb_on'],
                            indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
-                           selectcolor=self._bg_color).grid(row=row, column=0, sticky="w",
-                                                            pady=(6, 0) if row == 1 else 0)
-        # [자동 보정]: 선택한 페이지마다 글줄을 보고 기울기를 넣는다. 가로·세로 두 줄 높이 (rowspan)
-        self.deskew_btn = tk.Button(rot_row, text="자동 보정", command=self.auto_deskew, pady=BTN_PADY,
+                           selectcolor=self._bg_color).grid(row=row, column=0, sticky="w")
+        self.deskew_btn = tk.Button(deskew_row, text="자동 보정", command=self.auto_deskew, pady=BTN_PADY,
                                     cursor="hand2", font=FNT, bg=DESKEW_BTN_BG, fg="white",
                                     activebackground=DESKEW_BTN_ACTIVE, activeforeground="white")
-        self.deskew_btn.grid(row=1, column=1, rowspan=2, sticky="nsew", padx=(2, 0), pady=(6, 0))
-        self._auto_row = rot_row  # 1° 넘은 쪽 번호 목록이 이 줄 바로 아래에 붙는다
+        self.deskew_btn.grid(row=0, column=1, rowspan=2, sticky="nsew", padx=(10, 0))
+        self._auto_row = deskew_row  # 1° 넘은 쪽 번호 목록이 이 줄 바로 아래에 붙는다
         # 자동 보정 때 DESKEW_MAX°를 넘게 기운 쪽 번호 (있을 때만 이 자리에 보인다, _show_skew_flags)
         self._skew_flag_frame = tk.Frame(parent)
-        rot90_row = tk.Frame(parent)
-        rot90_row.pack(fill=tk.X, pady=(4, 12))
-        rot90_row.columnconfigure((0, 1), weight=1, uniform="half")
-        tk.Button(rot90_row, text="왼쪽 90°", command=lambda: self.rotate_90(-90), pady=BTN_PADY,
-                  cursor="hand2", font=FNT).grid(row=0, column=0, sticky="ew", padx=(0, 2))
-        tk.Button(rot90_row, text="오른쪽 90°", command=lambda: self.rotate_90(90), pady=BTN_PADY,
-                  cursor="hand2", font=FNT).grid(row=0, column=1, sticky="ew", padx=(2, 0))
 
         # 자르기 여백 (mm, 화면 기준). 제목 줄 오른쪽에 "선 편집"
         crop_head = tk.Frame(parent)
@@ -1443,13 +1441,18 @@ class PDFLevelPreviewApp:
                                   activebackground=BAND_BTN_ACTIVE, activeforeground="white")
         self.band_btn.pack(fill=tk.X, pady=(4, 0))
         self._band_flag_frame = tk.Frame(parent)  # 자른 쪽 번호 (있을 때만 보인다, _show_band_flags)
-        tk.Button(parent, text="현재 크기 저장", command=self.save_crop_size, pady=BTN_PADY,
-                  cursor="hand2", font=FNT).pack(fill=tk.X, pady=(4, 0))
+        # [현재 크기 저장] [저장 크기 불러오기] 한 줄 (같은 너비 두 칸), 저장한 크기는 그 아래 한 줄
+        size_row = tk.Frame(parent)
+        size_row.pack(fill=tk.X, pady=(4, 0))
+        size_row.columnconfigure((0, 1), weight=1, uniform="half")
+        tk.Button(size_row, text="현재 크기 저장", command=self.save_crop_size, pady=BTN_PADY,
+                  cursor="hand2", font=FNT).grid(row=0, column=0, sticky="ew", padx=(0, 2))
+        tk.Button(size_row, text="저장 크기 불러오기", command=self.crop_to_saved_size, pady=BTN_PADY,
+                  cursor="hand2", font=FNT, bg=SAVE_BTN_BG, fg="white",
+                  activebackground=SAVE_BTN_ACTIVE, activeforeground="white"
+                  ).grid(row=0, column=1, sticky="ew", padx=(2, 0))
         self.saved_size_label = tk.Label(parent, text="", font=UI_FONT_SMALL, fg="#666", anchor=tk.W)
         self.saved_size_label.pack(fill=tk.X)
-        tk.Button(parent, text="저장 크기 불러오기", command=self.crop_to_saved_size, pady=BTN_PADY,
-                  cursor="hand2", font=FNT, bg=SAVE_BTN_BG, fg="white",
-                  activebackground=SAVE_BTN_ACTIVE, activeforeground="white").pack(fill=tk.X)
         apply_row = tk.Frame(parent)
         apply_row.pack(fill=tk.X, pady=(4, 0))
         tk.Button(apply_row, text="초기화", command=self.reset_edits, pady=BTN_PADY,
@@ -3430,7 +3433,7 @@ class PDFLevelPreviewApp:
     def _show_band_flags(self):
         """[검은 여백 자르기]로 자른 쪽 번호를 그 버튼 아래에 보여 준다 (누르면 그 페이지로). 없으면 숨긴다"""
         self._show_flag_list(self._band_flag_frame, self._band_flagged, "검은 여백 자름:",
-                             THUMB_BAND_LINE, self.band_btn)
+                             BAND_FLAG_FG, self.band_btn)
 
     def _show_flag_list(self, frame, uids, head_text, color, below):
         """표시한 페이지(uids)의 쪽 번호를 below 위젯 바로 아래 frame에 보여 준다. 누르면 그 페이지로. 없으면 숨긴다"""
@@ -3474,7 +3477,7 @@ class PDFLevelPreviewApp:
     def auto_black_bands(self):
         """[검은 여백 자르기]: 선택한 페이지마다 스캐너 검은 배경 띠(직사각형)를 찾아 자른다 (_detect_black_bands).
 
-        [자동 보정]처럼 여러 프로세스로 나눠 찾고, 찾은 페이지부터 바로 자르고 썸네일 보라 테두리 + 쪽 번호로 알린다.
+        [자동 보정]처럼 여러 프로세스로 나눠 찾고, 찾은 페이지부터 바로 자르고 썸네일 초록 테두리 + 쪽 번호로 알린다.
         자른 값은 [자동 보정]의 각도처럼 [적용] 없이 바로 확정한다. 이미 더 크게 자른 변은 그대로 둔다.
         종이가 돌아가 생긴 삼각형은 직사각형 부분까지만 자른다(나머지는 사용자가 직접)
         """
@@ -3539,7 +3542,7 @@ class PDFLevelPreviewApp:
         self._stop_bands()
         if count[1]:
             self._show_toast(f"{label} {total}쪽 중 {count[1]}쪽의 검은 여백을 잘랐습니다. "
-                             "보라 테두리로 표시했습니다.")
+                             "초록 테두리로 표시했습니다.")
         else:
             self._show_toast(f"{label} {total}쪽에서 자를 검은 여백을 찾지 못했습니다.")
 
