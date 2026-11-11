@@ -120,6 +120,9 @@ CFG_CROP_LINE = "#e00000"
 SAVE_BTN_BG, SAVE_BTN_ACTIVE = "#1f6fd0", "#17559f"      # 적용 / 저장 크기 불러오기 (파랑)
 # 다른 이름으로 저장: 초록, 흰 글씨
 SAVEAS_BTN_BG, SAVEAS_BTN_ACTIVE = "#3a9d5d", "#2f7f4c"
+# 저장 (Ctrl+S): 청록, 흰 글씨. [다른 이름으로 저장](굳힘, 되돌릴 수 없음)과 헷갈리지 않게 색을 나눈다.
+# 바로 위 [적용]의 파랑·설정 저장의 보라·검은 여백의 진회색과도 다르게
+SAVE_PDF_BG, SAVE_PDF_ACTIVE = "#0f8b99", "#0b6d78"
 CFG_SAVE_BG, CFG_SAVE_ACTIVE = "#7b4fc0", "#653da8"      # 설정 저장 (보라)
 DESKEW_BTN_BG, DESKEW_BTN_ACTIVE = "#8e44ad", "#763a91"  # 자동 보정 (붉은 보라)
 BAND_BTN_BG, BAND_BTN_ACTIVE = "#333333", "#111111"      # 검은 여백 자르기 (진회색, 흰 글씨)
@@ -1525,7 +1528,7 @@ class PDFLevelPreviewApp:
         self.band_btn = tk.Button(parent, text="검은 여백 자르기", command=self.auto_black_bands, pady=BTN_PADY,
                                   cursor="hand2", font=FNT, bg=BAND_BTN_BG, fg="white",
                                   activebackground=BAND_BTN_ACTIVE, activeforeground="white")
-        self.band_btn.pack(fill=tk.X, pady=(4, 0))
+        self.band_btn.pack(fill=tk.X, pady=(14, 0))  # 위를 띄워 자르기 칸과 구분
         self._band_flag_frame = tk.Frame(parent)  # 자른 쪽 번호 (있을 때만 보인다, _show_band_flags)
         # [현재 크기 저장] [저장 크기 불러오기] 한 줄 (같은 너비 두 칸), 저장한 크기는 그 아래 한 줄
         size_row = tk.Frame(parent)
@@ -1549,12 +1552,14 @@ class PDFLevelPreviewApp:
                   ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0))
 
         # [저장] = 숨김(원본에 덮어씀), [다른 이름으로 저장] = 보이는 그대로 굳힘. 아래에 차이를 짧게 적어 둔다
-        for i, (text, cmd, note) in enumerate((
-                ("저장 (Ctrl+S)", self.save_pdf, "숨김 저장: 가린 부분·지운 페이지 데이터가 남아 용량 그대로"),
+        for i, (text, cmd, note, bg, active) in enumerate((
+                ("저장 (Ctrl+S)", self.save_pdf, "숨김 저장: 가린 부분·지운 페이지 데이터가 남아 용량 그대로",
+                 SAVE_PDF_BG, SAVE_PDF_ACTIVE),
                 ("다른 이름으로 저장 (Ctrl+Shift+S)", self.save_edited_pdf,
-                 "보이는 그대로 굳힘: 가린 부분·지운 페이지를 지워 용량이 줄고 되돌릴 수 없음"))):
+                 "보이는 그대로 굳힘: 가린 부분·지운 페이지를 지워 용량이 줄고 되돌릴 수 없음",
+                 SAVEAS_BTN_BG, SAVEAS_BTN_ACTIVE))):
             tk.Button(parent, text=text, command=cmd, padx=12, pady=BTN_PADY, cursor="hand2", font=FNT,
-                      bg=SAVEAS_BTN_BG, fg="white", activebackground=SAVEAS_BTN_ACTIVE,
+                      bg=bg, fg="white", activebackground=active,
                       activeforeground="white").pack(fill=tk.X, pady=(28 if i == 0 else 12, 0))
             tk.Label(parent, text=note, font=UI_FONT_SMALL, fg="#666", anchor=tk.W, justify=tk.LEFT,
                      wraplength=440).pack(fill=tk.X, pady=(2, 0))
