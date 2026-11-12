@@ -3404,8 +3404,13 @@ class PDFLevelPreviewApp:
         예전의 "선 편집"(자르기 선·박스를 끌기)은 사용자 요청으로 없앴다. 자르기는 칸 숫자로만 넣는다"""
         self._rotate_drag = None
         self.preview_canvas.focus_set()  # 입력칸에서 포커스를 빼야 ←/→가 회전으로 간다
-        if self._on_page(event):
+        if self._on_page(event) and not self._fit_pending():
             self._start_rotate_drag(event)
+
+    def _fit_pending(self):
+        """보고 있는 페이지에 [저장 크기 불러오기]로 놓은 박스가 [적용] 전인지. 그동안은 미리보기 끌기·←→ 회전을 막는다
+        (불러온 영역을 보는 중에 실수로 돌아가지 않게, 사용자 요청). 회전 칸에 직접 넣는 것은 된다"""
+        return self._pending_fit_uid is not None and self._pending_fit_uid == self._cur_uid()
 
     def _on_drag_move(self, event):
         if self._rotate_drag is not None:
@@ -3418,7 +3423,7 @@ class PDFLevelPreviewApp:
             self._schedule_thumb_redraw()  # 끄는 동안 미뤄 둔 썸네일
 
     def _on_preview_hover(self, event):
-        cursor = "exchange" if self._on_page(event) else ""  # 페이지 위 = 끌어서 회전
+        cursor = "exchange" if self._on_page(event) and not self._fit_pending() else ""  # 페이지 위 = 끌어서 회전
         if self.preview_canvas.cget("cursor") != cursor:
             self.preview_canvas.config(cursor=cursor)
 
@@ -3917,7 +3922,7 @@ class PDFLevelPreviewApp:
 
     def _nudge_angle_key(self, event, delta):
         """입력칸 밖 ←/→·↑/↓ 회전은 가운데(미리보기) 구간에 키보드가 있을 때만"""
-        if self._region_of(event.widget) != "center":
+        if self._region_of(event.widget) != "center" or self._fit_pending():
             return None
         return self._nudge_angle(delta)
 
