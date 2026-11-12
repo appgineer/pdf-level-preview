@@ -156,10 +156,10 @@ PREVIEW_CACHE_MAX = 8
 THUMB_PHOTO_CACHE_PX = 25_000_000
 # 렌더 워커의 원본 해상도 캐시 상한 (현재 + 앞/뒤 페이지). 600dpi A4 RGB 기준 항목당 ~104MB
 BASE_CACHE_MAX = 3
-# 렌더 워커 응답의 상태문구 자리에 이 값이면 "맞춤 보기 첫 그림"(_preview_worker의 quick). 정식 렌더가 곧 뒤따른다
+# 렌더 응답의 상태문구 자리에 이 값이면 "맞춤 보기 먼저 그림"(_quick_worker). 정식 렌더(_preview_worker)가 곧 뒤따른다
 PREVIEW_QUICK = "quick"
-# 첫 그림을 큐에 넣고 원본 렌더 전에 쉬는 시간 (초). 보내기 스레드가 7MB쯤을 넘길 시간
-QUICK_SEND_WAIT = 0.03
+# 썸네일을 스크롤할 때 한 번에 새로 그리는 시간 상한 (초). 넘으면 나머지는 바로 다음 차례에 (그동안 스크롤이 멈추지 않게)
+THUMB_DRAW_BUDGET = 0.02
 # 임시폴더에 남기는 파일 접두사 (시작 시 정리 대상 식별용)
 TEMP_PREFIX = "pdflvl_"
 # 덮어쓰기 저장용 임시 파일 확장자. 저장 도중 강제 종료되면 PDF 폴더에 남는다
@@ -974,6 +974,58 @@ def _big_thumb_worker(k, req_q, res_q):
             res_q.put((k, gen, path, pno, None, None, None, False))
 
 
+def _quick_worker(req_q, res_q):
+    """맞춤 보기 "먼저 그림" 전용 프로세스 (앱 수명 동안 켜 둔다).
+
+    정식 렌더(_preview_worker: 원본 해상도 → 레벨 → LANCZOS, test.pdf 한 장 약 0.35초)는 한 번 시작하면 멈출 수 없어서,
+    다른 페이지(앞뒤 장 미리 렌더 등)를 그리는 중에 새 페이지를 누르면 0.3~0.5초 기다렸다(사용자 보고: 어떤 건 바로,
+    어떤 건 0.5초). 이 프로세스는 늘 비어 있어 새 페이지를 MuPDF가 칸 크기로 바로 그린 것(JPEG을 작게 풀어 약 0.08초)을
+    레벨·회전만 입혀 보낸다. 정식과 평균 밝기 차이 1.2~1.5, 글자 경계 선명도 93%로 눈으로는 같고, 정식이 오면 바뀐다.
+    요청: (pdf_path, src_idx, key), key는 미리보기 키(맞춤만). pdf_path가 None이면 열어 둔 파일을 모두 놓는다(덮어쓰기 전).
+    응답은 미리보기 워커와 같은 줄에 (pdf_path, key, mode, size, bytes, PREVIEW_QUICK).
+    """
+    docs = {}
+    while True:
+        msg = req_q.get()
+        while True:  # 밀린 요청은 버리고 가장 최근 것만 (빨리 넘기면 지나간 페이지는 안 그린다). 파일 놓기는 버리지 않는다
+            if msg is not None and msg[0] is None:
+                for d in docs.values():
+                    d.close()
+                docs.clear()
+            try:
+                msg = req_q.get_nowait()
+            except queue.Empty:
+                break
+        if msg is None:
+            break
+        path, src, key = msg
+        if path is None:
+            continue
+        _, black, white, _, cw, ch, rot, angle = key
+        try:
+            if path not in docs:
+                docs[path] = fitz.open(path)
+            page = docs[path][src]
+            z = _get_native_scale(docs[path], src)  # 원본 해상도 배율 (_render_page와 같다)
+            bw, bh = page.rect.width * z, page.rect.height * z
+            if rot in (90, 270):
+                bw, bh = bh, bw
+            s = z * min(cw / bw, ch / bh)  # 정식 렌더의 맞춤 배율(_level_and_scale)과 같은 크기
+            pix = page.get_pixmap(matrix=fitz.Matrix(s, s))
+            img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+            pix = None
+            fitz.TOOLS.store_shrink(100)  # MuPDF가 기억해 둔 풀린 그림을 비운다 (다시 볼 때는 화면 쪽에 정식이 있다)
+            if (black, white) != (0, 255):
+                img = apply_levels(img, black, white)
+            if rot:
+                img = img.transpose(ROTATE_TRANSPOSE[rot])
+            if angle:
+                img = _rotate_image(img, angle)
+        except Exception:
+            continue  # 정식 렌더가 알린다
+        res_q.put((path, key, img.mode, img.size, img.tobytes(), PREVIEW_QUICK))
+
+
 def _preview_worker(req_q, res_q):
     """미리보기 렌더링 전용 프로세스.
 
@@ -999,43 +1051,10 @@ def _preview_worker(req_q, res_q):
         except Exception as e:
             res_q.put((path, key, None, None, None, f"렌더링 실패: {e}"))
 
-    def quick(path, src, key):
-        """맞춤 보기 첫 그림: 원본 해상도로 그려 줄이는(test.pdf 한 장 약 0.35초) 대신 MuPDF가 칸 크기로 바로 그린다
-        (JPEG을 작게 풀어 약 0.08초). 정식(원본 → 레벨 → LANCZOS)과 평균 밝기 차이 1~1.5라 눈으로는 같고, 정식이 오면 바뀐다.
-        페이지를 누르면 미리보기가 늦게 바뀌어서 (사용자 요청)"""
-        _, black, white, _, cw, ch, rot, angle = key
-        try:
-            if path not in docs:
-                docs[path] = fitz.open(path)
-            page = docs[path][src]
-            z = _get_native_scale(docs[path], src)  # 원본 해상도 배율 (_render_page와 같다)
-            bw, bh = page.rect.width * z, page.rect.height * z
-            if rot in (90, 270):
-                bw, bh = bh, bw
-            s = z * min(cw / bw, ch / bh)  # _level_and_scale의 맞춤 배율과 같은 크기
-            pix = page.get_pixmap(matrix=fitz.Matrix(s, s))
-            img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-            if (black, white) != (0, 255):
-                img = apply_levels(img, black, white)
-            if rot:
-                img = img.transpose(ROTATE_TRANSPOSE[rot])
-            if angle:
-                img = _rotate_image(img, angle)
-        except Exception:
-            return  # 정식 렌더가 알린다
-        res_q.put((path, key, img.mode, img.size, img.tobytes(), PREVIEW_QUICK))
-        # 큐는 보내기 스레드가 따로 보내는데, 바로 원본 렌더(MuPDF는 도는 동안 GIL을 놓지 않는다)에 들어가면 그 스레드가
-        # 못 돌아 정식 렌더와 거의 같이 도착했다(시험: 0.27초). 잠깐 쉬어 먼저 보내게 한다
-        time.sleep(QUICK_SEND_WAIT)
-
     def _render(path, src, key, remember):
         # 레벨·축소·90° 회전까지는 각도와 무관하므로 그대로 재사용한다
         pre = pre_cache.get(key[:7])
         if pre is None:
-            # 기다리는 맞춤 렌더인데 원본 해상도 그림이 아직 없으면(처음 보는 페이지) 칸 크기로 바로 그린 것부터 보낸다.
-            # 원본이 있으면 레벨·축소만이라 금방이다. 이웃 미리 렌더(remember=False)는 기다리는 사람이 없다
-            if remember and key[3] == 0 and (path, src) not in bases:
-                quick(path, src, key)
             pre = _level_and_scale(path, src, key)
             if remember:  # 이웃 미리 렌더가 현재 페이지 것을 밀어내지 않게
                 pre_cache.clear()
@@ -1256,6 +1275,12 @@ class PDFLevelPreviewApp:
             target=_preview_worker, args=(self._render_req_q, self._render_res_q), daemon=True
         )
         self._render_proc.start()
+        # "먼저 그림" 프로세스 (앱 수명 동안 하나, 응답은 위 워커와 같은 줄로). 정식 렌더가 바빠도 새 페이지가 바로 뜨게
+        self._quick_req_q = multiprocessing.Queue()
+        self._quick_proc = multiprocessing.Process(
+            target=_quick_worker, args=(self._quick_req_q, self._render_res_q), daemon=True
+        )
+        self._quick_proc.start()
         threading.Thread(target=self._read_preview_results, daemon=True).start()
         # 큰 썸네일 프로세스 (앱 수명 동안). 프로세스마다 요청 줄을 따로 둬야 '파일 놓기'가 모두에게 간다
         self._big_res_q = multiprocessing.Queue()
@@ -2074,7 +2099,9 @@ class PDFLevelPreviewApp:
 
     def _draw_visible_thumbs(self, margin=True):
         """보이는 줄의 썸네일을 그리고 벗어난 것은 지운다. margin: 위아래로 한 줄씩 더 그려 둔다(휠로 굴려도 빈칸이 안
-        보이게). False면 화면에 보이는 줄만 (_relayout_thumbs가 먼저 보일 것부터)"""
+        보이게). False면 화면에 보이는 줄만 (_relayout_thumbs가 먼저 보일 것부터).
+        화면에 보이는 줄부터 그리고, margin이면 THUMB_DRAW_BUDGET을 넘으면 나머지는 바로 다음 차례에 (썸네일 그림을
+        만드는 일은 화면 스레드에서만 되므로 프로세스로 나눌 수 없다. 한 번에 다 만들면 그동안 스크롤이 멈춘다)"""
         if self._page_count == 0:
             return
 
@@ -2087,11 +2114,12 @@ class PDFLevelPreviewApp:
         if total_h <= 0:
             return
 
+        seen_top, seen_bot = top_frac * total_h, bot_frac * total_h - 1  # 화면에 보이는 곳 (아래 끝에 딱 걸친 줄은 빼고)
         if margin:
-            vis_top = top_frac * total_h - self._thumb_cell_h
-            vis_bot = bot_frac * total_h + self._thumb_cell_h
-        else:  # 아래 끝에 딱 걸친 다음 줄은 안 보인다 (-1)
-            vis_top, vis_bot = top_frac * total_h, bot_frac * total_h - 1
+            vis_top = seen_top - self._thumb_cell_h
+            vis_bot = seen_bot + 1 + self._thumb_cell_h
+        else:
+            vis_top, vis_bot = seen_top, seen_bot
 
         top_row = max(0, int(vis_top // self._thumb_cell_h))
         bot_row = int(vis_bot // self._thumb_cell_h)
@@ -2110,9 +2138,15 @@ class PDFLevelPreviewApp:
             self.thumbnail_photo_refs.pop(idx, None)
             del self._drawn_pages[idx]
 
-        for idx in visible:
-            if idx not in self._drawn_pages:
-                self._draw_thumb_page(idx)
+        first, last = int(seen_top // self._thumb_cell_h), int(seen_bot // self._thumb_cell_h)
+        todo = sorted((idx for idx in visible if idx not in self._drawn_pages),
+                      key=lambda i: (not first <= i // self._thumb_cols <= last, i))  # 화면에 보이는 줄 먼저
+        start = time.perf_counter()
+        for n, idx in enumerate(todo):
+            self._draw_thumb_page(idx)
+            if margin and n + 1 < len(todo) and time.perf_counter() - start > THUMB_DRAW_BUDGET:
+                self._visible_redraw_id = self.root.after(1, self._draw_visible_thumbs)  # 나머지는 바로 다음 차례에
+                break
 
         self._draw_selection()
 
@@ -2437,9 +2471,10 @@ class PDFLevelPreviewApp:
         return "break"
 
     def _schedule_visible_redraw(self):
-        if self._visible_redraw_id is not None:
-            self.root.after_cancel(self._visible_redraw_id)
-        self._visible_redraw_id = self.root.after(16, self._draw_visible_thumbs)
+        # 이미 잡혀 있으면 미루지 않는다: 스크롤바를 끌면 16ms보다 자주 불려서, 매번 미루면 손을 멈출 때까지 하나도 안
+        # 그렸다가 멈추면 한꺼번에 그려 버벅였다
+        if self._visible_redraw_id is None:
+            self._visible_redraw_id = self.root.after(16, self._draw_visible_thumbs)
 
     def _on_thumb_canvas_resize(self, event):
         # <Configure>가 잇달아 여러 번 와도 마지막 크기로 한 번만 다시 배치한다. F2·F3은 칸 크기마다 썸네일 폭이 달라
@@ -3507,6 +3542,12 @@ class PDFLevelPreviewApp:
         req = (path, key)
         if req == self._pending_req:
             return  # 같은 요청이 이미 렌더 중 (화살표 즉시 갱신 + 지연 갱신 중복 등)
+        # 다른 페이지로 넘어왔고 맞춤 보기면 "먼저 그림" 프로세스에도 맡긴다 (정식 렌더가 다른 페이지를 그리는 중이어도 바로).
+        # 같은 페이지의 레벨·기울기·칸 크기만 바뀐 것은 워커에 원본이 있어 금방이라 안 맡긴다. 넓은 보기에서 팝업이 닫혀
+        # 있으면 보이지 않으니 안 맡긴다
+        if (key[3] == 0 and (self._shown_key is None or self._shown_key[0] != key[0])
+                and (self._grid_cols is None or self._page_popup)):
+            self._quick_req_q.put((path, src, key))
         # 렌더는 워커가 한다. 결과는 _on_preview_rendered로 들어온다
         self._pending_req = req
         self._render_req_q.put((path, src, key, True, neighbors))
@@ -4827,6 +4868,7 @@ class PDFLevelPreviewApp:
         self.pdf_doc.close()
         self.pdf_doc = None
         self._render_req_q.put((None, None, None, False, ()))  # 워커도 파일에서 손 떼게
+        self._quick_req_q.put((None, None, None))
         self._big_want.clear()
         self._big_prefetch.clear()
         self._release_big_workers()
@@ -5245,9 +5287,10 @@ class PDFLevelPreviewApp:
         self._stop_thumbnails()
         self._stop_deskew()
         self._stop_bands()
-        for proc in [self._render_proc] + [w[0] for w in self._big_workers]:
+        procs = [self._render_proc, self._quick_proc] + [w[0] for w in self._big_workers]
+        for proc in procs:
             proc.terminate()
-        for proc in [self._render_proc] + [w[0] for w in self._big_workers]:
+        for proc in procs:
             proc.join(timeout=2)
             if proc.is_alive():
                 proc.kill()
