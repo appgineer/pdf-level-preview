@@ -96,9 +96,11 @@ EDITS_KEY = "PDFLevelPreviewEdits"
 # PDF 표준 쪽 번호 표기(/PageLabels)는 다른 PDF 프로그램에도 보여서 쓰지 않는다(사용자 요청: 이 프로그램에서만 보이게)
 PAGENUM_KEY = "PDFLevelPreviewPageNums"
 EDIT_NAMES = {"rot90": "90° 회전", "deskew": "자동 보정", "angle": "각도 조정", "band": "검은 여백", "crop": "자르기"}
-# 툴바 "저장한 편집" 표시마다 바탕색 (흰 글씨, 대비 5~6.5). 검은 여백은 썸네일·목록의 초록(BAND_FLAG_FG)과 같은 색.
+# 툴바 "편집:" 표시마다 바탕색 (흰 글씨, 대비 5~6.5). 검은 여백은 썸네일·목록의 초록(BAND_FLAG_FG)과 같은 색.
 # 노랑·주황은 사용자가 싫어해서 빼고, 서로 가까운 색(청록 등)도 피했다
 EDIT_COLORS = {"rot90": "#1f6fd0", "deskew": "#7b3fb5", "angle": "#795548", "band": "#007a33", "crop": "#c62828"}
+# 편집 종류마다 페이지에 남는 것: 90° 회전 / 기울기 / 자르기. 그게 하나도 안 남았으면 그 종류는 안 보이고 저장 때도 안 적는다
+EDIT_KIND = {"rot90": "rot", "deskew": "angle", "angle": "angle", "band": "crop", "crop": "crop"}
 # 편집 자르기 칸 옆 괄호 "자른 양 합계"가 0이 아닐 때 글씨 색 (툴바 "자르기"와 같은 빨강, 편집 바탕 대비 5.0). 0이면 회색
 CROP_TOTAL_FG = "#c62828"
 # 200dpi: test.pdf 16쪽×3각도 시험에서 150dpi보다 90% 오차 0.07°→0.03°(평균 0.023→0.017°), 시간 약 1.4배 (100: 0.07°, 300: 0.01°·3.6배)
@@ -1153,6 +1155,9 @@ class PDFLevelPreviewApp:
         # 화면은 되돌린 사본을 보고, 저장할 때는 원래 페이지에 같은 되돌리기를 한다 (_restore_saved_pages)
         self._restored_from = {}
         self._ops_done = set()  # 이번에 한 편집 종류 (EDIT_NAMES 키). 저장할 때 문서에 적는다
+        self._file_ops = set()  # 열 때 파일에 적혀 있던 편집 종류 (EDIT_NAMES 키)
+        self._saved_kinds = {}  # 화면 페이지에 저장해 둔 편집이 남았나 (EDIT_KIND 값 → bool, _saved_has 캐시)
+        self._shown_ops = None  # 툴바에 지금 보이는 편집 종류 (바뀔 때만 다시 그린다)
         self._band_procs = []  # 돌고 있는 [검은 여백 자르기] 프로세스 (마찬가지)
         self._band_flagged = set()  # [검은 여백 자르기]로 자른 페이지 uid (썸네일 초록 테두리, 누르면 없어진다)
         # [로마자 표기]: (기준 페이지 uid, 그 페이지의 쪽 번호). 뒤쪽은 1씩 늘고 앞쪽은 1까지 줄고 그 앞은 i, ii …
@@ -1311,8 +1316,8 @@ class PDFLevelPreviewApp:
                        image=self._ind_tk['cb_off'], selectimage=self._ind_tk['cb_on'],
                        indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
                        selectcolor=self._bg_color).pack(side=tk.RIGHT, padx=(0, 12))
-        # 이 파일을 저장할 때 적어 둔 편집 종류 ("저장한 편집: [자동 보정] [검은 여백] [자르기]", 종류마다 색 바탕
-        # EDIT_COLORS, _show_saved_ops). 없으면 빈칸
+        # 편집 종류 ("편집: [자동 보정] [검은 여백] [자르기]", 종류마다 색 바탕 EDIT_COLORS, _refresh_ops):
+        # 이 파일을 저장할 때 적어 둔 것 + 이번에 버튼을 눌러 한 것. 없으면 빈칸
         self.saved_ops_frame = tk.Frame(toolbar)
         self.saved_ops_frame.pack(side=tk.RIGHT, padx=(0, 16))
 
@@ -1808,8 +1813,10 @@ class PDFLevelPreviewApp:
         self._saved_crops = {}
         self._restored_from = {}
         self._ops_done = set()
-        # 이 파일을 저장할 때 적어 둔 편집 종류를 툴바 "격자 보기" 왼쪽에
-        self._show_saved_ops(_edits_record(self.pdf_doc))
+        # 이 파일을 저장할 때 적어 둔 편집 종류를 툴바 "격자 보기" 왼쪽에 (이번에 하는 편집도 누르는 대로 더해진다)
+        self._file_ops = _edits_record(self.pdf_doc)
+        self._saved_kinds = {}
+        self._refresh_ops()
         self._show_skew_flags()
         self._band_flagged.clear()
         self._show_band_flags()
@@ -2655,6 +2662,8 @@ class PDFLevelPreviewApp:
         self.select_page(current)
         self._show_skew_flags()  # 쪽 번호가 바뀌었을 수 있다
         self._show_band_flags()
+        self._saved_kinds = {}  # 지우거나 되돌린 페이지의 저장 편집은 이제 안 남는다 (Ctrl+Z면 다시 남는다)
+        self._refresh_ops()
 
     def _push_undo(self):
         self._undo_stack.append((list(self.slots), self.current_page, set(self._selected)))
@@ -3510,7 +3519,7 @@ class PDFLevelPreviewApp:
             e = self._page_edit(idx)
             self._set_page_edit(idx, rot=(e["rot"] + delta) % 360,
                                 crop=_rotate_margins(e["crop"], delta))
-        self._ops_done.add("rot90")
+        self._mark_op("rot90")
         if self.current_page in pages:  # 입력 전 자르기 값도 같이 돌려 둔다 (되돌릴 때 돌아간 모양으로)
             self._crop_before_edit = _rotate_margins(self._crop_before_edit, delta)
             self._crop_field_base = _rotate_margins(self._crop_field_base, delta)
@@ -3568,6 +3577,7 @@ class PDFLevelPreviewApp:
                 cur_changed |= idx == self.current_page
         except queue.Empty:
             pass
+        self._refresh_ops()  # 각도가 들어간 페이지가 생기면 툴바에 "자동 보정"
         if cur_changed:
             self._sync_edit_panel()
             self.update_preview()
@@ -3712,6 +3722,7 @@ class PDFLevelPreviewApp:
                 flagged = True
         except queue.Empty:
             pass
+        self._refresh_ops()  # 잘린 페이지가 생기면 툴바에 "검은 여백"
         if cur_changed:
             self._sync_edit_panel()
             self._refresh_preview()
@@ -3780,13 +3791,45 @@ class PDFLevelPreviewApp:
         for side, v in zip(CROP_SIDES, total):
             self.crop_total_labels[side].config(text=f"({v:g})", fg=CROP_TOTAL_FG if v else "#666")
 
-    def _show_saved_ops(self, ops):
-        """툴바 "저장한 편집:" 뒤에 편집 종류마다 색 바탕 글씨 (EDIT_COLORS, 순서는 EDIT_NAMES). ops가 비면 빈칸"""
+    def _mark_op(self, op):
+        """편집 종류를 이번에 한 것으로 적고 (저장 때 문서에 적힘) 툴바 표시를 바로 고친다"""
+        self._ops_done.add(op)
+        self._refresh_ops()
+
+    def _saved_has(self, kind):
+        """화면 페이지 중 파일에 저장해 둔 그 종류 편집(EDIT_KIND 값: rot·angle·crop)이 남은 페이지가 있나.
+        페이지를 하나씩 열어 보므로(800쪽 약 70ms) 캐시하고, 페이지 목록이 바뀌면 다시 본다 (_set_slots)"""
+        if kind not in self._saved_kinds:
+            test = {"rot": lambda page: bool(_rot_record(page)),
+                    "angle": lambda page: bool(_deskew_record(page)),
+                    "crop": lambda page: any(v > 0.005 for v in _crop_record(page))}[kind]
+            self._saved_kinds[kind] = any(test(self._src_docs[path][src]) for _, path, src in self.slots)
+        return self._saved_kinds[kind]
+
+    def _refresh_ops(self):
+        """툴바 "편집:" 뒤에 편집 종류마다 색 바탕 글씨 (EDIT_COLORS, 순서는 EDIT_NAMES): 파일에 적혀 있던 것 + 이번에
+        한 것 중, 저장 때처럼 페이지에 실제로 남은 종류만 (90° 왼쪽 → 오른쪽, 각도 0, 초기화·삭제면 빠진다, EDIT_KIND)"""
+        if self.pdf_doc is None:
+            return
+        uids = {uid for uid, _, _ in self.slots}
+        has = {"rot": False, "angle": False, "crop": False}
+        for uid, e in self.page_edits.items():  # 이번 편집 (지운 페이지는 빼고)
+            if uid in uids:
+                has["rot"] |= bool(e["rot"])
+                has["angle"] |= bool(e["angle"])
+                # [적용] 전 자르기는 안 친다 (저장에도 안 들어간다): 그 페이지는 입력 전 값
+                crop = self._crop_before_edit if uid == self._crop_edit_uid else e["crop"]
+                has["crop"] |= any(v > 0.005 for v in crop)
+        ops = {op for op in self._file_ops | self._ops_done
+               if has[EDIT_KIND[op]] or self._saved_has(EDIT_KIND[op])}
+        if ops == self._shown_ops:
+            return
+        self._shown_ops = ops
         for w in self.saved_ops_frame.winfo_children():
             w.destroy()
         if not ops:
             return
-        tk.Label(self.saved_ops_frame, text="저장한 편집:", fg="#555", font=UI_FONT_SMALL).pack(side=tk.LEFT)
+        tk.Label(self.saved_ops_frame, text="편집:", fg="#555", font=UI_FONT_SMALL).pack(side=tk.LEFT)
         for op in EDIT_NAMES:
             if op in ops:
                 tk.Label(self.saved_ops_frame, text=EDIT_NAMES[op], bg=EDIT_COLORS[op], fg="white",
@@ -3802,7 +3845,7 @@ class PDFLevelPreviewApp:
         # 칸은 합계(파일에 이미 들어간 기울기 + 이번 편집). 파일은 이미 돌아가 있으니 차이만 더 돌린다.
         # 썸네일에서 선택한 다른 페이지도 같은 만큼 돌린다 (_set_angle_selected)
         self._set_angle_selected(round(angle - self._saved_angle(self.current_page), 2) + 0.0, self._angle_targets())
-        self._ops_done.add("angle")
+        self._mark_op("angle")
         self._schedule_quick_rotation()  # 바로 임시 화면을 띄우고
         self._on_var_change()  # 정식 미리보기는 레벨 입력처럼 잠깐 뒤에 갱신
 
@@ -3909,7 +3952,7 @@ class PDFLevelPreviewApp:
         steps = int((self.preview_canvas.canvasx(event.x) - sx) / ROTATE_DRAG_PX)
         angle = round((a0 + steps * 0.1 + 180) % 360 - 180, 1) + 0.0  # ±180 안, 0.1° 단위, -0 방지
         self._set_angle_selected(angle, pages)
-        self._ops_done.add("angle")
+        self._mark_op("angle")
         self._syncing_edit = True
         self.angle_var.set(f"{round(self._saved_angle(self.current_page) + angle, 2) + 0:g}")  # 칸은 합계
         self._syncing_edit = False
@@ -4030,7 +4073,7 @@ class PDFLevelPreviewApp:
             self._set_page_edit(idx, crop=_clamp_margins([o + d for o, d in zip(old, delta)], w, h))
         self._crop_before_edit = self._crop_field_base = self._page_edit(self.current_page)["crop"]
         self._pending_fit_uid = None  # [저장 크기 불러오기]의 박스도 이제 확정
-        self._ops_done.add("crop")  # 저장할 때 실제로 잘린 페이지가 있을 때만 적힌다
+        self._mark_op("crop")  # 툴바·저장 기록에는 실제로 잘린 페이지가 있을 때만
         self._sync_edit_panel()  # 확정했으니 칸은 다시 0부터
         self._thumb_dirty.add(self.current_page)  # 확정해서 이제 썸네일에도 잘린 모양으로
         self._schedule_thumb_redraw()
@@ -4095,6 +4138,7 @@ class PDFLevelPreviewApp:
             self._crop_field_base = [0.0, 0.0, 0.0, 0.0]
             self._pending_fit_uid = None
         restored = self._restore_saved_pages(pages)  # 저장해 둔 편집까지 처음 상태로
+        self._refresh_ops()  # 남은 편집이 없는 종류는 툴바에서 뺀다 (되돌린 페이지가 있으면 _set_slots에서도)
         self._sync_edit_panel()
         self._refresh_preview()
         if restored:
@@ -4420,9 +4464,7 @@ class PDFLevelPreviewApp:
                     has["rot"] |= bool(_rot_record(page))
                     has["angle"] |= bool(_deskew_record(page))
                     has["crop"] |= any(v > 0.005 for v in _crop_record(page))
-                valid = {"rot90": has["rot"], "deskew": has["angle"], "angle": has["angle"],
-                         "band": has["crop"], "crop": has["crop"]}
-                ops = {op for op in _edits_record(out) | self._ops_done if valid[op]}
+                ops = {op for op in _edits_record(out) | self._ops_done if has[EDIT_KIND[op]]}
                 out.xref_set_key(out.pdf_catalog(), EDITS_KEY,
                                  fitz.get_pdf_str(",".join(op for op in EDIT_NAMES if op in ops)) if ops else "null")
                 # [로마자 표기] 쪽 번호: 이 프로그램 기록(Catalog의 PAGENUM_KEY)으로만 남긴다. 다른 PDF 프로그램에는
