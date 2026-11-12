@@ -92,6 +92,9 @@ CROP_KEY = "PDFLevelPreviewCrop"
 ROT_KEY = "PDFLevelPreviewRot"
 # 저장할 때 문서(Catalog)에 적어 두는, 이 프로그램으로 한 편집 종류. 다시 열면 툴바 "격자 보기" 왼쪽에 보인다
 EDITS_KEY = "PDFLevelPreviewEdits"
+# [로마자 표기] 쪽 번호를 문서(Catalog)에 "R,F"로 적는다: 맨 앞 R쪽은 i, ii …, 그다음부터 F, F+1 … (_page_num_record).
+# PDF 표준 쪽 번호 표기(/PageLabels)는 다른 PDF 프로그램에도 보여서 쓰지 않는다(사용자 요청: 이 프로그램에서만 보이게)
+PAGENUM_KEY = "PDFLevelPreviewPageNums"
 EDIT_NAMES = {"rot90": "90° 회전", "deskew": "자동 보정", "angle": "각도 조정", "band": "검은 여백", "crop": "자르기"}
 # 200dpi: test.pdf 16쪽×3각도 시험에서 150dpi보다 90% 오차 0.07°→0.03°(평균 0.023→0.017°), 시간 약 1.4배 (100: 0.07°, 300: 0.01°·3.6배)
 DESKEW_DPI = 200
@@ -353,15 +356,51 @@ def _roman(n):
     return out
 
 
-def _roman_count(doc):
-    """[로마자 표기]로 넣은 쪽 번호 표기(0쪽부터 i, ii … + k쪽부터 1, 2 …)면 로마자 쪽 수 k, 아니면 0"""
+def _page_labels(doc):
+    """PDF 표준 쪽 번호 표기(/PageLabels)를 (시작 쪽, 모양, 첫 번호, 앞글자) 목록으로. 망가졌으면 None"""
     try:
-        labels = [(l["startpage"], l["style"], l["firstpagenum"], l["prefix"]) for l in doc.get_page_labels()]
-    except Exception:  # 쪽 번호 표기가 망가진 파일
-        return 0
-    if len(labels) == 2 and labels[0] == (0, "r", 1, "") and labels[1][1:] == ("D", 1, ""):
-        return labels[1][0]
-    return 0
+        return [(l["startpage"], l["style"], l["firstpagenum"], l["prefix"]) for l in doc.get_page_labels()]
+    except Exception:
+        return None
+
+
+def _is_our_labels(doc):
+    """쪽 번호 표기가 없거나, 옛 버전 [로마자 표기]가 넣은 모양(0쪽부터 i … + k쪽부터 1 …, 또는 0쪽부터 1 …)인지.
+    그렇다면 저장할 때 지워도 된다 (다른 프로그램이 넣은 표기는 건드리지 않는다)"""
+    labels = _page_labels(doc)
+    if labels is None:
+        return False
+    return (not labels or labels == [(0, "D", 1, "")]
+            or (len(labels) == 2 and labels[0] == (0, "r", 1, "") and labels[1][1:] == ("D", 1, "")))
+
+
+def _page_num_record(doc):
+    """[로마자 표기] 쪽 번호 = (로마자 쪽 수 R, R쪽부터 이어지는 첫 번호 F) 또는 None (페이지 번호 그대로).
+    이 프로그램 기록(Catalog의 PAGENUM_KEY "R,F")을 먼저 보고, 없으면 옛 버전이 넣은 PDF 쪽 번호 표기를 읽는다"""
+    kind, val = doc.xref_get_key(doc.pdf_catalog(), PAGENUM_KEY)
+    if kind == "string":
+        try:
+            r, f = (int(v) for v in val.split(","))
+            if r >= 0 and f >= 1 and (r, f) != (0, 1):
+                return r, f
+        except ValueError:
+            pass
+    labels = _page_labels(doc)
+    if labels and len(labels) == 2 and labels[0] == (0, "r", 1, "") and labels[1][1:] == ("D", 1, ""):
+        return labels[1][0], 1
+    return None
+
+
+def _write_page_num_record(doc, scheme):
+    """[로마자 표기] 쪽 번호 기록을 Catalog에 적는다 (None이나 (0, 1)이면 지운다)"""
+    keep = scheme and tuple(scheme) != (0, 1)
+    doc.xref_set_key(doc.pdf_catalog(), PAGENUM_KEY, fitz.get_pdf_str(f"{scheme[0]},{scheme[1]}") if keep else "null")
+
+
+def _roman_count(doc):
+    """[로마자 표기]의 로마자 쪽 수 (폴더 기준 종이 쪽 번호용). 없으면 0"""
+    rec = _page_num_record(doc)
+    return rec[0] if rec else 0
 
 
 def _clamp_margins(margins, w, h):
@@ -1109,8 +1148,9 @@ class PDFLevelPreviewApp:
         self._ops_done = set()  # 이번에 한 편집 종류 (EDIT_NAMES 키). 저장할 때 문서에 적는다
         self._band_procs = []  # 돌고 있는 [검은 여백 자르기] 프로세스 (마찬가지)
         self._band_flagged = set()  # [검은 여백 자르기]로 자른 페이지 uid (썸네일 초록 테두리, 누르면 없어진다)
-        # [로마자 표기]로 종이 1쪽이 된 페이지 uid (앞쪽은 i, ii …). None이면 쪽 번호 표기를 건드리지 않는다
-        self._label_start_uid = None
+        # [로마자 표기]: (기준 페이지 uid, 그 페이지의 쪽 번호). 뒤쪽은 1씩 늘고 앞쪽은 1까지 줄고 그 앞은 i, ii …
+        # None이면 페이지 번호 그대로 (_label_scheme)
+        self._label_anchor = None
         self._pdf_path = None
         self._wanted_key = None
         self._pending_req = None  # 워커에 보낸 마지막 렌더 요청 (결과 대기 중)
@@ -1132,7 +1172,9 @@ class PDFLevelPreviewApp:
         self._thumb_dirty = set()   # 편집값이 바뀌어 다시 그릴 썸네일
         self._thumb_redraw_id = None
         self._edits_dirty = False
-        self._rotate_drag = None  # (시작 마우스 x, 시작 기울기 °)
+        self._rotate_drag = None  # (시작 마우스 x, 시작 기울기 °, 같이 돌릴 페이지들)
+        # 전체·홀수·짝수를 선택한 채 기울기를 바꿀 때 물어본 답 (선택, 예/아니요). 같은 선택이면 다시 안 묻는다
+        self._angle_ask = None
         self._rotate_redraw_id = None
         self._rotate_drag_photo = None
         self._syncing_edit = False  # 코드에서 편집 입력칸을 채우는 중 (되먹임 방지)
@@ -1859,9 +1901,15 @@ class PDFLevelPreviewApp:
         self._show_skew_flags()
         self._band_flagged.clear()
         self._show_band_flags()
-        # [로마자 표기]로 넣은 표기면 이어서 보여 주고 저장 때도 다시 넣는다
-        k = _roman_count(self.pdf_doc)
-        self._label_start_uid = self.slots[k][0] if 0 < k < len(self.slots) else None
+        # [로마자 표기] 쪽 번호가 적혀 있으면 이어서 보여 주고 저장 때도 다시 적는다 (옛 버전 표기도 읽는다)
+        rec = _page_num_record(self.pdf_doc)
+        self._label_anchor = None
+        if rec:
+            r, f = rec
+            if r and r < len(self.slots):
+                self._label_anchor = (self.slots[r][0], 1)  # 로마자 다음 쪽이 1
+            elif not r:
+                self._label_anchor = (self.slots[0][0], f)  # 맨 앞 쪽이 f
         self._last_fit_page = None
         self._pending_fit_uid = None
         self._thumb_dirty.clear()
@@ -3455,7 +3503,8 @@ class PDFLevelPreviewApp:
             folder = getattr(self, "_folder_pages", None)
             if folder:
                 before, after, roman = folder
-                roman += self._label_start() or 0
+                scheme = self._label_scheme()
+                roman += scheme[0] if scheme else 0
                 pos = before + cur + 1
                 folder_paper = (_roman(pos) if pos <= roman else pos - roman) if roman else None
                 texts[3:] = ["|", str(pos), f"({folder_paper})" if folder_paper else "",
@@ -3783,13 +3832,16 @@ class PDFLevelPreviewApp:
         return self._saved_crops[key]
 
     def _update_crop_total(self):
-        """자르기 칸마다 옆 괄호에 "자른 양 합계": 원래 가장자리에서 모두 얼마나 잘렸나 (저장한 자르기 + 이번 편집, 화면 기준 mm)"""
+        """자르기 칸마다 옆 괄호에 "자른 양 합계": 원래 가장자리에서 모두 얼마나 잘렸나 (저장한 자르기 + 이번에 확정한 자르기,
+        화면 기준 mm). [적용] 전에 칸에 넣은 값은 안 더한다(바로 더하니 헷갈렸다): 보고 있는 페이지는 입력 전 값
+        _crop_before_edit가 확정값 ([적용]·[검은 여백 자르기]·초기화·90° 회전 때 맞춰 둔다)"""
         if self.pdf_doc is None or not self.slots:  # 파일을 열 때는 _page_count가 아직 이전 값이라 slots로 본다
             total = [0, 0, 0, 0]
         else:
             e = self._page_edit(self.current_page)
             saved = _rotate_margins(self._saved_crop(self.current_page), e["rot"])
-            total = [round(_pt_to_mm(a + b), 1) + 0 for a, b in zip(saved, e["crop"])]
+            applied = self._crop_before_edit if self._crop_edit_uid == self._cur_uid() else e["crop"]
+            total = [round(_pt_to_mm(a + b), 1) + 0 for a, b in zip(saved, applied)]
         for side, v in zip(CROP_SIDES, total):
             self.crop_total_labels[side].config(text=f"({v:g})")
 
@@ -3800,8 +3852,9 @@ class PDFLevelPreviewApp:
             angle = float(self.angle_var.get())
         except ValueError:
             return  # 입력 중인 빈 칸이나 "-"만 친 상태는 무시
-        # 칸은 합계(파일에 이미 들어간 기울기 + 이번 편집). 파일은 이미 돌아가 있으니 차이만 더 돌린다
-        self._set_page_edit(self.current_page, angle=round(angle - self._saved_angle(self.current_page), 2) + 0.0)
+        # 칸은 합계(파일에 이미 들어간 기울기 + 이번 편집). 파일은 이미 돌아가 있으니 차이만 더 돌린다.
+        # 썸네일에서 선택한 다른 페이지도 같은 만큼 돌린다 (_set_angle_selected)
+        self._set_angle_selected(round(angle - self._saved_angle(self.current_page), 2) + 0.0, self._angle_targets())
         self._ops_done.add("angle")
         self._schedule_quick_rotation()  # 바로 임시 화면을 띄우고
         self._on_var_change()  # 정식 미리보기는 레벨 입력처럼 잠깐 뒤에 갱신
@@ -3837,6 +3890,28 @@ class PDFLevelPreviewApp:
         low = -round(_pt_to_mm(self._crop_field_base[CROP_SIDES.index(side)]), 1)  # 합계가 0 밑으로는 안 간다
         self.crop_vars[side].set(f"{max(low, round(mm + delta, 1)) + 0:g}")
         return "break"
+
+    def _angle_targets(self):
+        """기울기(각도 칸·←→·미리보기 끌기)를 같이 바꿀 페이지 = 썸네일에서 선택한 페이지 (예전엔 보고 있는 페이지만).
+        전체·홀수·짝수를 선택한 상태면 다른 편집 버튼처럼 한 번 묻는다. 같은 선택이면 그 답을 다시 쓴다
+        (칸에 글자를 칠 때마다 묻지 않게). 아니요면 보고 있는 페이지만"""
+        pages = self._edit_pages()
+        if len(pages) <= 1 or not self._sel_kind():
+            return pages
+        sel = frozenset(self._selected)
+        if self._angle_ask is None or self._angle_ask[0] != sel:
+            self._angle_ask = (sel, self._confirm_range("기울기 회전을"))
+        return pages if self._angle_ask[1] else [self.current_page]
+
+    def _set_angle_selected(self, angle, pages):
+        """보고 있는 페이지의 이번 기울기를 angle(°)로 하고, pages의 다른 페이지에는 바뀐 만큼을 더한다
+        ([적용]의 자르기처럼 페이지마다 원래 각도는 지킨다. [자동 보정]으로 0.3°, 0.5°인 두 쪽을 +0.2° 하면 0.5°, 0.7°)"""
+        delta = angle - self._page_edit(self.current_page)["angle"]
+        for idx in pages:
+            if idx != self.current_page:
+                a = self._page_edit(idx)["angle"] + delta
+                self._set_page_edit(idx, angle=round((a + 180) % 360 - 180, 2) + 0.0)
+        self._set_page_edit(self.current_page, angle=angle)
 
     def _nudge_angle(self, delta):
         try:
@@ -3882,17 +3957,18 @@ class PDFLevelPreviewApp:
         if self.current_img is None or self._shown_key is None or self._shown_key[0] != self._cur_uid():
             return  # 렌더 대기 중
         x = self.preview_canvas.canvasx(event.x)
-        self._rotate_drag = (x, self._page_edit(self.current_page)["angle"])
+        pages = self._angle_targets()  # 전체·홀수·짝수 선택이면 여기서 한 번 묻는다
+        self._rotate_drag = (x, self._page_edit(self.current_page)["angle"], pages)
         # 끄는 도중 정식 렌더가 끼어들지 않게 밀린 갱신은 취소한다 (놓을 때 다시 요청)
         if hasattr(self, "_var_after_id"):
             self.root.after_cancel(self._var_after_id)
 
     def _rotate_drag_move(self, event):
         """마우스를 좌우로 끌면 0.1°씩 바뀐다 (오른쪽으로 끌면 오른쪽/시계방향)"""
-        sx, a0 = self._rotate_drag
+        sx, a0, pages = self._rotate_drag
         steps = int((self.preview_canvas.canvasx(event.x) - sx) / ROTATE_DRAG_PX)
         angle = round((a0 + steps * 0.1 + 180) % 360 - 180, 1) + 0.0  # ±180 안, 0.1° 단위, -0 방지
-        self._set_page_edit(self.current_page, angle=angle)
+        self._set_angle_selected(angle, pages)
         self._ops_done.add("angle")
         self._syncing_edit = True
         self.angle_var.set(f"{round(self._saved_angle(self.current_page) + angle, 2) + 0:g}")  # 칸은 합계
@@ -4116,8 +4192,8 @@ class PDFLevelPreviewApp:
             self.page_edits.pop(old_uid, None)
             self._skew_flagged.discard(old_uid)  # 표시도 저장한 편집과 함께 없앤다
             self._band_flagged.discard(old_uid)
-            if self._label_start_uid == old_uid:
-                self._label_start_uid = uid
+            if self._label_anchor and self._label_anchor[0] == old_uid:
+                self._label_anchor = (uid, self._label_anchor[1])
         self._push_undo()
         self._set_slots(slots, self.current_page, self._selected)
         self._render_thumbs([(path, k) for k in range(len(need))])
@@ -4208,34 +4284,94 @@ class PDFLevelPreviewApp:
             user32.keybd_event(vk, 0, ext | 2, 0)
 
     def set_roman_labels(self):
-        """보고 있는 페이지를 종이 1쪽으로: 앞쪽은 i, ii …, 이 페이지부터 1, 2 … (PDF 페이지 레이블, 저장할 때 넣는다).
+        """[로마자 표기]: 보고 있는 페이지의 쪽 번호를 창에서 받는다 (예: 21). 뒤쪽은 22, 23 …, 앞쪽은 20, 19 … 1까지,
+        그 앞은 맨 앞부터 로마자 i, ii … (예전엔 보고 있는 페이지가 무조건 1이었다).
 
-        첫 페이지에서 누르면 로마자 없이 1쪽부터 그대로가 된다 (표기를 없앨 때). 페이지 uid로 기억해서
-        앞에 페이지를 끼우거나 지워도 이 페이지가 1쪽이다.
+        이 프로그램에서만 보인다: 저장할 때 PDF 표준 쪽 번호 표기(/PageLabels)가 아니라 Catalog의 PAGENUM_KEY에 적는다.
+        페이지 uid로 기억해서 앞에 페이지를 끼우거나 지워도 이 페이지가 그 번호다. 1쪽에서 1을 넣으면 표기 없음.
         """
         if self.pdf_doc is None:
             return
-        self._label_start_uid = self.slots[self.current_page][0]
+        cur = self.current_page
+        paper = self._paper_number(cur)
+        dlg = tk.Toplevel(self.root)
+        dlg.title("쪽 번호")
+        dlg.transient(self.root)
+        dlg.resizable(False, False)
+        frm = tk.Frame(dlg, padx=20, pady=16)
+        frm.pack()
+        tk.Label(frm, text=f"p.{cur + 1}의 쪽 번호", font=UI_FONT).grid(row=0, column=0, sticky="w")
+        var = tk.StringVar(value=paper if paper and paper.isdigit() else str(cur + 1))
+        entry = tk.Entry(frm, textvariable=var, width=6, font=UI_FONT)
+        entry.grid(row=0, column=1, sticky="w", padx=(12, 0))
+        tk.Label(frm, text="뒤쪽은 1씩 늘고, 앞쪽은 1까지 줄어든 뒤 그 앞은 로마자(i, ii …)입니다.\n"
+                           "이 프로그램에서만 보입니다 (다른 PDF 프로그램에는 안 보임).",
+                 font=UI_FONT_SMALL, fg="#666", justify=tk.LEFT).grid(row=1, column=0, columnspan=2, sticky="w",
+                                                                     pady=(8, 12))
+        btns = tk.Frame(frm)
+        btns.grid(row=2, column=0, columnspan=2, sticky="e")
+
+        def ok(_=None):
+            try:
+                num = int(var.get().strip())
+            except ValueError:
+                num = 0
+            if num < 1:
+                messagebox.showwarning("쪽 번호", "1 이상의 숫자를 넣으세요.", parent=dlg)
+                return "break"
+            dlg.destroy()
+            self._set_page_numbers(cur, num)
+            return "break"
+
+        tk.Button(btns, text="확인", command=ok, font=UI_FONT, width=6, cursor="hand2", bg=SAVE_BTN_BG, fg="white",
+                  activebackground=SAVE_BTN_ACTIVE, activeforeground="white").pack(side=tk.LEFT, padx=(0, 8))
+        tk.Button(btns, text="취소", command=dlg.destroy, font=UI_FONT, width=6, cursor="hand2").pack(side=tk.LEFT)
+        entry.bind("<Return>", ok)
+        dlg.bind("<Escape>", lambda e: dlg.destroy())
+        dlg.update_idletasks()  # 창 가운데
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - dlg.winfo_reqwidth()) // 2
+        y = self.root.winfo_rooty() + (self.root.winfo_height() - dlg.winfo_reqheight()) // 2
+        dlg.geometry(f"+{x}+{y}")
+        entry.focus_set()
+        entry.select_range(0, tk.END)
+        dlg.grab_set()
+
+    def _set_page_numbers(self, idx, num):
+        """화면 위치 idx 페이지의 쪽 번호를 num으로 ([로마자 표기] 창의 [확인])"""
+        self._label_anchor = (self.slots[idx][0], num)
+        scheme = self._label_scheme()
+        if scheme == (0, 1):
+            self._label_anchor = None  # 페이지 번호와 같다 = 표기 없음
         self._edits_dirty = True
         self._update_page_label()  # 툴바 진한 초록 종이 쪽 번호
         self._thumb_dirty.update(self._drawn_pages)  # 썸네일 아래 쪽 번호
         self._schedule_thumb_redraw()
-        start = self.current_page
-        if start:
-            self._show_toast(f"쪽 번호 표기: p.1~{start} → i~{_roman(start)}, p.{start + 1} → 1 (저장할 때 들어갑니다)")
+        if self._label_anchor is None:
+            self._show_toast("쪽 번호 표기를 없앴습니다. 페이지 번호 그대로입니다 (저장할 때 들어갑니다)")
+        elif scheme[0]:
+            self._show_toast(f"p.{idx + 1} → {num}, 앞쪽 p.1~{scheme[0]}는 i~{_roman(scheme[0])} (저장할 때 들어갑니다)")
         else:
-            self._show_toast("로마자 표기를 없앴습니다. 1쪽부터 그대로입니다 (저장할 때 들어갑니다)")
+            self._show_toast(f"p.{idx + 1} → {num}, p.1 → {scheme[1]} (저장할 때 들어갑니다)")
 
-    def _label_start(self):
-        """[로마자 표기]로 종이 1쪽이 된 페이지의 화면 위치. 안 정했거나 그 페이지를 지웠으면 None"""
-        return None if self._label_start_uid is None else self._uid_index(self._label_start_uid)
+    def _label_scheme(self):
+        """[로마자 표기] 쪽 번호 = (맨 앞 로마자 쪽 수 R, 그다음 쪽의 번호 F). 안 정했거나 기준 페이지를 지웠으면 None.
+        기준 페이지(uid, 번호)에서 거꾸로 세어 맨 앞 페이지 번호가 1보다 작아지면 그만큼이 로마자다"""
+        if self._label_anchor is None:
+            return None
+        uid, num = self._label_anchor
+        idx = self._uid_index(uid)
+        if idx is None:
+            return None
+        first = num - idx  # 화면 맨 앞 페이지의 번호
+        return (1 - first, 1) if first < 1 else (0, first)
 
     def _paper_number(self, idx):
-        """[로마자 표기]로 정한 화면 위치 idx의 종이 쪽 번호 ("iii", "1" …). 표기가 없으면 None"""
-        start = self._label_start()
-        if not start:  # 안 정했거나 첫 페이지가 1쪽 = 페이지 번호와 같다
+        """[로마자 표기]로 정한 화면 위치 idx의 종이 쪽 번호 ("iii", "21" …). 표기가 없으면 None"""
+        scheme = self._label_scheme()
+        if scheme is None or scheme == (0, 1):  # 페이지 번호와 같다
             return None
-        return _roman(idx + 1) if idx < start else str(idx - start + 1)
+        r, f = scheme
+        return _roman(idx + 1) if idx < r else str(f + idx - r)
 
     def save_pdf(self):
         """[저장] (Ctrl+S): 원본에 덮어쓴다. 자르기·기울기는 숨김(CropBox·좌표 변환)이라 가려진 그림 데이터가 남고,
@@ -4310,14 +4446,11 @@ class PDFLevelPreviewApp:
                 ops = {op for op in _edits_record(out) | self._ops_done if valid[op]}
                 out.xref_set_key(out.pdf_catalog(), EDITS_KEY,
                                  fitz.get_pdf_str(",".join(op for op in EDIT_NAMES if op in ops)) if ops else "null")
-                # [로마자 표기]: 앞쪽 i, ii …, start쪽부터 1, 2 … (첫 페이지면 1쪽부터 그대로).
-                # 순서를 바꾼 저장(select)은 파일에 있던 표기를 지우므로 마지막에 넣는다
-                start = self._label_start()
-                if start is not None:
-                    labels = [{"startpage": start, "prefix": "", "style": "D", "firstpagenum": 1}]
-                    if start:
-                        labels.insert(0, {"startpage": 0, "prefix": "", "style": "r", "firstpagenum": 1})
-                    out.set_page_labels(labels)
+                # [로마자 표기] 쪽 번호: 이 프로그램 기록(Catalog의 PAGENUM_KEY)으로만 남긴다. 다른 PDF 프로그램에는
+                # 안 보이게 PDF 표준 쪽 번호 표기(/PageLabels)는 쓰지 않고, 옛 버전이 넣은 표기는 지운다
+                if _is_our_labels(out):
+                    out.set_page_labels([])
+                _write_page_num_record(out, self._label_scheme())
                 opts = {}
                 if bake:
                     def progress(n, total):
@@ -5171,11 +5304,19 @@ def _insert_cover_into_file(target, img_bytes, at_end):
     doc = fitz.open(target)
     try:
         labels = doc.get_page_labels()
+        ours = _is_our_labels(doc)  # 표기 없음 / 옛 [로마자 표기] 표기
+        scheme = _page_num_record(doc)
         r = doc[-1 if at_end else 0].rect
         _add_cover_page(doc, -1 if at_end else 0, r.width, r.height, img_bytes)
-        # MuPDF는 맨 앞에 끼우면 표지에 쪽 번호 "1"을 따로 붙인다 (표기가 없던 파일도 "1, 1, 2 …",
-        # [로마자 표기] 파일은 "1, i, ii …"). 원래 표기를 한 칸씩 밀어 표지를 첫 구간에 넣는다 (없던 파일은 없게)
-        if not at_end:
+        if ours:
+            # MuPDF는 맨 앞에 끼우면 표기가 없던 파일에도 표지에 쪽 번호 "1"을 붙인다. 쪽 번호는 이 프로그램 기록으로만
+            # 남기므로(PAGENUM_KEY, 다른 PDF 프로그램에 안 보이게) PDF 표준 표기는 지운다 (옛 버전 표기도 여기서 옮긴다)
+            doc.set_page_labels([])
+            if scheme and not at_end:  # 맨 앞 표지: 로마자가 있으면 표지가 i, 없으면 표지가 첫 번호 - 1
+                scheme = (scheme[0] + 1, scheme[1]) if scheme[0] else (0, scheme[1] - 1)
+            _write_page_num_record(doc, scheme)
+        elif not at_end:
+            # 다른 프로그램이 넣은 표기: 원래 표기를 한 칸씩 밀어 표지를 첫 구간에 넣는다
             for label in labels[1:]:
                 label["startpage"] += 1
             doc.set_page_labels(labels)
