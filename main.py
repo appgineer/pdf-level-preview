@@ -96,6 +96,11 @@ EDITS_KEY = "PDFLevelPreviewEdits"
 # PDF 표준 쪽 번호 표기(/PageLabels)는 다른 PDF 프로그램에도 보여서 쓰지 않는다(사용자 요청: 이 프로그램에서만 보이게)
 PAGENUM_KEY = "PDFLevelPreviewPageNums"
 EDIT_NAMES = {"rot90": "90° 회전", "deskew": "자동 보정", "angle": "각도 조정", "band": "검은 여백", "crop": "자르기"}
+# 툴바 "저장한 편집" 표시마다 바탕색 (흰 글씨, 대비 5~6.5). 검은 여백은 썸네일·목록의 초록(BAND_FLAG_FG)과 같은 색.
+# 노랑·주황은 사용자가 싫어해서 빼고, 서로 가까운 색(청록 등)도 피했다
+EDIT_COLORS = {"rot90": "#1f6fd0", "deskew": "#7b3fb5", "angle": "#795548", "band": "#007a33", "crop": "#c62828"}
+# 편집 자르기 칸 옆 괄호 "자른 양 합계"가 0이 아닐 때 글씨 색 (툴바 "자르기"와 같은 빨강, 편집 바탕 대비 5.0). 0이면 회색
+CROP_TOTAL_FG = "#c62828"
 # 200dpi: test.pdf 16쪽×3각도 시험에서 150dpi보다 90% 오차 0.07°→0.03°(평균 0.023→0.017°), 시간 약 1.4배 (100: 0.07°, 300: 0.01°·3.6배)
 DESKEW_DPI = 200
 DESKEW_SEARCH = 20
@@ -1306,9 +1311,10 @@ class PDFLevelPreviewApp:
                        image=self._ind_tk['cb_off'], selectimage=self._ind_tk['cb_on'],
                        indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
                        selectcolor=self._bg_color).pack(side=tk.RIGHT, padx=(0, 12))
-        # 이 파일을 저장할 때 적어 둔 편집 종류 ("저장한 편집: 자동 보정 · 검은 여백 · 자르기"). 없으면 빈칸
-        self.saved_ops_label = tk.Label(toolbar, text="", fg="#555", font=UI_FONT_SMALL)
-        self.saved_ops_label.pack(side=tk.RIGHT, padx=(0, 16))
+        # 이 파일을 저장할 때 적어 둔 편집 종류 ("저장한 편집: [자동 보정] [검은 여백] [자르기]", 종류마다 색 바탕
+        # EDIT_COLORS, _show_saved_ops). 없으면 빈칸
+        self.saved_ops_frame = tk.Frame(toolbar)
+        self.saved_ops_frame.pack(side=tk.RIGHT, padx=(0, 16))
 
         # Resizable split
         paned = tk.PanedWindow(
@@ -1693,7 +1699,8 @@ class PDFLevelPreviewApp:
             var = tk.StringVar(value="0")
             entry = tk.Entry(grid, textvariable=var, width=4, font=FNT)
             entry.grid(row=row, column=col * 3 + 1, pady=2)
-            total = tk.Label(grid, text="(0)", anchor=tk.W, font=UI_FONT_SMALL, fg="#666", padx=0)
+            # 기본 글씨 크기, 0이 아니면 빨강 (작은 회색 글씨는 잘 안 보였다, _update_crop_total)
+            total = tk.Label(grid, text="(0)", anchor=tk.W, font=FNT, fg="#666", padx=0)
             total.grid(row=row, column=col * 3 + 2, sticky=tk.W, padx=(2, 0), pady=2)
             self.crop_total_labels[side] = total
             var.trace_add("write", self._on_crop_var_change)
@@ -1705,7 +1712,7 @@ class PDFLevelPreviewApp:
             self._edit_entries.append(entry)
             self._crop_entries.append(entry)
         # 괄호 칸은 "(0.0)" 폭이 최소: 숫자가 바뀌어도 줄이 안 움직이고 "아래"·"우"와 붙는다 (10mm 넘으면 그 칸만 넓어진다)
-        num_w = tkfont.Font(font=UI_FONT_SMALL).measure("(0.0)") + 2
+        num_w = tkfont.Font(font=FNT).measure("(0.0)") + 2
         grid.columnconfigure(2, minsize=num_w)
         grid.columnconfigure(5, minsize=num_w)
         # 칸 오른쪽에 두 줄 두 칸: [0.5mm ◯] [1mm ◯] / [1.5mm ◯] [2mm ◯] (글씨 다음 동그라미, 칸과 조금 띄운다)
@@ -1802,9 +1809,7 @@ class PDFLevelPreviewApp:
         self._restored_from = {}
         self._ops_done = set()
         # 이 파일을 저장할 때 적어 둔 편집 종류를 툴바 "격자 보기" 왼쪽에
-        ops = _edits_record(self.pdf_doc)
-        self.saved_ops_label.config(
-            text="저장한 편집: " + " · ".join(EDIT_NAMES[op] for op in EDIT_NAMES if op in ops) if ops else "")
+        self._show_saved_ops(_edits_record(self.pdf_doc))
         self._show_skew_flags()
         self._band_flagged.clear()
         self._show_band_flags()
@@ -3773,7 +3778,19 @@ class PDFLevelPreviewApp:
             applied = self._crop_before_edit if self._crop_edit_uid == self._cur_uid() else e["crop"]
             total = [round(_pt_to_mm(a + b), 1) + 0 for a, b in zip(saved, applied)]
         for side, v in zip(CROP_SIDES, total):
-            self.crop_total_labels[side].config(text=f"({v:g})")
+            self.crop_total_labels[side].config(text=f"({v:g})", fg=CROP_TOTAL_FG if v else "#666")
+
+    def _show_saved_ops(self, ops):
+        """툴바 "저장한 편집:" 뒤에 편집 종류마다 색 바탕 글씨 (EDIT_COLORS, 순서는 EDIT_NAMES). ops가 비면 빈칸"""
+        for w in self.saved_ops_frame.winfo_children():
+            w.destroy()
+        if not ops:
+            return
+        tk.Label(self.saved_ops_frame, text="저장한 편집:", fg="#555", font=UI_FONT_SMALL).pack(side=tk.LEFT)
+        for op in EDIT_NAMES:
+            if op in ops:
+                tk.Label(self.saved_ops_frame, text=EDIT_NAMES[op], bg=EDIT_COLORS[op], fg="white",
+                         font=UI_FONT_SMALL, padx=6).pack(side=tk.LEFT, padx=(6, 0))
 
     def _on_angle_var_change(self, *_):
         if self._syncing_edit or self.pdf_doc is None:
