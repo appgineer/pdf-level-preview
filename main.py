@@ -145,7 +145,7 @@ SAVE_BTN_BG, SAVE_BTN_ACTIVE = "#1f6fd0", "#17559f"      # 확정 버튼 (파랑
 TOOLTIP_DELAY_MS = 500
 # 설정 파일 [고급] 레벨 칸 옆 빠른 값 (누르면 그 칸에 바로, _level_quick)
 LEVEL_BLACK_QUICK = ("0", "10", "20", "30")
-LEVEL_WHITE_QUICK = ("190", "195", "200")
+LEVEL_WHITE_QUICK = ("190", "195", "200", "220")
 BTN_PADY = 4  # 버튼·선택창 높이를 맞추는 세로 여백
 # 내장 이미지가 없는 페이지(벡터/텍스트)의 렌더 스케일. 1.0 = 72 DPI
 BASE_SCALE = 8  # 576 DPI
@@ -156,6 +156,10 @@ PREVIEW_CACHE_MAX = 8
 THUMB_PHOTO_CACHE_PX = 25_000_000
 # 렌더 워커의 원본 해상도 캐시 상한 (현재 + 앞/뒤 페이지). 600dpi A4 RGB 기준 항목당 ~104MB
 BASE_CACHE_MAX = 3
+# 렌더 워커 응답의 상태문구 자리에 이 값이면 "맞춤 보기 첫 그림"(_preview_worker의 quick). 정식 렌더가 곧 뒤따른다
+PREVIEW_QUICK = "quick"
+# 첫 그림을 큐에 넣고 원본 렌더 전에 쉬는 시간 (초). 보내기 스레드가 7MB쯤을 넘길 시간
+QUICK_SEND_WAIT = 0.03
 # 임시폴더에 남기는 파일 접두사 (시작 시 정리 대상 식별용)
 TEMP_PREFIX = "pdflvl_"
 # 덮어쓰기 저장용 임시 파일 확장자. 저장 도중 강제 종료되면 PDF 폴더에 남는다
@@ -995,10 +999,43 @@ def _preview_worker(req_q, res_q):
         except Exception as e:
             res_q.put((path, key, None, None, None, f"렌더링 실패: {e}"))
 
+    def quick(path, src, key):
+        """맞춤 보기 첫 그림: 원본 해상도로 그려 줄이는(test.pdf 한 장 약 0.35초) 대신 MuPDF가 칸 크기로 바로 그린다
+        (JPEG을 작게 풀어 약 0.08초). 정식(원본 → 레벨 → LANCZOS)과 평균 밝기 차이 1~1.5라 눈으로는 같고, 정식이 오면 바뀐다.
+        페이지를 누르면 미리보기가 늦게 바뀌어서 (사용자 요청)"""
+        _, black, white, _, cw, ch, rot, angle = key
+        try:
+            if path not in docs:
+                docs[path] = fitz.open(path)
+            page = docs[path][src]
+            z = _get_native_scale(docs[path], src)  # 원본 해상도 배율 (_render_page와 같다)
+            bw, bh = page.rect.width * z, page.rect.height * z
+            if rot in (90, 270):
+                bw, bh = bh, bw
+            s = z * min(cw / bw, ch / bh)  # _level_and_scale의 맞춤 배율과 같은 크기
+            pix = page.get_pixmap(matrix=fitz.Matrix(s, s))
+            img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+            if (black, white) != (0, 255):
+                img = apply_levels(img, black, white)
+            if rot:
+                img = img.transpose(ROTATE_TRANSPOSE[rot])
+            if angle:
+                img = _rotate_image(img, angle)
+        except Exception:
+            return  # 정식 렌더가 알린다
+        res_q.put((path, key, img.mode, img.size, img.tobytes(), PREVIEW_QUICK))
+        # 큐는 보내기 스레드가 따로 보내는데, 바로 원본 렌더(MuPDF는 도는 동안 GIL을 놓지 않는다)에 들어가면 그 스레드가
+        # 못 돌아 정식 렌더와 거의 같이 도착했다(시험: 0.27초). 잠깐 쉬어 먼저 보내게 한다
+        time.sleep(QUICK_SEND_WAIT)
+
     def _render(path, src, key, remember):
         # 레벨·축소·90° 회전까지는 각도와 무관하므로 그대로 재사용한다
         pre = pre_cache.get(key[:7])
         if pre is None:
+            # 기다리는 맞춤 렌더인데 원본 해상도 그림이 아직 없으면(처음 보는 페이지) 칸 크기로 바로 그린 것부터 보낸다.
+            # 원본이 있으면 레벨·축소만이라 금방이다. 이웃 미리 렌더(remember=False)는 기다리는 사람이 없다
+            if remember and key[3] == 0 and (path, src) not in bases:
+                quick(path, src, key)
             pre = _level_and_scale(path, src, key)
             if remember:  # 이웃 미리 렌더가 현재 페이지 것을 밀어내지 않게
                 pre_cache.clear()
@@ -1247,7 +1284,8 @@ class PDFLevelPreviewApp:
         self.crop_quick_var = tk.StringVar(value="0")
         self._crop_quick_prev = "0"  # 바로 전 값 (켜진 라디오를 다시 눌렀는지 알려고)
         self._crop_quick_setting = False  # 체크로 네 칸을 채우는 중 (칸이 하나씩 바뀌는 사이에 체크를 끄지 않게)
-        self.grid_var = tk.BooleanVar(value=False)  # 격자 보기: 처음에는 꺼 둔다 (체크 또는 F4로 켠다)
+        self.grid_var = tk.BooleanVar(value=False)  # 격자 보기: 처음에는 꺼 둔다 (체크 또는 F5로 켠다)
+        self.popup_var = tk.BooleanVar(value=False)  # 팝업 보기: F2·F3 페이지 팝업이 열려 있는지 (체크 또는 F4)
 
         self._section_heads = []  # (머리말 라벨, 색) — 구간 색칠 때 제 색을 지킨다
         self._build_ui()
@@ -1323,8 +1361,15 @@ class PDFLevelPreviewApp:
         view_menu.config(font=UI_FONT, cursor="hand2")
         view_menu["menu"].config(font=UI_FONT)
         view_menu.pack(side=tk.RIGHT, padx=(2, TOOLBAR_BTN_GAP))
-        # 격자 보기: 미리보기 페이지 위에 가로세로 격자만 그린다 (회전·자르기와 무관). 보기 선택 목록 바로 왼쪽
-        tk.Checkbutton(toolbar, text="격자 보기 (F4)", variable=self.grid_var,
+        # 팝업 보기: F2·F3에서 보고 있는(선택한) 페이지를 크게 띄운다 (_toggle_popup, 썸네일 [열기]와 같은 팝업).
+        # 보기 선택 목록 바로 왼쪽, 기본 보기에서는 흐림 (set_view)
+        self._popup_check = tk.Checkbutton(
+            toolbar, text="팝업 보기 (F4)", variable=self.popup_var, command=self._toggle_popup, state=tk.DISABLED,
+            cursor="hand2", font=UI_FONT, image=self._ind_tk['cb_off'], selectimage=self._ind_tk['cb_on'],
+            indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT, selectcolor=self._bg_color)
+        self._popup_check.pack(side=tk.RIGHT, padx=(0, 12))
+        # 격자 보기: 미리보기 페이지 위에 가로세로 격자만 그린다 (회전·자르기와 무관). 팝업 보기 왼쪽
+        tk.Checkbutton(toolbar, text="격자 보기 (F5)", variable=self.grid_var,
                        command=self._on_grid_toggle, cursor="hand2", font=UI_FONT,
                        image=self._ind_tk['cb_off'], selectimage=self._ind_tk['cb_on'],
                        indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
@@ -1582,8 +1627,10 @@ class PDFLevelPreviewApp:
         self.root.bind("<Right>", lambda e: self._nudge_angle_key(e, +0.1))
         self.root.bind("<Down>",  lambda e: self._nudge_angle_key(e, -0.1))
         self.root.bind("<Up>",    lambda e: self._nudge_angle_key(e, +0.1))
-        # F4: 어느 구간에 있든(입력칸 안에서도) "격자 보기"를 켜고 끈다 (예전 F1)
-        self.root.bind("<F4>", lambda e: (self.grid_var.set(not self.grid_var.get()), self._on_grid_toggle()))
+        # F5: 어느 구간에 있든(입력칸 안에서도) "격자 보기"를 켜고 끈다 (예전 F1 → F4 → F5)
+        self.root.bind("<F5>", lambda e: (self.grid_var.set(not self.grid_var.get()), self._on_grid_toggle()))
+        # F4: F2·F3에서 보고 있는(선택한) 페이지 팝업을 열고 닫는다 ("팝업 보기" 체크와 같다)
+        self.root.bind("<F4>", lambda e: (self.popup_var.set(not self._page_popup), self._toggle_popup()))
         # F1: 기본 보기 (왼쪽 썸네일 + 가운데 미리보기 + 오른쪽). F2: [10개씩 보기], F3: [5개씩 크게 보기]
         # (어느 구간에서든. F2·F3은 그 보기에서 다시 누르면 기본 보기). Esc: F2·F3에서 띄운 페이지 팝업 닫기
         self.root.bind("<F1>", lambda e: self.set_view(None))
@@ -1611,9 +1658,15 @@ class PDFLevelPreviewApp:
 
         # 처음 폭은 SETTINGS_W. 글씨·버튼이 그보다 넓게 필요하면(글꼴·화면 배율에 따라 다르다) 잘리지 않게 그만큼 넓힌다.
         # 스크롤바 자리와 테두리까지 넣는다. 사용자가 경계선을 끌어 줄이는 것은 그대로 된다(최소 400)
+        # 스캔타입 일반이면 숨겨 둔 레벨 칸도 잠깐 펼쳐 같이 잰다 (고급으로 바꿨을 때 흰색 라디오 190~220이 안 잘리게)
+        hidden = not self.level_frame.winfo_manager()
+        if hidden:
+            self.level_frame.pack(fill=tk.X, after=self._scan_sep)
         inner.update_idletasks()
         border = 2 * (parent.winfo_pixels(parent["bd"]) + parent.winfo_pixels(parent["highlightthickness"]))
         need = inner.winfo_reqwidth() + vscroll.winfo_reqwidth() + border
+        if hidden:
+            self.level_frame.pack_forget()
         if need > SETTINGS_W:
             self._paned.paneconfigure(parent, width=need)
 
@@ -1625,7 +1678,7 @@ class PDFLevelPreviewApp:
             self._save_menu.grab_release()
 
     def _level_quick(self, row, var, values):
-        """레벨 칸 옆 빠른 값 라디오 (검은색 0·10·20·30, 흰색 190·195·200): 누르면 그 칸에 바로 넣는다.
+        """레벨 칸 옆 빠른 값 라디오 (검은색 0·10·20·30, 흰색 190·195·200·220): 누르면 그 칸에 바로 넣는다.
         칸 값이 그중 하나면 그 동그라미가 켜진다 (직접 고쳐도 따라간다)"""
         pick = tk.StringVar(value="none")  # ""은 Tk 라디오의 중간 상태라 안 쓴다
 
@@ -2465,6 +2518,7 @@ class PDFLevelPreviewApp:
             self._relayout_thumbs(lambda: self.current_page // self._thumb_cols
                                   // self._thumb_page_rows * self._thumb_page_rows)
         self._view_var.set(next(name for name, c in VIEW_MODES if c == cols))
+        self._popup_check.config(state=tk.DISABLED if cols is None else tk.NORMAL)  # 팝업은 F2·F3에서만
 
     def _toggle_view(self, cols):
         """F2·F3: 그 보기면 기본 보기로, 아니면 그 보기로"""
@@ -2524,7 +2578,7 @@ class PDFLevelPreviewApp:
         cx, cy = self.thumb_canvas.canvasx(event.x), self.thumb_canvas.canvasy(event.y)
         return x0 <= cx <= x1 and y0 <= cy <= y1
 
-    def _open_page_popup(self, idx):
+    def _open_page_popup(self, idx, only=True):
         """F2·F3: 그 페이지를 썸네일 위에 크게 띄운다 ([열기]). 캔버스 오른쪽 위에 [닫기 (Esc)].
 
         가운데 미리보기 칸을 그대로 옮겨 올리므로(썸네일 칸 안 place, 같은 창) 끌어서 기울기 회전·확대·Enter [적용]·
@@ -2548,9 +2602,10 @@ class PDFLevelPreviewApp:
             self._popup_close.lift()
             # 칸 크기를 먼저 정해야 아래 페이지 선택이 팝업 크기로 렌더를 맡긴다 (썸네일 칸이 작아 줄인 때만 다르다)
             self.root.update_idletasks()
-        # 그 페이지만 고른다 (그냥 클릭처럼)
-        self._selected = {idx}
-        self._sel_anchor = idx
+        self.popup_var.set(True)
+        if only:  # [열기]: 그 페이지만 고른다 (그냥 클릭처럼). F4·"팝업 보기"는 고른 그대로 (_toggle_popup)
+            self._selected = {idx}
+            self._sel_anchor = idx
         if idx != self.current_page:
             self.select_page(idx)
         else:
@@ -2558,7 +2613,18 @@ class PDFLevelPreviewApp:
             self.update_preview()
         self.preview_canvas.focus_set()  # ←→ 회전·Enter [적용]이 바로 되게 (구간 빨간 테두리가 팝업 둘레에)
 
+    def _toggle_popup(self):
+        """"팝업 보기" 체크·F4: F2·F3에서 보고 있는 페이지(파란 테두리) 팝업을 열거나 닫는다. 여러 장 고른 것은 그대로
+        두어 팝업에서 하는 편집도 고른 페이지에 간다. 기본 보기·페이지 없음이면 아무것도 안 한다"""
+        if not self.popup_var.get():
+            self._close_page_popup()
+        elif self._grid_cols is not None and self._page_count:
+            self._open_page_popup(self.current_page, only=False)
+        else:
+            self.popup_var.set(False)
+
     def _close_page_popup(self):
+        self.popup_var.set(False)  # Esc·[닫기]·보기 바꾸기로 닫혀도 체크를 끈다
         if not self._page_popup:
             return
         self._page_popup = False
@@ -3460,6 +3526,12 @@ class PDFLevelPreviewApp:
                 return
 
     def _on_preview_rendered(self, path, key, img, status):
+        if status == PREVIEW_QUICK:  # 맞춤 보기 첫 그림 (정식 렌더가 곧 온다): 그동안만 보이고 기억하지 않는다
+            if key == self._wanted_key and key not in self.preview_cache:
+                self.current_img = img
+                self._shown_key = key
+                self._draw_preview()
+            return
         if (path, key) == self._pending_req:
             self._pending_req = None
         if img is not None:
