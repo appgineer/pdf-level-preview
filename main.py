@@ -61,7 +61,9 @@ BIG_THUMB_WORKERS = 2
 # 기본 보기·F2에서 페이지를 고르면 이만큼 뒤(ms)에 F3에서 보일 묶음과 그다음 묶음의 큰 썸네일을 미리 그려 둔다
 BIG_PREFETCH_MS = 300
 # 툴바 보기 선택: (이름, 한 줄 칸 수. None = 기본 보기)
-VIEW_MODES = (("기본 보기", None), ("10개씩 보기 (F2)", THUMB_GRID_COLS), ("5개씩 크게 보기 (F3)", THUMB_BIG_COLS))
+VIEW_MODES = (("기본 보기 (F1)", None), ("10개씩 보기 (F2)", THUMB_GRID_COLS), ("5개씩 크게 보기 (F3)", THUMB_BIG_COLS))
+# F2·F3에서 마우스를 올린 썸네일 가운데 [열기] 버튼 바탕색 (흰 글씨). 누르면 그 페이지를 크게 띄운다 (_open_page_popup)
+THUMB_OPEN_BG = "#1f6fd0"
 INDICATOR_SIZE = 24  # 체크박스/라디오버튼 인디케이터 크기
 INDICATOR_MARK = "#e00000"  # 선택 표시(체크마크/라디오 점) 색. 검은색은 눈에 잘 안 띈다
 # 숫자·영문 글씨("0.5mm") 옆 라디오 동그라미를 이만큼(px) 내린다. 한글 글꼴은 숫자·영문이 글자 칸 아래쪽에 앉아서
@@ -1119,6 +1121,9 @@ class PDFLevelPreviewApp:
         self._ocr_badges = {}  # 한 변(px) → PhotoImage
         self._thumb_w = THUMB_W  # 썸네일 칸 너비. 넓은 보기(F2·F3)에서 한 줄 칸 수에 맞춰 바뀐다
         self._grid_cols = None  # 넓은 보기 한 줄 칸 수 (None = 기본 보기, THUMB_GRID_COLS = F2, THUMB_BIG_COLS = F3)
+        self._page_popup = False  # F2·F3에서 [열기]로 띄운 페이지 팝업이 열려 있는지
+        self._open_btn_idx = None  # [열기] 버튼을 그려 둔 썸네일 (화면 위치)
+        self._open_btn_wh = None  # [열기] 버튼 크기 (px, 처음 쓸 때 잰다)
         self._big_thumbs = {}  # (파일, 페이지 번호) → 큰 썸네일 (THUMB_BIG_W 폭, 최근 THUMB_BIG_CACHE장)
         # 큰 썸네일 요청: 보이는 페이지 먼저(_big_want), 미리 그리기는 그다음(_big_prefetch). 프로세스마다 한 장씩만 맡긴다
         self._big_want = []      # [(파일, 페이지 번호)] 화면에 보이는데 큰 것이 없는 페이지
@@ -1236,7 +1241,7 @@ class PDFLevelPreviewApp:
         self.crop_quick_var = tk.StringVar(value="0")
         self._crop_quick_prev = "0"  # 바로 전 값 (켜진 라디오를 다시 눌렀는지 알려고)
         self._crop_quick_setting = False  # 체크로 네 칸을 채우는 중 (칸이 하나씩 바뀌는 사이에 체크를 끄지 않게)
-        self.grid_var = tk.BooleanVar(value=False)  # 격자 보기: 처음에는 꺼 둔다 (체크 또는 F1로 켠다)
+        self.grid_var = tk.BooleanVar(value=False)  # 격자 보기: 처음에는 꺼 둔다 (체크 또는 F4로 켠다)
 
         self._section_heads = []  # (머리말 라벨, 색) — 구간 색칠 때 제 색을 지킨다
         self._build_ui()
@@ -1313,7 +1318,7 @@ class PDFLevelPreviewApp:
         view_menu["menu"].config(font=UI_FONT)
         view_menu.pack(side=tk.RIGHT, padx=(2, TOOLBAR_BTN_GAP))
         # 격자 보기: 미리보기 페이지 위에 가로세로 격자만 그린다 (회전·자르기와 무관). 보기 선택 목록 바로 왼쪽
-        tk.Checkbutton(toolbar, text="격자 보기 (F1)", variable=self.grid_var,
+        tk.Checkbutton(toolbar, text="격자 보기 (F4)", variable=self.grid_var,
                        command=self._on_grid_toggle, cursor="hand2", font=UI_FONT,
                        image=self._ind_tk['cb_off'], selectimage=self._ind_tk['cb_on'],
                        indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
@@ -1347,6 +1352,7 @@ class PDFLevelPreviewApp:
         thumb_vscroll = ttk.Scrollbar(left, orient=tk.VERTICAL, command=self.thumb_canvas.yview)
         def _on_thumb_yscroll(*args):
             thumb_vscroll.set(*args)
+            self._hide_open_btn()  # 버튼이 페이지와 함께 밀려 마우스 아래가 아니게 된다 (마우스를 움직이면 다시)
             self._schedule_visible_redraw()
         self.thumb_canvas.configure(yscrollcommand=_on_thumb_yscroll)
         thumb_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
@@ -1358,6 +1364,9 @@ class PDFLevelPreviewApp:
         self.thumb_canvas.bind("<B1-Motion>", self._on_thumb_motion)
         self.thumb_canvas.bind("<ButtonRelease-1>", self._on_thumb_release)
         self.thumb_canvas.bind("<Button-3>", self._on_thumb_menu)
+        # F2·F3: 마우스를 올린 썸네일 가운데에 [열기] (누르면 그 페이지를 크게 띄운다)
+        self.thumb_canvas.bind("<Motion>", self._on_thumb_hover)
+        self.thumb_canvas.bind("<Leave>", lambda e: self._hide_open_btn())
         # 단축키는 썸네일 패널에 포커스가 있을 때만 (입력칸의 Ctrl+C/V와 안 겹치게)
         self.thumb_canvas.bind("<Control-KeyPress>", self._on_thumb_ctrl_key)
         self.thumb_canvas.bind("<Delete>", lambda e: self.delete_selected())
@@ -1395,6 +1404,10 @@ class PDFLevelPreviewApp:
         preview_frame = tk.Frame(paned, highlightthickness=FOCUS_LINE_W, cursor="arrow")
         paned.add(preview_frame, minsize=400, stretch="always")
         self._preview_frame = preview_frame
+        # F2·F3 페이지 팝업 맨 위 줄 (팝업일 때만 보인다, _open_page_popup)
+        self._popup_bar = tk.Frame(preview_frame, padx=8, pady=6)
+        tk.Button(self._popup_bar, text="닫기 (Esc)", command=self._close_page_popup,
+                  cursor="hand2", font=UI_FONT).pack(side=tk.RIGHT)
 
         prev_vscroll = ttk.Scrollbar(preview_frame, orient=tk.VERTICAL)
         prev_hscroll = ttk.Scrollbar(preview_frame, orient=tk.HORIZONTAL)
@@ -1557,9 +1570,12 @@ class PDFLevelPreviewApp:
         self.root.bind("<Right>", lambda e: self._nudge_angle_key(e, +0.1))
         self.root.bind("<Down>",  lambda e: self._nudge_angle_key(e, -0.1))
         self.root.bind("<Up>",    lambda e: self._nudge_angle_key(e, +0.1))
-        # F1: 어느 구간에 있든(입력칸 안에서도) "격자 보기"를 켜고 끈다
-        self.root.bind("<F1>", lambda e: (self.grid_var.set(not self.grid_var.get()), self._on_grid_toggle()))
-        # F2: [10개씩 보기], F3: [5개씩 크게 보기] (어느 구간에서든. 그 보기에서 다시 누르면 기본 보기)
+        # F4: 어느 구간에 있든(입력칸 안에서도) "격자 보기"를 켜고 끈다 (예전 F1)
+        self.root.bind("<F4>", lambda e: (self.grid_var.set(not self.grid_var.get()), self._on_grid_toggle()))
+        # F1: 기본 보기 (왼쪽 썸네일 + 가운데 미리보기 + 오른쪽). F2: [10개씩 보기], F3: [5개씩 크게 보기]
+        # (어느 구간에서든. F2·F3은 그 보기에서 다시 누르면 기본 보기). Esc: F2·F3에서 띄운 페이지 팝업 닫기
+        self.root.bind("<F1>", lambda e: self.set_view(None))
+        self.root.bind("<Escape>", lambda e: self._close_page_popup())
         self.root.bind("<F2>", lambda e: self._toggle_view(THUMB_GRID_COLS))
         self.root.bind("<F3>", lambda e: self._toggle_view(THUMB_BIG_COLS))
         # Ctrl+W: 창 닫기 (오른쪽 위 X와 같다). Ctrl+S: [저장], Ctrl+Shift+S: [다른 이름으로 저장].
@@ -2106,9 +2122,12 @@ class PDFLevelPreviewApp:
                 x - 10, y - 10, x + self._thumb_w + 10, y + thumb_h + 10, outline=THUMB_BAND_LINE, width=3))
 
         self._drawn_pages[idx] = items
+        self.thumb_canvas.tag_raise("open_btn")  # 큰 썸네일이 와서 다시 그려도 [열기]가 가려지지 않게
 
-    def _make_thumb_photo(self, idx, img, black, white, e, thumb_h):
-        """썸네일 화면 그림 만들기: 레벨 → 90° 회전 → 기울기 보정 → 자르기 → 칸에 맞추기. (PhotoImage, 폭, 높이)"""
+    def _make_thumb_photo(self, idx, img, black, white, e, thumb_h, box_w=None):
+        """썸네일 화면 그림 만들기: 레벨 → 90° 회전 → 기울기 보정 → 자르기 → 칸(box_w × thumb_h, 폭은 기본이 썸네일 칸)에
+        맞추기. (PhotoImage, 폭, 높이)"""
+        box_w = box_w or self._thumb_w
         if (black, white) != (0, 255):
             img = apply_levels(img, black, white)
         # 썸네일도 저장될 모양 그대로: 기울기 보정 → 자르기 → 셀에 맞추기
@@ -2122,7 +2141,7 @@ class PDFLevelPreviewApp:
             img = img.crop((round(left * s), round(top * s),
                             round(img.width - right * s), round(img.height - bottom * s)))
         # 90° 돌리면 가로로 길어져 칸을 넘으므로 항상 칸 안에 맞춘다 (겹침 방지)
-        ratio = min(self._thumb_w / img.width, thumb_h / img.height)
+        ratio = min(box_w / img.width, thumb_h / img.height)
         if abs(ratio - 1) > 0.01:
             img = img.resize((max(1, int(img.width * ratio)), max(1, int(img.height * ratio))),
                              Image.LANCZOS)
@@ -2204,6 +2223,9 @@ class PDFLevelPreviewApp:
             self._thumb_dirty.add(idx)
             self._schedule_thumb_redraw()
             self._show_band_flags()
+        if self._open_btn_hit(event):  # F2·F3 썸네일 가운데 [열기]: 그 페이지만 골라 크게 띄운다
+            self._open_page_popup(self._open_btn_idx)
+            return
         shift = event.state & 0x0001
         ctrl = event.state & 0x0004
         shrink = False
@@ -2386,6 +2408,7 @@ class PDFLevelPreviewApp:
         old = self._grid_cols
         if cols == old:
             return
+        self._close_page_popup()  # 미리보기 칸을 팝업 자리에서 거둔다 (기본 보기면 원래 자리로 돌아간다)
         paned, left, frame = self._paned, self._thumb_frame, self._preview_frame
         self._grid_cols = cols
         if old is None:  # 기본 → 넓은 보기
@@ -2412,6 +2435,116 @@ class PDFLevelPreviewApp:
     def _toggle_view(self, cols):
         """F2·F3: 그 보기면 기본 보기로, 아니면 그 보기로"""
         self.set_view(None if self._grid_cols == cols else cols)
+
+    def _open_btn_box(self, idx):
+        """[열기] 버튼 자리 (캔버스 좌표 x0, y0, x1, y1): 그 썸네일 그림 칸 가운데"""
+        x, y = self._get_thumb_pos(idx)
+        cx, cy = x + self._thumb_w // 2, y + int(self._thumb_w * 1.4) // 2
+        if self._open_btn_wh is None:  # 마우스를 움직일 때마다 글꼴을 새로 만들지 않게
+            font = tkfont.Font(font=UI_FONT_BOLD)
+            self._open_btn_wh = (font.measure("열기") + 32, font.metrics("linespace") + 16)
+        w, h = self._open_btn_wh
+        return cx - w // 2, cy - h // 2, cx + w // 2, cy + h // 2
+
+    def _on_thumb_hover(self, event):
+        """F2·F3: 마우스를 올린 썸네일 가운데에 [열기]. 칸이 바뀔 때만 다시 그린다 (마우스를 움직일 때마다 그리지 않게)"""
+        if self._grid_cols is None or self._page_count == 0:
+            return
+        idx = self._thumb_hit(event)
+        if idx is None:
+            self._hide_open_btn()
+            return
+        canvas = self.thumb_canvas
+        if idx != self._open_btn_idx or not canvas.find_withtag("open_btn"):
+            canvas.delete("open_btn")
+            x0, y0, x1, y1 = self._open_btn_box(idx)
+            canvas.create_rectangle(x0, y0, x1, y1, fill=THUMB_OPEN_BG, outline="white", width=2, tags="open_btn")
+            canvas.create_text((x0 + x1) // 2, (y0 + y1) // 2, text="열기", fill="white",
+                               font=UI_FONT_BOLD, tags="open_btn")
+            self._open_btn_idx = idx
+        cursor = "hand2" if self._open_btn_hit(event) else "arrow"
+        if canvas.cget("cursor") != cursor:
+            canvas.config(cursor=cursor)
+
+    def _hide_open_btn(self):
+        if self._open_btn_idx is None:
+            return
+        self._open_btn_idx = None
+        self.thumb_canvas.delete("open_btn")
+        if self.thumb_canvas.cget("cursor") == "hand2" and self._thumb_press is None:  # 끌어 옮기는 중이 아니면
+            self.thumb_canvas.config(cursor="arrow")
+
+    def _open_btn_hit(self, event):
+        """누른 곳이 [열기] 버튼 위인지"""
+        if (self._open_btn_idx is None or self._grid_cols is None or self._open_btn_idx >= self._page_count
+                or not self.thumb_canvas.find_withtag("open_btn")):  # 썸네일을 통째로 다시 그려 지워졌으면
+            return False
+        x0, y0, x1, y1 = self._open_btn_box(self._open_btn_idx)
+        cx, cy = self.thumb_canvas.canvasx(event.x), self.thumb_canvas.canvasy(event.y)
+        return x0 <= cx <= x1 and y0 <= cy <= y1
+
+    def _open_page_popup(self, idx):
+        """F2·F3: 그 페이지를 썸네일 위에 크게 띄운다 ([열기]). 맨 위 줄 [닫기 (Esc)].
+
+        가운데 미리보기 칸을 그대로 옮겨 올리므로(썸네일 칸 안 place, 같은 창) 끌어서 기울기 회전·확대·Enter [적용]·
+        [저장 크기 불러오기] 박스 옮기기가 그대로 되고, 오른쪽 편집 구간도 이 페이지에 쓴다. 렌더는 미리보기 워커가
+        백그라운드로 하고, 오기 전에는 썸네일을 키운 임시 그림을 바로 보인다(_draw_popup_placeholder) → 기다림 없이 뜬다
+        """
+        if self._grid_cols is None:
+            return
+        self._hide_open_btn()
+        frame = self._preview_frame
+        if not self._page_popup:
+            self._page_popup = True
+            self._popup_bar.pack(side=tk.TOP, fill=tk.X, before=frame.pack_slaves()[0])
+            frame.place(in_=self._thumb_frame, relx=0.5, rely=0.5, relwidth=0.8, relheight=0.96, anchor=tk.CENTER)
+            frame.lift()
+            # 칸 크기를 먼저 정해야 아래 페이지 선택이 팝업 크기로 렌더를 맡긴다 (옛 크기로 맡기면 한 장 더 기다린다)
+            self.root.update_idletasks()
+            # 캔버스에 남은 옛 그림(숨기기 전 크기·자리)을 보이지 않게: 렌더가 없으면 임시 그림부터 (update_preview)
+            self._shown_key = None
+        # 그 페이지만 고른다 (그냥 클릭처럼)
+        self._selected = {idx}
+        self._sel_anchor = idx
+        if idx != self.current_page:
+            self.select_page(idx)
+        else:
+            self._draw_selection()
+            self.update_preview()
+        self.preview_canvas.focus_set()  # ←→ 회전·Enter [적용]이 바로 되게 (구간 빨간 테두리가 팝업 둘레에)
+
+    def _close_page_popup(self):
+        if not self._page_popup:
+            return
+        self._page_popup = False
+        self._preview_frame.place_forget()
+        self._popup_bar.pack_forget()
+        self.thumb_canvas.focus_set()
+
+    def _draw_popup_placeholder(self):
+        """팝업에서 그 페이지 렌더가 오기 전: 다른 페이지 그림 대신 썸네일(F3 큰 것이 있으면 그것)을 칸에 맞게 키워 바로
+        보인다. 흐릿하지만 렌더(원본 해상도, 수백 ms)가 오면 바로 바뀐다. 그동안은 렌더가 없는 상태라 끌기·자르기 표시는 안 된다"""
+        idx = self.current_page
+        page = self.slots[idx][1:]
+        img = self._big_thumbs.get(page)
+        if img is None:
+            img = self.thumbnail_cache.get(page)
+        self.current_img = None  # 옛 페이지 그림으로 다시 그리지 않게 (렌더가 오면 _on_preview_rendered가 채운다)
+        self._shown_key = None
+        canvas = self.preview_canvas
+        canvas.delete("all")
+        if img is None:
+            return
+        cw, ch = max(1, canvas.winfo_width()), max(1, canvas.winfo_height())
+        black, white = self._levels() or (0, 255)
+        e = self._page_edit(idx)
+        if self._crop_pending(idx):  # 썸네일처럼 확정한 자르기로
+            e = dict(e, crop=list(self._crop_before_edit))
+        photo, _, _ = self._make_thumb_photo(idx, img, black, white, e, max(1, ch - PREVIEW_PAD * 2),
+                                             box_w=max(1, cw - PREVIEW_PAD * 2))
+        self.preview_photo = photo
+        canvas.config(scrollregion=(0, 0, cw, ch))
+        canvas.create_image(cw // 2, ch // 2, anchor=tk.CENTER, image=photo)
 
     def _want_big_thumb(self, page):
         """[5개씩 크게 보기]에서 그리는 칸인데 큰 썸네일이 없는 페이지: 미리 그리기보다 먼저 맡긴다"""
@@ -3235,6 +3368,8 @@ class PDFLevelPreviewApp:
             return
 
         self.render_status.config(text="원본 해상도 렌더링 중...")
+        if self._page_popup and (self._shown_key is None or self._shown_key[0] != key[0]):
+            self._draw_popup_placeholder()  # 팝업에서 다른 페이지로: 렌더를 기다리지 않고 썸네일을 키워 바로
         req = (path, key)
         if req == self._pending_req:
             return  # 같은 요청이 이미 렌더 중 (화살표 즉시 갱신 + 지연 갱신 중복 등)
