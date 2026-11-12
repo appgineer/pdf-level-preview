@@ -122,7 +122,7 @@ BAND_SAFE_MM = 0.3
 # 0.5mm 검은 줄이 남았다
 BAND_SIZE_MIN_MM = 1.5
 BAND_SIZE_TOL_MM = 2.0
-# 설정 파일의 자르기(mm) 자리를 보여주는 선 색 (미리보기 / 썸네일)
+# 툴바 지금 페이지 / 총 페이지 번호 색 (빨강)
 CFG_CROP_LINE = "#e00000"
 # 버튼 색 원칙(일반적인 UI): 오른쪽 칸 구간마다 확정 버튼만 파랑([적용]·[설정 저장]), 나머지는 기본(회색) 버튼.
 # 툴바 [저장]도 색 없음(사용자 요청). 예전엔 버튼마다 색이 달라(보라·진회색·청록·초록) 무엇이 중요한지 안 보였다
@@ -152,9 +152,9 @@ USED_DIRS_MAX = 20
 SAVE_TMP_GRACE = 60
 # 편집기 자르기 여백 순서 (화면 기준)
 CROP_SIDES = ("top", "bottom", "left", "right")
-# 설정 파일 구간 기본값 (자르기 전체·안함, 일반, OCR·분할 체크 안 함). config.json이 없을 때 이것과 다르면
+# 설정 파일 구간 기본값 (일반, OCR·분할 체크 안 함. "자르기"는 설정 파일에서 없앴다 — crop_mm을 안 쓴다). config.json이 없을 때 이것과 다르면
 # [저장]·[다른 이름으로 저장] 때 설정을 저장할지 묻는다 (저장하면 창이 닫혀 설정이 사라지므로)
-CONFIG_DEFAULT = {"crop_mm": {"top": 0, "bottom": 0, "left": 0, "right": 0}, "scan_type": "일반",
+CONFIG_DEFAULT = {"scan_type": "일반",
                   "black_point": 0, "white_point": 255, "ocr": False, "ocr_language": [],
                   "is_split": False, "split_method": "none", "split_page_ranges": "", "split_size_mb": 0}
 # 자르고 남는 최소 크기 (pt, 72pt = 25.4mm)
@@ -1211,9 +1211,6 @@ class PDFLevelPreviewApp:
         # Config variables
         self.selected_level_idx = tk.IntVar(value=-1)
         self.scan_type_var = tk.StringVar(value="일반")
-        self.crop_cfg_mode_var = tk.StringVar(value="전체")  # 자르기 설정: "전체"(네 방향 같은 값) / "각각"
-        self.crop_cfg_var = tk.StringVar(value="안함")  # 전체일 때: "안함" / "1" / "2"
-        self.crop_cfg_side_vars = {side: tk.StringVar(value="0") for side in CROP_SIDES}  # 각각일 때
         self.ocr_vars = {}  # name -> BooleanVar
         self.ocr_enabled_var = tk.BooleanVar(value=False)
         self.is_split_var = tk.BooleanVar(value=False)
@@ -1497,11 +1494,7 @@ class PDFLevelPreviewApp:
         config_box.pack(fill=tk.X, padx=8, pady=(40, 0))  # 좌우 여백, 위는 편집 구간과 확실히 떨어지게
         self._section_header(config_box, "설정 파일 만들기", SECTION_CONFIG_HEAD)
 
-        # ── 자르기 설정 ──
-        self._build_crop_config(config_box)
-        ttk.Separator(config_box, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
-
-        # ── 스캔타입 ──
+        # ── 스캔타입 ── (설정 파일 "자르기"는 사용자 요청으로 없앴다. config.json에 crop_mm을 안 쓰고, 자동화도 안 자른다)
         tk.Label(config_box, text="스캔타입", font=FNT, anchor=tk.W).pack(fill=tk.X)
         scan_frame = tk.Frame(config_box)
         scan_frame.pack(anchor=tk.W, pady=(0, 8))
@@ -1761,115 +1754,6 @@ class PDFLevelPreviewApp:
         apply_btn.pack(fill=tk.X, pady=(8, 0))
         _add_tooltip(apply_btn, "Enter · 자르기 칸·[저장 크기 불러오기]를 확정합니다. 바꾼 만큼 선택한 페이지마다 더 자릅니다.\n"
                                 "[적용] 없이 다른 페이지로 가면 넣은 값은 되돌아갑니다.")
-
-    def _build_crop_config(self, parent):
-        """자르기 설정 (config.json의 crop_mm, 자동화 프로그램용). 편집기의 자르기와는 별개"""
-        FNT = UI_FONT
-        radio = dict(variable=self.crop_cfg_var, command=self._on_crop_cfg_change,
-                     cursor="hand2", font=FNT,
-                     image=self._ind_tk['rb_off'], selectimage=self._ind_tk['rb_on'],
-                     indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
-                     selectcolor=self._bg_color)
-        mode_radio = dict(radio, variable=self.crop_cfg_mode_var, command=self._toggle_crop_cfg_mode)
-        tk.Label(parent, text="자르기", font=FNT, anchor=tk.W).pack(fill=tk.X)
-        mode_row = tk.Frame(parent)
-        mode_row.pack(anchor=tk.W)
-        for txt in ("전체", "각각"):
-            tk.Radiobutton(mode_row, text=txt, value=txt, **mode_radio).pack(side=tk.LEFT, padx=(0, 12))
-
-        # 전체: 네 방향에 같은 값
-        self.crop_cfg_all_frame = tk.Frame(parent)
-        row1 = tk.Frame(self.crop_cfg_all_frame)
-        row1.pack(anchor=tk.W)
-        for txt, val in (("안함", "안함"), ("1mm", "1"), ("2mm", "2")):
-            tk.Radiobutton(row1, text=txt, value=val, **radio).pack(side=tk.LEFT, padx=(0, 12))
-
-        # 각각: 위/아래/좌/우 따로
-        self.crop_cfg_side_frame = tk.Frame(parent)
-        for i, (side, text) in enumerate(zip(CROP_SIDES, ("위", "아래", "좌", "우"))):
-            row, col = divmod(i, 2)
-            tk.Label(self.crop_cfg_side_frame, text=text, font=FNT).grid(
-                row=row, column=col * 3, sticky=tk.E, padx=(0 if col == 0 else 12, 4), pady=2)
-            side_entry = tk.Entry(self.crop_cfg_side_frame, textvariable=self.crop_cfg_side_vars[side],
-                                  width=5, font=FNT)
-            side_entry.grid(row=row, column=col * 3 + 1, pady=2)
-            side_entry.bind("<Right>", lambda e, s=side: self._nudge_cfg_crop(s, +1))
-            side_entry.bind("<Left>",  lambda e, s=side: self._nudge_cfg_crop(s, -1))
-            side_entry.bind("<Up>",    lambda e, s=side: self._nudge_cfg_crop(s, +1))
-            side_entry.bind("<Down>",  lambda e, s=side: self._nudge_cfg_crop(s, -1))
-            tk.Label(self.crop_cfg_side_frame, text="mm", font=FNT).grid(
-                row=row, column=col * 3 + 2, sticky=tk.W, padx=(4, 0))
-            self.crop_cfg_side_vars[side].trace_add("write", self._on_crop_cfg_change)
-            self._edit_entries.append(side_entry)
-
-        self._pad_after_crop_cfg = tk.Frame(parent, height=8)
-        self._pad_after_crop_cfg.pack(fill=tk.X)
-        self._toggle_crop_cfg_mode()
-
-    def _nudge_cfg_crop(self, side, delta):
-        """설정 파일 자르기(각각)의 값을 1mm씩 (0 아래로는 안 내려간다)"""
-        var = self.crop_cfg_side_vars[side]
-        mm = self._parse_mm(var.get())
-        var.set(f"{max(0.0, round((mm if mm is not None else 0) + delta, 1)):g}")
-        return "break"
-
-    def _toggle_crop_cfg_mode(self):
-        """"전체"면 값 하나, "각각"이면 위/아래/좌/우 입력칸을 보여준다"""
-        each = self.crop_cfg_mode_var.get() == "각각"
-        self.crop_cfg_all_frame.pack_forget()
-        self.crop_cfg_side_frame.pack_forget()
-        shown = self.crop_cfg_side_frame if each else self.crop_cfg_all_frame
-        shown.pack(anchor=tk.W, before=self._pad_after_crop_cfg)
-        self._on_crop_cfg_change()
-        self._refresh_settings_scroll()
-
-    def _on_crop_cfg_change(self, *_):
-        """설정 자르기 값이 바뀌면 미리보기와 썸네일의 빨간 선을 다시 그린다"""
-        self._draw_cfg_crop_lines()
-        if self._drawn_pages:
-            self._thumb_dirty.update(self._drawn_pages)
-            self._schedule_thumb_redraw()
-
-    def _draw_cfg_crop_lines(self):
-        """설정 파일의 자르기(mm)만큼 안쪽에 빨간 선. 자동화가 잘라낼 자리를 보여준다"""
-        canvas = self.preview_canvas
-        canvas.delete("cfgcrop")
-        sides = self._crop_cfg_sides()
-        res = self._crop_canvas_rect()
-        if not sides or not any(sides) or res is None:
-            return
-        (x0, y0, x1, y1), s = res
-        top, bottom, left, right = (_mm_to_pt(v) * s for v in sides)
-        if x1 - x0 <= left + right or y1 - y0 <= top + bottom:
-            return  # 페이지보다 크게 잘라내는 값
-        canvas.create_rectangle(x0 + left, y0 + top, x1 - right, y1 - bottom,
-                                outline=CFG_CROP_LINE, width=2, tags="cfgcrop")
-
-    @staticmethod
-    def _parse_mm(text, empty=0):
-        """입력칸의 mm 값. 빈 칸은 empty, 숫자가 아니거나 음수면 None"""
-        text = text.strip()
-        if not text:
-            return empty
-        try:
-            mm = float(text)
-        except ValueError:
-            return None
-        if not 0 <= mm < float("inf"):  # 음수, nan, inf
-            return None
-        return int(mm) if mm.is_integer() else mm
-
-    def _crop_cfg_sides(self):
-        """config.json에 넣을 자르기 값 [위, 아래, 좌, 우] (mm). 잘못된 값이 있으면 None.
-
-        "전체"면 네 방향에 같은 값이 들어간다.
-        """
-        if self.crop_cfg_mode_var.get() == "각각":
-            sides = [self._parse_mm(self.crop_cfg_side_vars[side].get()) for side in CROP_SIDES]
-            return None if None in sides else sides
-        choice = self.crop_cfg_var.get()
-        one = 0 if choice == "안함" else int(choice)
-        return [one] * 4
 
     # ------------------------------------------------------------------ #
     # Drag & Drop
@@ -2180,18 +2064,6 @@ class PDFLevelPreviewApp:
                     x + self._thumb_w // 2 - iw // 2 + iw - 6,
                     y + thumb_h // 2 - ih // 2 + ih - 6,
                     image=badge, anchor=tk.SE))
-            # 설정 파일의 자르기(mm) 자리를 빨간 선으로 (미리보기와 같은 표시)
-            cfg_sides = self._crop_cfg_sides()
-            if cfg_sides and any(cfg_sides):
-                page_w = self._page_disp_size(idx)[0] - left - right
-                scale = iw / page_w
-                ct, cb, cl, cr = (_mm_to_pt(v) * scale for v in cfg_sides)
-                ix0 = x + self._thumb_w // 2 - iw // 2
-                iy0 = y + thumb_h // 2 - ih // 2
-                if iw > cl + cr and ih > ct + cb:
-                    items.append(self.thumb_canvas.create_rectangle(
-                        ix0 + cl, iy0 + ct, ix0 + iw - cr, iy0 + ih - cb,
-                        outline=CFG_CROP_LINE, width=2))
         else:
             rect_id = self.thumb_canvas.create_rectangle(
                 x, y, x + self._thumb_w, y + thumb_h,
@@ -3411,7 +3283,6 @@ class PDFLevelPreviewApp:
         # 좌표 계산은 자르기 전 전체 이미지 기준이라, 잘라낸 만큼 원점을 왼쪽 위로 옮겨 둔다
         self._img_origin = (x0 - cut[0], y0 - cut[1]) if cut else (x0, y0)
         self._draw_crop_overlay()
-        self._draw_cfg_crop_lines()
         self._draw_rotate_grid()
         # 그사이 각도가 더 바뀌었으면(←/→ 연타, 드래그 중) 예전 각도 화면으로 튀지 않게 바로 덮는다
         self._draw_quick_rotation()
@@ -4884,10 +4755,6 @@ class PDFLevelPreviewApp:
 
     def _config_dict(self):
         """[설정 저장]이 config.json에 쓰는 값. 숫자 칸이 잘못됐거나 OCR 언어가 없으면 ValueError(안내 문구)"""
-        crop_sides = self._crop_cfg_sides()
-        if crop_sides is None:
-            raise ValueError("자르기 값(mm)을 숫자로 입력하세요.")
-        crop_mm = dict(zip(("top", "bottom", "left", "right"), crop_sides))
         split_size_mb = 0
         if self.is_split_var.get() and self.split_method_var.get() == "size":
             try:
@@ -4910,7 +4777,6 @@ class PDFLevelPreviewApp:
                 black, white = 0, 255
 
         return {
-            "crop_mm": crop_mm,
             "scan_type": self.scan_type_var.get(),
             "black_point": black,
             "white_point": white,
@@ -4949,28 +4815,7 @@ class PDFLevelPreviewApp:
         except (json.JSONDecodeError, OSError):
             return False
 
-        # 자르기 설정: 네 방향이 0/1/2로 같으면 "전체"의 해당 버튼, 그 밖은 "각각". 없거나 이상한 값은 안함
-        raw = cfg.get("crop_mm", 0)
-        if isinstance(raw, dict):
-            values = [raw.get(k, 0) for k in ("top", "bottom", "left", "right")]
-        else:
-            values = [raw] * 4  # 구버전: 숫자 하나 = 네 방향 같은 값
-        sides = []
-        for v in values:
-            try:
-                v = float(v)
-            except (TypeError, ValueError):
-                v = 0.0
-            sides.append(v if 0 <= v < float("inf") else 0.0)
-        for side, v in zip(CROP_SIDES, sides):
-            self.crop_cfg_side_vars[side].set(f"{round(v, 2):g}")
-        presets = {0: "안함", 1: "1", 2: "2"}
-        if len(set(sides)) == 1 and sides[0] in presets:  # 네 방향이 같은 0/1/2면 "전체"
-            self.crop_cfg_mode_var.set("전체")
-            self.crop_cfg_var.set(presets[sides[0]])
-        else:
-            self.crop_cfg_mode_var.set("각각")
-        self._toggle_crop_cfg_mode()
+        # 옛 config.json의 crop_mm은 읽지 않는다 ("자르기"를 없앴다. [설정 저장]하면 그 키가 빠진다)
 
         # 구버전 config의 "안함"은 "일반"과 동작이 같으므로 "일반"으로 흡수
         scan_type = cfg.get("scan_type", "일반")
