@@ -124,10 +124,9 @@ BAND_SIZE_MIN_MM = 1.5
 BAND_SIZE_TOL_MM = 2.0
 # 설정 파일의 자르기(mm) 자리를 보여주는 선 색 (미리보기 / 썸네일)
 CFG_CROP_LINE = "#e00000"
-# 버튼 색 원칙(일반적인 UI): 구간마다 확정 버튼만 파랑([적용]·[설정 저장]·[저장]), 되돌릴 수 없는 [다른 이름으로 저장]은
-# 주황, 나머지는 기본(회색) 버튼. 예전엔 버튼마다 색이 달라(보라·진회색·청록·초록) 무엇이 중요한지 안 보였다
+# 버튼 색 원칙(일반적인 UI): 오른쪽 칸 구간마다 확정 버튼만 파랑([적용]·[설정 저장]), 나머지는 기본(회색) 버튼.
+# 툴바 [저장 ▼]도 색 없음(사용자 요청). 예전엔 버튼마다 색이 달라(보라·진회색·청록·초록) 무엇이 중요한지 안 보였다
 SAVE_BTN_BG, SAVE_BTN_ACTIVE = "#1f6fd0", "#17559f"      # 확정 버튼 (파랑, 흰 글씨)
-SAVEAS_BTN_BG, SAVEAS_BTN_ACTIVE = "#c0661a", "#a35514"  # 다른 이름으로 저장 (진한 주황, 흰 글씨 대비 약 4)
 # 버튼에 마우스를 올리면 이만큼(ms) 뒤 설명 상자(툴팁)를 띄운다 (_add_tooltip). 버튼 아래 설명 글 대신
 TOOLTIP_DELAY_MS = 500
 # 설정 파일 [고급] 레벨 칸 옆 빠른 값 (누르면 그 칸에 바로, _level_quick)
@@ -1252,18 +1251,18 @@ class PDFLevelPreviewApp:
         toolbar.pack(side=tk.TOP, fill=tk.X)
 
         # 버튼 사이를 띄운다 (TOOLBAR_BTN_GAP)
-        # [저장] [다른 이름으로 저장]: 툴바 맨 왼쪽 (사용자 요청. 오른쪽 칸 아래 고정 줄에 있다가 옮김). 차이는 툴팁
-        save_btn = tk.Button(toolbar, text="저장 (Ctrl+S)", command=self.save_pdf, cursor="hand2", font=UI_FONT,
-                             bg=SAVE_BTN_BG, fg="white", activebackground=SAVE_BTN_ACTIVE, activeforeground="white")
+        # [저장 ▼]: 툴바 맨 왼쪽, 색 없는 기본 버튼. 누르면 오른쪽 클릭 메뉴처럼 바로 아래에 [저장]·[다른 이름으로 저장]
+        # (사용자 요청. 두 버튼이 따로 있다가 하나로). 둘의 차이는 버튼 툴팁
+        self._save_menu = tk.Menu(self.root, tearoff=0, font=UI_FONT)
+        self._save_menu.add_command(label="저장", accelerator="Ctrl+S", command=self.save_pdf)
+        self._save_menu.add_command(label="다른 이름으로 저장", accelerator="Ctrl+Shift+S", command=self.save_edited_pdf)
+        save_btn = tk.Button(toolbar, text="저장 ▼", cursor="hand2", font=UI_FONT)
+        save_btn.config(command=lambda: self._show_save_menu(save_btn))
         save_btn.pack(side=tk.LEFT, padx=(6, 0))
-        saveas_btn = tk.Button(toolbar, text="다른 이름으로 저장", command=self.save_edited_pdf, cursor="hand2",
-                               font=UI_FONT, bg=SAVEAS_BTN_BG, fg="white", activebackground=SAVEAS_BTN_ACTIVE,
-                               activeforeground="white")
-        saveas_btn.pack(side=tk.LEFT, padx=(TOOLBAR_BTN_GAP, 0))
-        _add_tooltip(save_btn, "Ctrl+S · 숨김 저장: 원본에 덮어쓰고 창을 닫습니다.\n"
-                               "가린 부분·지운 페이지 데이터가 남아 용량은 그대로입니다.")
-        _add_tooltip(saveas_btn, "Ctrl+Shift+S · 보이는 그대로 굳힘: 가린 부분·지운 페이지를 지워\n"
-                                 "용량이 줄고 되돌릴 수 없습니다. 저장한 뒤 창을 닫습니다.")
+        _add_tooltip(save_btn, "저장 (Ctrl+S): 숨김 저장. 원본에 덮어쓰고 창을 닫습니다.\n"
+                               "  가린 부분·지운 페이지 데이터가 남아 용량 그대로, 나중에 초기화로 되돌릴 수 있습니다.\n"
+                               "다른 이름으로 저장 (Ctrl+Shift+S): 보이는 그대로 굳힘.\n"
+                               "  가린 부분·지운 페이지를 지워 용량이 줄고 되돌릴 수 없습니다.")
         tk.Button(toolbar, text="문자 읽기", command=self.read_text_on_screen, cursor="hand2",
                   font=UI_FONT).pack(side=tk.LEFT, padx=(TOOLBAR_BTN_GAP * 2, 0))  # 저장 묶음과 띄운다
         tk.Button(toolbar, text="로마자 표기", command=self.set_roman_labels, cursor="hand2",
@@ -1582,6 +1581,13 @@ class PDFLevelPreviewApp:
         need = inner.winfo_reqwidth() + vscroll.winfo_reqwidth() + border
         if need > SETTINGS_W:
             self._paned.paneconfigure(parent, width=need)
+
+    def _show_save_menu(self, btn):
+        """툴바 [저장 ▼]: 버튼 바로 아래에 [저장]·[다른 이름으로 저장] 메뉴 (썸네일 오른쪽 클릭 메뉴처럼)"""
+        try:
+            self._save_menu.tk_popup(btn.winfo_rootx(), btn.winfo_rooty() + btn.winfo_height())
+        finally:
+            self._save_menu.grab_release()
 
     def _level_quick(self, row, var, values):
         """레벨 칸 옆 빠른 값 라디오 (검은색 0·10·20·30, 흰색 190·195·200): 누르면 그 칸에 바로 넣는다.
@@ -4184,10 +4190,16 @@ class PDFLevelPreviewApp:
         """선택한 페이지의 편집을 모두 되돌린다 (자르기·기울기·90° 회전)"""
         if self.pdf_doc is None:
             return
-        if not self._confirm_range("초기화를"):
-            return
         pages = self._edit_pages()
         label = self._sel_label()
+        # 한 장이든 전체든 늘 한 번 묻는다 (사용자 요청). 기본 단추는 [아니요]라 Enter를 또 눌러도 초기화되지 않는다
+        saved = sum(1 for idx in pages
+                    if _has_saved_edits(self._src_docs[self.slots[idx][1]][self.slots[idx][2]]))
+        msg = f"{label} {len(pages)}쪽의 편집(90° 회전·기울기·자르기)을 초기화할까요?"
+        if saved:
+            msg += f"\n\n이 중 {saved}쪽은 저장해 둔 편집도 처음 상태로 돌아갑니다."
+        if not messagebox.askyesno("선택한 페이지 편집 초기화", msg, default=messagebox.NO, parent=self.root):
+            return
         for idx in pages:
             self._set_page_edit(idx, angle=0.0, rot=0, crop=[0.0, 0.0, 0.0, 0.0])
         if self.current_page in pages:
