@@ -87,6 +87,9 @@ DESKEW_KEY = "PDFLevelPreviewDeskew"
 # 저장할 때 페이지 사전에 적어 두는 자르기 합계 [위 아래 좌 우] pt (회전 0° 기준, 원래 가장자리에서). 다시 열면 자르기 칸
 # 아래 "자른 양 합계"에 보인다 (칸은 늘 더 자를 양이라 0). [다른 이름으로 저장]은 MediaBox까지 줄여 상자로는 알 수 없어서 적는다
 CROP_KEY = "PDFLevelPreviewCrop"
+# 저장할 때 페이지 사전에 적어 두는, 이 프로그램이 넣은 90° 회전 합계(0/90/180/270). [선택한 페이지 편집 초기화]가
+# 저장한 회전까지 되돌릴 때 쓴다 (_restore_saved_edits). 이 기록 전에 저장한 파일은 회전량을 몰라 회전은 못 되돌린다
+ROT_KEY = "PDFLevelPreviewRot"
 # 저장할 때 문서(Catalog)에 적어 두는, 이 프로그램으로 한 편집 종류. 다시 열면 툴바 "격자 보기" 왼쪽에 보인다
 EDITS_KEY = "PDFLevelPreviewEdits"
 EDIT_NAMES = {"rot90": "90° 회전", "deskew": "자동 보정", "angle": "각도 조정", "band": "검은 여백", "crop": "자르기"}
@@ -591,6 +594,72 @@ def _crop_record(page):
     return [max(0.0, vb.y0), max(0.0, mb.height - vb.y1), max(0.0, vb.x0 - mb.x0), max(0.0, mb.x1 - vb.x1)]
 
 
+def _rot_record(page):
+    """이 페이지에 이 프로그램이 넣은(저장된) 90° 회전 합계 (0/90/180/270). 적힌 게 없으면 0"""
+    kind, val = page.parent.xref_get_key(page.xref, ROT_KEY)
+    try:
+        return int(float(val)) % 360 if kind in ("int", "float") else 0
+    except ValueError:
+        return 0
+
+
+def _has_saved_edits(page):
+    """저장할 때 이 프로그램이 넣은 90° 회전·기울기·자르기가 남아 있는지"""
+    return bool(_rot_record(page) or _deskew_record(page) or any(v > 0.005 for v in _crop_record(page)))
+
+
+# _deskew_page가 콘텐츠 앞에 붙이는 좌표 변환 스트림 ("q a b c d e f cm"). 뒤에는 "\nQ" 스트림이 붙는다
+_DESKEW_PRE = re.compile(rb"^q -?[\d.]+ -?[\d.]+ -?[\d.]+ -?[\d.]+ -?[\d.]+ -?[\d.]+ cm\n$")
+
+
+def _strip_deskew(page):
+    """_deskew_page가 붙인 앞뒤 좌표 변환 스트림을 바깥부터 짝지어 떼어 낸다 (여러 번 저장해 겹친 것도). 뗐으면 True.
+    반대로 돌려 되돌리면 변환 숫자의 반올림(소수 6자리) 때문에 딱 0°가 안 돼 그림이 미세하게 다시 그려졌다"""
+    doc = page.parent
+    xrefs = page.get_contents()
+    n = 0
+    while (n < len(xrefs) // 2 and _DESKEW_PRE.match(doc.xref_stream(xrefs[n]) or b"")
+           and doc.xref_stream(xrefs[-1 - n]) == b"\nQ"):
+        n += 1
+    if not n:
+        return False
+    keep = xrefs[n:len(xrefs) - n]
+    doc.xref_set_key(page.xref, "Contents", "[" + " ".join(f"{x} 0 R" for x in keep) + "]")
+    return True
+
+
+def _restore_saved_edits(page):
+    """저장할 때 이 프로그램이 넣은 편집(90° 회전·기울기·자르기, 자동 보정·검은 여백 포함)을 처음 상태로 되돌린다.
+
+    자르기: 기록된 합계만큼 보이는 영역을 다시 넓힌다(기록이 없으면 MediaBox까지. 스캔 PDF는 처음에 둘이 같다).
+    [저장](숨김) 파일은 가린 부분이 남아 있어 되살아나고, [다른 이름으로 저장]으로 굳힌 파일은 가린 부분을 지웠고
+    MediaBox도 줄어 안 된다(_set_cropbox가 MediaBox 안으로 맞춘다).
+    기울기: _deskew_page가 감싼 좌표 변환을 떼어 낸다(_strip_deskew). 못 떼면 합계만큼 반대로 돌린다(넓힌 뒤에 돌려야
+    처음 돌린 가운데 = 원래 보이는 영역 가운데와 같다).
+    90° 회전: 기록(ROT_KEY)만큼 되돌린다. 기록 전에 저장한 파일은 회전량을 몰라 그대로 둔다
+    """
+    doc = page.parent
+    top, bottom, left, right = _crop_record(page)
+    if any(v > 0.005 for v in (top, bottom, left, right)):
+        vb, mb = _visible_box(page), page.mediabox
+        box = fitz.Rect(vb.x0 - left, vb.y0 - top, vb.x1 + right, vb.y1 + bottom)
+        if (box.x0 <= mb.x0 + 0.01 and box.y0 <= 0.01 and box.x1 >= mb.x1 - 0.01
+                and box.y1 >= mb.height - 0.01):
+            # 페이지 전체로 돌아간다: CropBox를 지워 MediaBox와 똑같게 (기록의 소수점 오차로 0.005pt 어긋나도
+            # 그림을 그리는 픽셀 위치가 미세하게 달라졌다)
+            doc.xref_set_key(page.xref, "CropBox", "null")
+        else:
+            _set_cropbox(page, box)
+    angle = _deskew_record(page)
+    if angle and not _strip_deskew(page):  # 감싼 변환을 떼면 처음과 똑같다. 모양이 다르면(다른 프로그램을 거침) 반대로 돌린다
+        _deskew_page(page, -angle)
+    rot = _rot_record(page)
+    if rot:
+        page.set_rotation((page.rotation - rot) % 360)
+    for key in (CROP_KEY, DESKEW_KEY, ROT_KEY):
+        doc.xref_set_key(page.xref, key, "null")
+
+
 def _edits_record(doc):
     """이 문서를 저장할 때 적어 둔 편집 종류 (EDIT_NAMES의 키 집합)"""
     kind, val = doc.xref_get_key(doc.pdf_catalog(), EDITS_KEY)
@@ -605,6 +674,8 @@ def _apply_page_edit(page, angle, rot, margins):
     """
     if rot:
         page.set_rotation((page.rotation + rot) % 360)
+        total = (_rot_record(page) + rot) % 360  # 이 프로그램이 넣은 회전 합계 (되돌릴 때 _restore_saved_edits)
+        page.parent.xref_set_key(page.xref, ROT_KEY, str(total) if total else "null")
     if angle:
         _deskew_page(page, angle)
         # 지금까지 돌린 기울기 합계를 페이지에 적어 둔다 (다시 열면 회전 칸에 보이게, _deskew_record)
@@ -616,7 +687,7 @@ def _apply_page_edit(page, angle, rot, margins):
     # 이번에 안 자른 페이지도 적는다: 옛 [저장] 파일을 굳혀 저장하면 MediaBox가 줄어 상자로는 셀 수 없게 되므로
     total = [a + b for a, b in zip(_crop_record(page), _rotate_margins([top, bottom, left, right], -page.rotation))]
     if any(v > 0.005 for v in total):
-        page.parent.xref_set_key(page.xref, CROP_KEY, "[" + " ".join(f"{v:.2f}" for v in total) + "]")
+        page.parent.xref_set_key(page.xref, CROP_KEY, "[" + " ".join(f"{v:.4f}" for v in total) + "]")
     if not (top or bottom or left or right):
         return
     vis = fitz.Rect(r.x0 + left, r.y0 + top, r.x1 - right, r.y1 - bottom)
@@ -1032,6 +1103,9 @@ class PDFLevelPreviewApp:
         self._skew_flagged = set()  # DESKEW_MAX°를 넘게 기울어 그대로 둔 페이지 uid (썸네일 빨간 테두리)
         self._saved_angles = {}  # (파일, 페이지 번호) → 파일에 이미 들어간 기울기 합계 (_saved_angle)
         self._saved_crops = {}  # (파일, 페이지 번호) → 파일에 이미 들어간 자르기 합계, 회전 0° 기준 (_saved_crop)
+        # [선택한 페이지 편집 초기화]로 저장한 편집까지 되돌린 페이지 uid → 원래 (파일, 페이지 번호).
+        # 화면은 되돌린 사본을 보고, 저장할 때는 원래 페이지에 같은 되돌리기를 한다 (_restore_saved_pages)
+        self._restored_from = {}
         self._ops_done = set()  # 이번에 한 편집 종류 (EDIT_NAMES 키). 저장할 때 문서에 적는다
         self._band_procs = []  # 돌고 있는 [검은 여백 자르기] 프로세스 (마찬가지)
         self._band_flagged = set()  # [검은 여백 자르기]로 자른 페이지 uid (썸네일 초록 테두리, 누르면 없어진다)
@@ -1776,6 +1850,7 @@ class PDFLevelPreviewApp:
         self._skew_flagged.clear()
         self._saved_angles = {}
         self._saved_crops = {}
+        self._restored_from = {}
         self._ops_done = set()
         # 이 파일을 저장할 때 적어 둔 편집 종류를 툴바 "격자 보기" 왼쪽에
         ops = _edits_record(self.pdf_doc)
@@ -3986,15 +4061,67 @@ class PDFLevelPreviewApp:
         if not self._confirm_range("초기화를"):
             return
         pages = self._edit_pages()
+        label = self._sel_label()
         for idx in pages:
             self._set_page_edit(idx, angle=0.0, rot=0, crop=[0.0, 0.0, 0.0, 0.0])
         if self.current_page in pages:
             self._crop_before_edit = [0.0, 0.0, 0.0, 0.0]
             self._crop_field_base = [0.0, 0.0, 0.0, 0.0]
             self._pending_fit_uid = None
+        restored = self._restore_saved_pages(pages)  # 저장해 둔 편집까지 처음 상태로
         self._sync_edit_panel()
         self._refresh_preview()
-        self._show_toast(f"{self._sel_label()}의 편집을 초기화했습니다.")
+        if restored:
+            self._show_toast(f"{label}의 편집을 초기화했습니다. 저장해 둔 편집도 {restored}쪽 처음 상태로 되돌렸습니다.")
+        else:
+            self._show_toast(f"{label}의 편집을 초기화했습니다.")
+
+    def _restore_saved_pages(self, pages):
+        """[선택한 페이지 편집 초기화]: 저장할 때 들어간 편집(90° 회전·기울기·자르기, 자동 보정·검은 여백 포함)까지
+        처음 상태로. 되돌린 쪽 수. 지운 페이지는 살리지 않는다.
+
+        파일은 저장할 때까지 그대로 두고, 되돌린 페이지 사본(클립보드 폴더 restore-*.pdf)을 화면 목록에 넣는다
+        (붙여넣기처럼, Ctrl+Z로 되돌릴 수 있다). 미리보기 캐시가 uid 기준이라 새 uid. 저장할 때는 사본을 붙이지 않고
+        원래 페이지에 같은 되돌리기를 한다(_restored_from): 사본을 붙이면 [저장](숨김)에서 그림 데이터가 두 벌 남는다
+        """
+        need = [idx for idx in pages
+                if _has_saved_edits(self._src_docs[self.slots[idx][1]][self.slots[idx][2]])]
+        if not need:
+            return 0
+        folder = _clipboard_dir()
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, f"restore-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}.pdf")
+        doc = fitz.open()
+        try:
+            for idx in need:
+                _, src_path, src = self.slots[idx]
+                src_page = self._src_docs[src_path][src]
+                doc.insert_pdf(self._src_docs[src_path], from_page=src, to_page=src)
+                # 페이지를 복사하면 이 프로그램의 기록(회전·기울기·자르기 합계)은 따라오지 않아 옮겨 적는다
+                for key in (CROP_KEY, DESKEW_KEY, ROT_KEY):
+                    kind, val = self._src_docs[src_path].xref_get_key(src_page.xref, key)
+                    if kind != "null":
+                        doc.xref_set_key(doc[-1].xref, key, val)
+                _restore_saved_edits(doc[-1])
+            doc.save(path)
+        finally:
+            doc.close()
+        self._src_docs[path] = fitz.open(path)
+        slots = list(self.slots)
+        for k, idx in enumerate(need):
+            old_uid, src_path, src = slots[idx]
+            uid = self._new_uid()
+            slots[idx] = (uid, path, k)
+            self._restored_from[uid] = (src_path, src)
+            self.page_edits.pop(old_uid, None)
+            self._skew_flagged.discard(old_uid)  # 표시도 저장한 편집과 함께 없앤다
+            self._band_flagged.discard(old_uid)
+            if self._label_start_uid == old_uid:
+                self._label_start_uid = uid
+        self._push_undo()
+        self._set_slots(slots, self.current_page, self._selected)
+        self._render_thumbs([(path, k) for k in range(len(need))])
+        return len(need)
 
     def save_crop_size(self):
         """현재 페이지에서 보이는(자른 뒤) 박스의 위치(위·좌)와 크기를 저장"""
@@ -4159,25 +4286,30 @@ class PDFLevelPreviewApp:
             # 원본을 새로 열어 편집값만 적용한다 (self.pdf_doc는 원본 그대로 유지)
             out = fitz.open(src)
             try:
-                self._arrange_pages(out, src)
-                has = {"rot": False, "angle": False, "crop": False}  # 저장되는 편집에 실제로 들어간 것
+                # 저장한 편집까지 되돌린 페이지는 화면의 사본(restore-*.pdf) 대신 원래 페이지를 쓰고 같은 되돌리기를 한다
+                save_slots = [(uid,) + self._restored_from.get(uid, (path, i)) for uid, path, i in self.slots]
+                self._arrange_pages(out, src, save_slots)
                 for idx, (uid, _, _) in enumerate(self.slots):
                     e = self.page_edits.get(uid)
                     if uid == self._crop_edit_uid:  # [적용]하지 않은 자르기는 빼고 입력 전 값으로 (지운 경우도)
                         e = dict(self._page_edit(idx), crop=self._crop_before_edit)
+                    if uid in self._restored_from:
+                        _restore_saved_edits(out[idx])
                     # 편집이 없는 페이지도 부른다: 자르기 합계 기록(CROP_KEY)을 모든 페이지에 남기려고
                     e = e or {"angle": 0.0, "rot": 0, "crop": [0.0, 0.0, 0.0, 0.0]}
                     _apply_page_edit(out[idx], e["angle"], e["rot"], e["crop"])
-                    has["rot"] |= bool(e["rot"])
-                    has["angle"] |= bool(e["angle"])
-                    has["crop"] |= any(e["crop"])
-                # 이번에 한 편집 종류를 문서에 적는다 (전에 적힌 것과 합쳐서). [초기화]로 되돌렸으면 빼고
+                # 이번에 한 편집 종류를 문서에 적는다 (전에 적힌 것과 합쳐서). 저장되는 파일에 그 편집이 실제로 남아
+                # 있을 때만 ([선택한 페이지 편집 초기화]로 되돌렸으면 뺀다)
+                has = {"rot": False, "angle": False, "crop": False}
+                for page in out:
+                    has["rot"] |= bool(_rot_record(page))
+                    has["angle"] |= bool(_deskew_record(page))
+                    has["crop"] |= any(v > 0.005 for v in _crop_record(page))
                 valid = {"rot90": has["rot"], "deskew": has["angle"], "angle": has["angle"],
                          "band": has["crop"], "crop": has["crop"]}
-                ops = _edits_record(out) | {op for op in self._ops_done if valid[op]}
-                if ops:
-                    out.xref_set_key(out.pdf_catalog(), EDITS_KEY,
-                                     fitz.get_pdf_str(",".join(op for op in EDIT_NAMES if op in ops)))
+                ops = {op for op in _edits_record(out) | self._ops_done if valid[op]}
+                out.xref_set_key(out.pdf_catalog(), EDITS_KEY,
+                                 fitz.get_pdf_str(",".join(op for op in EDIT_NAMES if op in ops)) if ops else "null")
                 # [로마자 표기]: 앞쪽 i, ii …, start쪽부터 1, 2 … (첫 페이지면 1쪽부터 그대로).
                 # 순서를 바꾼 저장(select)은 파일에 있던 표기를 지우므로 마지막에 넣는다
                 start = self._label_start()
@@ -4212,18 +4344,20 @@ class PDFLevelPreviewApp:
         # 창을 닫아 프로세스가 PDF와 폴더를 놓게 한다. 켜 둔 채면 폴더를 옮길 때 "사용 중"이 난다
         self._on_close()
 
-    def _arrange_pages(self, out, src):
+    def _arrange_pages(self, out, src, slots=None):
         """원본을 연 out을 화면의 페이지 목록(slots) 순서로 맞춘다.
 
         원본 페이지는 처음 나올 때는 그 페이지를 그대로 쓰고(북마크 등 유지), 같은 페이지가
         또 나오거나 다른 파일(클립보드) 페이지면 뒤에 새로 붙인다. 같은 페이지 객체를 두 자리에
         쓰면 자르기·기울기가 서로 덮이므로 복제는 꼭 따로 만든다. 마지막에 select로 순서·삭제를 반영한다.
         """
-        if [(path, i) for _, path, i in self.slots] == [(src, i) for i in range(len(out))]:
+        if slots is None:
+            slots = self.slots
+        if [(path, i) for _, path, i in slots] == [(src, i) for i in range(len(out))]:
             return  # 순서 그대로
         seq = []
         used = set()
-        for _, path, i in self.slots:
+        for _, path, i in slots:
             if path == src and i not in used:
                 used.add(i)
                 seq.append(i)
