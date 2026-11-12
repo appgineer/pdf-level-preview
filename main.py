@@ -125,7 +125,7 @@ BAND_SIZE_TOL_MM = 2.0
 # 설정 파일의 자르기(mm) 자리를 보여주는 선 색 (미리보기 / 썸네일)
 CFG_CROP_LINE = "#e00000"
 # 버튼 색 원칙(일반적인 UI): 오른쪽 칸 구간마다 확정 버튼만 파랑([적용]·[설정 저장]), 나머지는 기본(회색) 버튼.
-# 툴바 [저장 ▼]도 색 없음(사용자 요청). 예전엔 버튼마다 색이 달라(보라·진회색·청록·초록) 무엇이 중요한지 안 보였다
+# 툴바 [저장]도 색 없음(사용자 요청). 예전엔 버튼마다 색이 달라(보라·진회색·청록·초록) 무엇이 중요한지 안 보였다
 SAVE_BTN_BG, SAVE_BTN_ACTIVE = "#1f6fd0", "#17559f"      # 확정 버튼 (파랑, 흰 글씨)
 # 버튼에 마우스를 올리면 이만큼(ms) 뒤 설명 상자(툴팁)를 띄운다 (_add_tooltip). 버튼 아래 설명 글 대신
 TOOLTIP_DELAY_MS = 500
@@ -1251,12 +1251,12 @@ class PDFLevelPreviewApp:
         toolbar.pack(side=tk.TOP, fill=tk.X)
 
         # 버튼 사이를 띄운다 (TOOLBAR_BTN_GAP)
-        # [저장 ▼]: 툴바 맨 왼쪽, 색 없는 기본 버튼. 누르면 오른쪽 클릭 메뉴처럼 바로 아래에 [저장]·[다른 이름으로 저장]
+        # [저장]: 툴바 맨 왼쪽, 색 없는 기본 버튼 (화살표 표시 없음, 사용자 요청). 누르면 오른쪽 클릭 메뉴처럼 바로 아래에 [저장]·[다른 이름으로 저장]
         # (사용자 요청. 두 버튼이 따로 있다가 하나로). 둘의 차이는 버튼 툴팁
         self._save_menu = tk.Menu(self.root, tearoff=0, font=UI_FONT)
         self._save_menu.add_command(label="저장", accelerator="Ctrl+S", command=self.save_pdf)
         self._save_menu.add_command(label="다른 이름으로 저장", accelerator="Ctrl+Shift+S", command=self.save_edited_pdf)
-        save_btn = tk.Button(toolbar, text="저장 ▼", cursor="hand2", font=UI_FONT)
+        save_btn = tk.Button(toolbar, text="저장", cursor="hand2", font=UI_FONT)
         save_btn.config(command=lambda: self._show_save_menu(save_btn))
         save_btn.pack(side=tk.LEFT, padx=(6, 0))
         _add_tooltip(save_btn, "저장 (Ctrl+S): 숨김 저장. 원본에 덮어쓰고 창을 닫습니다.\n"
@@ -1583,7 +1583,7 @@ class PDFLevelPreviewApp:
             self._paned.paneconfigure(parent, width=need)
 
     def _show_save_menu(self, btn):
-        """툴바 [저장 ▼]: 버튼 바로 아래에 [저장]·[다른 이름으로 저장] 메뉴 (썸네일 오른쪽 클릭 메뉴처럼)"""
+        """툴바 [저장]: 버튼 바로 아래에 [저장]·[다른 이름으로 저장] 메뉴 (썸네일 오른쪽 클릭 메뉴처럼)"""
         try:
             self._save_menu.tk_popup(btn.winfo_rootx(), btn.winfo_rooty() + btn.winfo_height())
         finally:
