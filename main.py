@@ -64,6 +64,9 @@ BIG_PREFETCH_MS = 300
 VIEW_MODES = (("기본 보기 (F1)", None), ("10개씩 보기 (F2)", THUMB_GRID_COLS), ("5개씩 크게 보기 (F3)", THUMB_BIG_COLS))
 # F2·F3에서 마우스를 올린 썸네일 가운데 [열기] 버튼 바탕색 (흰 글씨). 누르면 그 페이지를 크게 띄운다 (_open_page_popup)
 THUMB_OPEN_BG = "#1f6fd0"
+# [열기]를 띄운 페이지에 마우스가 이만큼(ms) 머물면 그 페이지를 팝업 크기로 미리 렌더한다 (누르면 바로 또렷하게).
+# 지나가기만 한 페이지까지 렌더하면 워커가 그걸 하느라 정작 누른 페이지가 늦어진다
+HOVER_PREFETCH_MS = 120
 INDICATOR_SIZE = 24  # 체크박스/라디오버튼 인디케이터 크기
 INDICATOR_MARK = "#e00000"  # 선택 표시(체크마크/라디오 점) 색. 검은색은 눈에 잘 안 띈다
 # 숫자·영문 글씨("0.5mm") 옆 라디오 동그라미를 이만큼(px) 내린다. 한글 글꼴은 숫자·영문이 글자 칸 아래쪽에 앉아서
@@ -1124,6 +1127,9 @@ class PDFLevelPreviewApp:
         self._page_popup = False  # F2·F3에서 [열기]로 띄운 페이지 팝업이 열려 있는지
         self._open_btn_idx = None  # [열기] 버튼을 그려 둔 썸네일 (화면 위치)
         self._open_btn_wh = None  # [열기] 버튼 크기 (px, 처음 쓸 때 잰다)
+        self._hover_prefetch_id = None  # [열기] 페이지 미리 렌더 타이머 (HOVER_PREFETCH_MS)
+        self._popup_wh = None  # 팝업 크기 = 넓은 보기로 가기 전 가운데 미리보기 칸 크기 (set_view에서 잰다)
+        self._thumb_resize_id = None  # 썸네일 칸 크기가 바뀌어 다시 배치할 예정 (<Configure>를 모아 한 번에)
         self._big_thumbs = {}  # (파일, 페이지 번호) → 큰 썸네일 (THUMB_BIG_W 폭, 최근 THUMB_BIG_CACHE장)
         # 큰 썸네일 요청: 보이는 페이지 먼저(_big_want), 미리 그리기는 그다음(_big_prefetch). 프로세스마다 한 장씩만 맡긴다
         self._big_want = []      # [(파일, 페이지 번호)] 화면에 보이는데 큰 것이 없는 페이지
@@ -1410,10 +1416,10 @@ class PDFLevelPreviewApp:
         preview_frame = tk.Frame(paned, highlightthickness=FOCUS_LINE_W, cursor="arrow")
         paned.add(preview_frame, minsize=400, stretch="always")
         self._preview_frame = preview_frame
-        # F2·F3 페이지 팝업 맨 위 줄 (팝업일 때만 보인다, _open_page_popup)
-        self._popup_bar = tk.Frame(preview_frame, padx=8, pady=6)
-        tk.Button(self._popup_bar, text="닫기 (Esc)", command=self._close_page_popup,
-                  cursor="hand2", font=UI_FONT).pack(side=tk.RIGHT)
+        # F2·F3 페이지 팝업의 [닫기 (Esc)]: 팝업일 때만 캔버스 오른쪽 위에 올린다 (_open_page_popup). 위에 줄을 따로 두면
+        # 캔버스가 그만큼 작아져 기본 보기와 렌더 크기가 달라진다
+        self._popup_close = tk.Button(preview_frame, text="닫기 (Esc)", command=self._close_page_popup,
+                                      cursor="hand2", font=UI_FONT)
 
         prev_vscroll = ttk.Scrollbar(preview_frame, orient=tk.VERTICAL)
         prev_hscroll = ttk.Scrollbar(preview_frame, orient=tk.HORIZONTAL)
@@ -2013,7 +2019,9 @@ class PDFLevelPreviewApp:
         y = row * self._thumb_cell_h + THUMB_MARGIN + self._thumb_row_pad // 2
         return x, y
 
-    def _draw_visible_thumbs(self):
+    def _draw_visible_thumbs(self, margin=True):
+        """보이는 줄의 썸네일을 그리고 벗어난 것은 지운다. margin: 위아래로 한 줄씩 더 그려 둔다(휠로 굴려도 빈칸이 안
+        보이게). False면 화면에 보이는 줄만 (_relayout_thumbs가 먼저 보일 것부터)"""
         if self._page_count == 0:
             return
 
@@ -2026,8 +2034,11 @@ class PDFLevelPreviewApp:
         if total_h <= 0:
             return
 
-        vis_top = top_frac * total_h - self._thumb_cell_h
-        vis_bot = bot_frac * total_h + self._thumb_cell_h
+        if margin:
+            vis_top = top_frac * total_h - self._thumb_cell_h
+            vis_bot = bot_frac * total_h + self._thumb_cell_h
+        else:  # 아래 끝에 딱 걸친 다음 줄은 안 보인다 (-1)
+            vis_top, vis_bot = top_frac * total_h, bot_frac * total_h - 1
 
         top_row = max(0, int(vis_top // self._thumb_cell_h))
         bot_row = int(vis_bot // self._thumb_cell_h)
@@ -2378,29 +2389,45 @@ class PDFLevelPreviewApp:
         self._visible_redraw_id = self.root.after(16, self._draw_visible_thumbs)
 
     def _on_thumb_canvas_resize(self, event):
+        # <Configure>가 잇달아 여러 번 와도 마지막 크기로 한 번만 다시 배치한다. F2·F3은 칸 크기마다 썸네일 폭이 달라
+        # 올 때마다 다시 그리면 그 폭의 그림을 새로 만든다
+        if self._page_count and self._thumb_resize_id is None:
+            self._thumb_resize_id = self.root.after_idle(self._apply_thumb_resize)
+
+    def _apply_thumb_resize(self):
+        self._thumb_resize_id = None
         if self._page_count == 0:
             return
-        self._relayout_thumbs()
-        row = self.current_page // self._thumb_cols
-        if self._thumb_return:  # [보기 변경]에서 막 돌아왔다: 보던(고른) 페이지가 두 번째 줄에 오게
-            self._thumb_scroll_to_row(max(0, row - 1))
-        else:  # 크기가 바뀌면(보기 변경을 켤 때 포함) 지금 페이지가 든 N줄 묶음을 맨 위부터 딱 맞게
-            n = self._thumb_page_rows
-            self._thumb_scroll_to_row(row // n * n)
+
+        def top_row():
+            row = self.current_page // self._thumb_cols
+            if self._thumb_return:  # [보기 변경]에서 막 돌아왔다: 보던(고른) 페이지가 두 번째 줄에 오게
+                return max(0, row - 1)
+            n = self._thumb_page_rows  # 크기가 바뀌면(보기 변경을 켤 때 포함) 지금 페이지가 든 N줄 묶음을 맨 위부터 딱 맞게
+            return row // n * n
+        self._relayout_thumbs(top_row)
 
     def _thumb_scroll_to_row(self, row):
         """그 줄이 썸네일 패널 맨 위에 오게 스크롤"""
         if self._thumb_total_height > 0:
             self.thumb_canvas.yview_moveto(row * self._thumb_cell_h / self._thumb_total_height)
 
-    def _relayout_thumbs(self):
-        """칸 배치를 다시 계산하고 보이는 썸네일을 처음부터 다시 그린다 (렌더는 다시 안 한다)"""
+    def _relayout_thumbs(self, top_row=None):
+        """칸 배치를 다시 계산하고 보이는 썸네일을 처음부터 다시 그린다 (렌더는 다시 안 한다).
+
+        top_row(): 새 배치에서 맨 위에 올 줄. 그리기 전에 스크롤한다: 그린 뒤에 옮기면 옛 스크롤 자리(F2·F3·기본 보기는
+        칸 크기가 달라 엉뚱한 페이지)까지 한 벌 더 만들어 보기를 바꿀 때 버벅였다. 화면에 보이는 줄을 먼저 그리고 위아래
+        여분 줄은 그다음(_schedule_visible_redraw)에 그려 보기가 빨리 바뀐다.
+        """
         self._compute_thumb_layout()
         self.thumb_canvas.delete("all")
         self._drawn_pages.clear()
         self.thumbnail_photo_refs.clear()
         self._selection_rect_id = None
-        self._draw_visible_thumbs()
+        if top_row is not None:
+            self._thumb_scroll_to_row(top_row())
+        self._draw_visible_thumbs(margin=False)
+        self._schedule_visible_redraw()
 
     # ------------------------------------------------------------------ #
     # [보기 변경] (F2): 썸네일만 넓게 + 누르면 미리보기 팝업
@@ -2419,6 +2446,8 @@ class PDFLevelPreviewApp:
         self._grid_cols = cols
         if old is None:  # 기본 → 넓은 보기
             self._normal_left_w = left.winfo_width()
+            # [열기] 팝업은 이 크기로 (캔버스는 숨겨도 이 크기 그대로라, 넓은 보기에서 고른 페이지 렌더가 팝업에 맞다)
+            self._popup_wh = (frame.winfo_width(), frame.winfo_height())
             # 빠지는 가운데 칸 + 경계선(sashwidth 28 + 양쪽 sashpad 4)만큼 왼쪽을 넓힌다
             wide = left.winfo_width() + frame.winfo_width() + 36
             paned.forget(frame)
@@ -2433,9 +2462,8 @@ class PDFLevelPreviewApp:
             paned.paneconfigure(left, width=self._normal_left_w, stretch="last")
             self.preview_canvas.focus_set()
         elif self._page_count:  # 넓은 보기끼리: 패널 크기가 그대로라 <Configure>가 안 온다. 직접 다시 배치
-            self._relayout_thumbs()
-            n = self._thumb_page_rows
-            self._thumb_scroll_to_row(self.current_page // self._thumb_cols // n * n)
+            self._relayout_thumbs(lambda: self.current_page // self._thumb_cols
+                                  // self._thumb_page_rows * self._thumb_page_rows)
         self._view_var.set(next(name for name, c in VIEW_MODES if c == cols))
 
     def _toggle_view(self, cols):
@@ -2468,11 +2496,18 @@ class PDFLevelPreviewApp:
             canvas.create_text((x0 + x1) // 2, (y0 + y1) // 2, text="열기", fill="white",
                                font=UI_FONT_BOLD, tags="open_btn")
             self._open_btn_idx = idx
+            # 잠깐 머물면 그 페이지를 미리 렌더해 둔다 (누르면 흐린 임시 그림 없이 바로 또렷하게)
+            if self._hover_prefetch_id is not None:
+                self.root.after_cancel(self._hover_prefetch_id)
+            self._hover_prefetch_id = self.root.after(HOVER_PREFETCH_MS, lambda i=idx: self._prefetch_preview(i))
         cursor = "hand2" if self._open_btn_hit(event) else "arrow"
         if canvas.cget("cursor") != cursor:
             canvas.config(cursor=cursor)
 
     def _hide_open_btn(self):
+        if self._hover_prefetch_id is not None:  # 머물지 않고 떠났다: 미리 렌더도 안 한다
+            self.root.after_cancel(self._hover_prefetch_id)
+            self._hover_prefetch_id = None
         if self._open_btn_idx is None:
             return
         self._open_btn_idx = None
@@ -2490,11 +2525,13 @@ class PDFLevelPreviewApp:
         return x0 <= cx <= x1 and y0 <= cy <= y1
 
     def _open_page_popup(self, idx):
-        """F2·F3: 그 페이지를 썸네일 위에 크게 띄운다 ([열기]). 맨 위 줄 [닫기 (Esc)].
+        """F2·F3: 그 페이지를 썸네일 위에 크게 띄운다 ([열기]). 캔버스 오른쪽 위에 [닫기 (Esc)].
 
         가운데 미리보기 칸을 그대로 옮겨 올리므로(썸네일 칸 안 place, 같은 창) 끌어서 기울기 회전·확대·Enter [적용]·
-        [저장 크기 불러오기] 박스 옮기기가 그대로 되고, 오른쪽 편집 구간도 이 페이지에 쓴다. 렌더는 미리보기 워커가
-        백그라운드로 하고, 오기 전에는 썸네일을 키운 임시 그림을 바로 보인다(_draw_popup_placeholder) → 기다림 없이 뜬다
+        [저장 크기 불러오기] 박스 옮기기가 그대로 되고, 오른쪽 편집 구간도 이 페이지에 쓴다.
+        크기는 기본 보기의 가운데 미리보기 칸 그대로(_popup_wh, 썸네일 칸 높이 전체)라 렌더 키가 같다: 넓은 보기에서
+        페이지를 고를 때 해 둔 렌더와 [열기]에 마우스를 올릴 때 미리 한 렌더(_prefetch_preview)를 그대로 써서 바로
+        또렷하다. 렌더가 아직이면 썸네일을 키운 임시 그림을 먼저 보인다(_draw_popup_placeholder)
         """
         if self._grid_cols is None:
             return
@@ -2502,13 +2539,15 @@ class PDFLevelPreviewApp:
         frame = self._preview_frame
         if not self._page_popup:
             self._page_popup = True
-            self._popup_bar.pack(side=tk.TOP, fill=tk.X, before=frame.pack_slaves()[0])
-            frame.place(in_=self._thumb_frame, relx=0.5, rely=0.5, relwidth=0.8, relheight=0.96, anchor=tk.CENTER)
+            left = self._thumb_frame
+            w, h = self._popup_wh or (left.winfo_width(), left.winfo_height())
+            frame.place(in_=left, relx=0.5, rely=0.5, anchor=tk.CENTER, bordermode=tk.OUTSIDE,
+                        width=min(w, left.winfo_width()), height=min(h, left.winfo_height()))
             frame.lift()
-            # 칸 크기를 먼저 정해야 아래 페이지 선택이 팝업 크기로 렌더를 맡긴다 (옛 크기로 맡기면 한 장 더 기다린다)
+            self._popup_close.place(in_=self.preview_canvas, relx=1.0, x=-12, y=12, anchor=tk.NE)
+            self._popup_close.lift()
+            # 칸 크기를 먼저 정해야 아래 페이지 선택이 팝업 크기로 렌더를 맡긴다 (썸네일 칸이 작아 줄인 때만 다르다)
             self.root.update_idletasks()
-            # 캔버스에 남은 옛 그림(숨기기 전 크기·자리)을 보이지 않게: 렌더가 없으면 임시 그림부터 (update_preview)
-            self._shown_key = None
         # 그 페이지만 고른다 (그냥 클릭처럼)
         self._selected = {idx}
         self._sel_anchor = idx
@@ -2524,7 +2563,7 @@ class PDFLevelPreviewApp:
             return
         self._page_popup = False
         self._preview_frame.place_forget()
-        self._popup_bar.pack_forget()
+        self._popup_close.place_forget()
         self.thumb_canvas.focus_set()
 
     def _draw_popup_placeholder(self):
@@ -3252,19 +3291,21 @@ class PDFLevelPreviewApp:
         else:
             self.zoom_label.config(text=f"{pct}%")
 
-    def _fit_canvas_size(self):
-        """맞춤이 페이지를 넣을 영역 (캔버스에서 둘레 여백을 뺀 크기).
+    def _fit_canvas_size(self, idx=None):
+        """맞춤이 페이지를 넣을 영역 (캔버스에서 둘레 여백을 뺀 크기). idx: 그 페이지 기준 (기본은 보고 있는 페이지).
 
         잘린 결과로 볼 때는 남는 부분이 이 영역에 꽉 차도록 페이지 전체 기준으로 그만큼 크게 잡는다.
         워커는 페이지 전체를 이 크기에 맞춰 그리고, 화면에서 남는 부분만 잘라 보여준다.
         그래야 자른 페이지가 원래 그 크기였던 페이지와 같은 크기로 보인다.
         """
+        if idx is None:
+            idx = self.current_page
         cw = max(1, self.preview_canvas.winfo_width() - PREVIEW_PAD * 2)
         ch = max(1, self.preview_canvas.winfo_height() - PREVIEW_PAD * 2)
-        if self.pdf_doc is not None and not self._crop_pending(self.current_page):  # [적용] 전이면 페이지 전체로 맞춤
-            top, bottom, left, right = self._page_edit(self.current_page)["crop"]
+        if self.pdf_doc is not None and not self._crop_pending(idx):  # [적용] 전이면 페이지 전체로 맞춤
+            top, bottom, left, right = self._page_edit(idx)["crop"]
             if top or bottom or left or right:
-                w, h = self._page_disp_size(self.current_page)
+                w, h = self._page_disp_size(idx)
                 cw = round(cw * w / (w - left - right))
                 ch = round(ch * h / (h - top - bottom))
         return cw, ch
@@ -3336,23 +3377,44 @@ class PDFLevelPreviewApp:
             return None
         return max(0, min(255, black)), max(0, min(255, white))
 
-    def update_preview(self):
-        if self.pdf_doc is None:
-            return
+    def _preview_key(self, idx):
+        """화면 위치 idx 페이지의 미리보기 렌더 키 (uid, 검은색, 흰색, 배율, 칸 폭, 칸 높이, 90° 회전, 기울기).
+        레벨 입력 중(숫자 아님)이면 None"""
         levels = self._levels()
         if levels is None:
-            return
-        black, white = levels
+            return None
         zoom_pct = self._current_zoom_pct()
         # 맞춤 모드는 캔버스 크기에 따라 결과가 달라지므로 키에 포함.
         # 둘레 여백을 뺀 영역에 맞춰야 페이지 전체와 위아래 여백이 보이고 스크롤이 안 생긴다
-        cw = ch = 0
-        if zoom_pct == 0:
-            cw, ch = self._fit_canvas_size()
+        cw, ch = self._fit_canvas_size(idx) if zoom_pct == 0 else (0, 0)
+        e = self._page_edit(idx)
+        return (self.slots[idx][0],) + levels + (zoom_pct, cw, ch, e["rot"], e["angle"])
 
-        e = self._page_edit(self.current_page)
+    def _prefetch_preview(self, idx):
+        """F2·F3: [열기]를 띄운 페이지를 미리 렌더해 둔다 → 누르면 흐린 임시 그림 없이 바로 또렷하게 (팝업은 기본 보기의
+        가운데 미리보기와 같은 크기라 같은 키). 결과는 preview_cache에만 들어간다(_on_preview_rendered)"""
+        self._hover_prefetch_id = None
+        if self.pdf_doc is None or not 0 <= idx < self._page_count:
+            return
+        key = self._preview_key(idx)
+        _, path, src = self.slots[idx]
+        if key is None or key in self.preview_cache or (path, key) == self._pending_req:
+            return
+        pend = self._pending_req
+        if pend is not None and pend[1][0] == self._cur_uid():
+            # 워커는 밀린 요청 중 가장 최근 것만 보므로, 아직 안 온 보고 있는 페이지 렌더를 같이 보내고 이 페이지는 그다음에
+            # (안 그러면 그 렌더가 버려져 _pending_req가 남은 채 다시 맡기지도 않는다)
+            self._render_req_q.put((pend[0], self.slots[self.current_page][2], pend[1], True, [(path, src, key)]))
+        else:
+            self._render_req_q.put((path, src, key, True, []))
+
+    def update_preview(self):
+        if self.pdf_doc is None:
+            return
+        key = self._preview_key(self.current_page)
+        if key is None:
+            return
         _, path, src = self.slots[self.current_page]
-        key = (self._cur_uid(), black, white, zoom_pct, cw, ch, e["rot"], e["angle"])
         # 한가할 때 미리 렌더할 화면상 앞/뒤 페이지
         neighbors = []
         for nb in (self.current_page + 1, self.current_page - 1):
