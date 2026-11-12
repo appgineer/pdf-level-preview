@@ -1173,8 +1173,6 @@ class PDFLevelPreviewApp:
         self._thumb_redraw_id = None
         self._edits_dirty = False
         self._rotate_drag = None  # (시작 마우스 x, 시작 기울기 °, 같이 돌릴 페이지들)
-        # 전체·홀수·짝수를 선택한 채 기울기를 바꿀 때 물어본 답 (선택, 예/아니요). 같은 선택이면 다시 안 묻는다
-        self._angle_ask = None
         self._rotate_redraw_id = None
         self._rotate_drag_photo = None
         self._syncing_edit = False  # 코드에서 편집 입력칸을 채우는 중 (되먹임 방지)
@@ -2129,6 +2127,8 @@ class PDFLevelPreviewApp:
             # 레벨도 가운데 미리보기와 같게 (설정 파일의 검은색·흰색, 저장할 PDF에는 안 들어간다)
             black, white = self._levels() or (0, 255)
             e = self._page_edit(idx)
+            if self._crop_pending(idx):  # [적용] 전 자르기는 썸네일에 아직 안 넣는다 (확정한 값으로)
+                e = dict(e, crop=list(self._crop_before_edit))
             top, bottom, left, right = e["crop"]
             # 같은 모양으로 만든 적이 있으면 그대로 쓴다 (F2로 보기를 바꾸거나 스크롤해 다시 그릴 때 다시 만들지 않게)
             ck = (page, img is not self.thumbnail_cache[page], black, white, e["rot"], e["angle"],
@@ -3208,7 +3208,7 @@ class PDFLevelPreviewApp:
         """
         cw = max(1, self.preview_canvas.winfo_width() - PREVIEW_PAD * 2)
         ch = max(1, self.preview_canvas.winfo_height() - PREVIEW_PAD * 2)
-        if self.pdf_doc is not None:
+        if self.pdf_doc is not None and not self._crop_pending(self.current_page):  # [적용] 전이면 페이지 전체로 맞춤
             top, bottom, left, right = self._page_edit(self.current_page)["crop"]
             if top or bottom or left or right:
                 w, h = self._page_disp_size(self.current_page)
@@ -3385,6 +3385,7 @@ class PDFLevelPreviewApp:
         self._img_clip = (x0, y0, x0 + iw, y0 + ih)
         # 좌표 계산은 자르기 전 전체 이미지 기준이라, 잘라낸 만큼 원점을 왼쪽 위로 옮겨 둔다
         self._img_origin = (x0 - cut[0], y0 - cut[1]) if cut else (x0, y0)
+        self._draw_crop_overlay()
         self._draw_cfg_crop_lines()
         self._draw_rotate_grid()
         # 그사이 각도가 더 바뀌었으면(←/→ 연타, 드래그 중) 예전 각도 화면으로 튀지 않게 바로 덮는다
@@ -3874,7 +3875,7 @@ class PDFLevelPreviewApp:
         finally:
             self._crop_quick_setting = False
         if self.pdf_doc is not None:
-            self._refresh_preview()  # 네 칸을 다 바꾼 뒤 한 번만 잘린 결과로
+            self._refresh_preview()  # 네 칸을 다 바꾼 뒤 한 번만 다시 그림 ([적용] 전이라 자를 영역 표시)
 
     def _sync_crop_quick(self):
         """네 칸이 모두 0.5·1·1.5·2 중 하나로 같으면 그 라디오를 켜고 아니면 모두 끈다 (칸을 직접 고치거나 페이지를 옮겼을 때)"""
@@ -3893,15 +3894,8 @@ class PDFLevelPreviewApp:
 
     def _angle_targets(self):
         """기울기(각도 칸·←→·미리보기 끌기)를 같이 바꿀 페이지 = 썸네일에서 선택한 페이지 (예전엔 보고 있는 페이지만).
-        전체·홀수·짝수를 선택한 상태면 다른 편집 버튼처럼 한 번 묻는다. 같은 선택이면 그 답을 다시 쓴다
-        (칸에 글자를 칠 때마다 묻지 않게). 아니요면 보고 있는 페이지만"""
-        pages = self._edit_pages()
-        if len(pages) <= 1 or not self._sel_kind():
-            return pages
-        sel = frozenset(self._selected)
-        if self._angle_ask is None or self._angle_ask[0] != sel:
-            self._angle_ask = (sel, self._confirm_range("기울기 회전을"))
-        return pages if self._angle_ask[1] else [self.current_page]
+        전체·홀수·짝수를 선택한 상태여도 묻지 않는다 (사용자 요청. 다른 편집 버튼은 묻는다)"""
+        return self._edit_pages()
 
     def _set_angle_selected(self, angle, pages):
         """보고 있는 페이지의 이번 기울기를 angle(°)로 하고, pages의 다른 페이지에는 바뀐 만큼을 더한다
@@ -3957,7 +3951,7 @@ class PDFLevelPreviewApp:
         if self.current_img is None or self._shown_key is None or self._shown_key[0] != self._cur_uid():
             return  # 렌더 대기 중
         x = self.preview_canvas.canvasx(event.x)
-        pages = self._angle_targets()  # 전체·홀수·짝수 선택이면 여기서 한 번 묻는다
+        pages = self._angle_targets()
         self._rotate_drag = (x, self._page_edit(self.current_page)["angle"], pages)
         # 끄는 도중 정식 렌더가 끼어들지 않게 밀린 갱신은 취소한다 (놓을 때 다시 요청)
         if hasattr(self, "_var_after_id"):
@@ -4045,7 +4039,7 @@ class PDFLevelPreviewApp:
         self._set_page_edit(self.current_page, crop=_clamp_margins(margins, w, h))
         if not self._crop_quick_setting:
             self._sync_crop_quick()
-            self._refresh_preview()  # 잘린 결과로 바로 (맞춤 보기면 남는 크기에 맞춰 다시 렌더)
+            self._refresh_preview()  # 바로 다시 그림 ([적용] 전이라 페이지 전체 위에 자를 영역 표시)
 
     def _preview_cut_box(self):
         """미리보기에서 남길 픽셀 영역 (l, t, r, b). 미리보기는 늘 저장될 모양대로 자른다. 자르기가 없으면 None"""
@@ -4058,6 +4052,8 @@ class PDFLevelPreviewApp:
         e = self._page_edit(page)
         if self._shown_key[6] != e["rot"]:
             return None  # 90° 회전 렌더 대기 중
+        if self._crop_pending(page):
+            return None  # [적용] 전 자르기: 페이지 전체 위에 자를 영역만 표시 (_draw_crop_overlay)
         top, bottom, left, right = e["crop"]
         if not (top or bottom or left or right):
             return None
@@ -4090,6 +4086,8 @@ class PDFLevelPreviewApp:
         self._pending_fit_uid = None  # [저장 크기 불러오기]의 박스도 이제 확정
         self._ops_done.add("crop")  # 저장할 때 실제로 잘린 페이지가 있을 때만 적힌다
         self._sync_edit_panel()  # 확정했으니 칸은 다시 0부터
+        self._thumb_dirty.add(self.current_page)  # 확정해서 이제 썸네일에도 잘린 모양으로
+        self._schedule_thumb_redraw()
         self._refresh_preview()
         # 무엇을 얼마나 더했는지 (0.1mm 단위, 바꾼 변만)
         moved = [f"{name} {round(_pt_to_mm(d), 1):+g}" for name, d in zip(("위", "아래", "좌", "우"), delta)
@@ -4237,7 +4235,7 @@ class PDFLevelPreviewApp:
         self._sel_anchor = self.current_page
         self._draw_selection()
         self._sync_edit_panel()
-        self._refresh_preview()  # 맞춘 크기로 잘린 결과
+        self._refresh_preview()  # 페이지 전체 위에 불러온 영역 표시, [적용]을 눌러야 잘린 모양
 
     def _discard_unapplied_crop(self):
         """보던 페이지에서 [적용]하지 않은 자르기(숫자 입력·선 끌기·[저장 크기 불러오기])를 입력 전 값으로 되돌린다.
@@ -4250,6 +4248,35 @@ class PDFLevelPreviewApp:
         if uid == pending:
             self._last_fit_page = None  # 되돌린 값을 다음 불러오기 위치로 기록하지 않게 (끌어 둔 위치는 이어받는다)
         self._set_page_edit(idx, crop=self._crop_before_edit)
+
+    def _crop_pending(self, idx):
+        """화면 위치 idx가 보고 있는 페이지이고 [적용] 안 한 자르기(칸 숫자·0.5~2mm·[저장 크기 불러오기])가 있는지.
+        그동안 미리보기는 페이지 전체 위에 자를 영역만 보이고, [적용]을 눌러야 잘린 모양이 된다 (사용자 요청:
+        "불러와서 적용을 눌러 자르는 것"). 썸네일·괄호 합계도 확정한 값(_crop_before_edit)으로 보인다"""
+        return (idx == self.current_page and self._crop_edit_uid is not None
+                and self.slots[idx][0] == self._crop_edit_uid
+                and list(self._page_edit(idx)["crop"]) != list(self._crop_before_edit))
+
+    def _draw_crop_overlay(self):
+        """[적용] 전 자르기: 페이지 전체 위에 잘릴 곳은 어둡게, 남는 곳은 파란 테두리 (끌어서 옮기지는 않는다).
+        태그 "crop"만 지우고 다시 그린다"""
+        canvas = self.preview_canvas
+        canvas.delete("crop")
+        if self._shown_key is None or not self._crop_pending(self.current_page):
+            return
+        res = self._crop_canvas_rect()
+        if res is None:
+            return  # 렌더 대기 중
+        (x0, y0, x1, y1), _ = res
+        ox, oy = self._img_origin
+        ix1 = ox + self.current_img.width
+        iy1 = oy + self.current_img.height
+        shade = dict(fill="black", stipple="gray50", outline="", tags="crop")
+        canvas.create_rectangle(ox, oy, ix1, y0, **shade)   # 위
+        canvas.create_rectangle(ox, y1, ix1, iy1, **shade)  # 아래
+        canvas.create_rectangle(ox, y0, x0, y1, **shade)    # 좌
+        canvas.create_rectangle(x1, y0, ix1, y1, **shade)   # 우
+        canvas.create_rectangle(x0, y0, x1, y1, outline="#1e90ff", width=2, tags="crop")
 
     def _crop_canvas_rect(self):
         """현재 페이지 자르기 박스의 캔버스 좌표와 배율(px/pt).
