@@ -1350,9 +1350,15 @@ class PDFLevelPreviewApp:
         # highlightthickness=0: Windows 기본 포커스 테두리(검은 선)를 없앤다. 포커스는 구간 빨간 테두리로 보인다
         self.thumb_canvas = tk.Canvas(left, bg=PREVIEW_BG, cursor="arrow", highlightthickness=0)
         thumb_vscroll = ttk.Scrollbar(left, orient=tk.VERTICAL, command=self.thumb_canvas.yview)
+        last_yview = [None]
         def _on_thumb_yscroll(*args):
             thumb_vscroll.set(*args)
-            self._hide_open_btn()  # 버튼이 페이지와 함께 밀려 마우스 아래가 아니게 된다 (마우스를 움직이면 다시)
+            # 실제로 움직였을 때만 [열기]를 숨긴다 (버튼이 페이지와 함께 밀려 마우스 아래가 아니게 된다, 마우스를 움직이면
+            # 다시). Tk는 캔버스 설정을 하나만 바꿔도(커서를 손 모양으로 등) 같은 값으로 이걸 불러서, 버튼에 올리면
+            # 커서 변경 → 숨김 → 다시 그림이 되풀이돼 깜빡이고 누를 때는 없어서 안 눌렸다
+            if args != last_yview[0]:
+                last_yview[0] = args
+                self._hide_open_btn()
             self._schedule_visible_redraw()
         self.thumb_canvas.configure(yscrollcommand=_on_thumb_yscroll)
         thumb_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
@@ -2225,7 +2231,7 @@ class PDFLevelPreviewApp:
             self._show_band_flags()
         if self._open_btn_hit(event):  # F2·F3 썸네일 가운데 [열기]: 그 페이지만 골라 크게 띄운다
             self._open_page_popup(self._open_btn_idx)
-            return
+            return "break"  # 전체 누름(_on_any_press)이 키보드를 팝업에서 썸네일로 도로 가져가지 않게
         shift = event.state & 0x0001
         ctrl = event.state & 0x0004
         shrink = False
