@@ -130,6 +130,9 @@ SAVE_BTN_BG, SAVE_BTN_ACTIVE = "#1f6fd0", "#17559f"      # 확정 버튼 (파랑
 SAVEAS_BTN_BG, SAVEAS_BTN_ACTIVE = "#c0661a", "#a35514"  # 다른 이름으로 저장 (진한 주황, 흰 글씨 대비 약 4)
 # 버튼에 마우스를 올리면 이만큼(ms) 뒤 설명 상자(툴팁)를 띄운다 (_add_tooltip). 버튼 아래 설명 글 대신
 TOOLTIP_DELAY_MS = 500
+# 설정 파일 [고급] 레벨 칸 옆 빠른 값 (누르면 그 칸에 바로, _level_quick)
+LEVEL_BLACK_QUICK = ("0", "10", "20", "30")
+LEVEL_WHITE_QUICK = ("190", "195", "200")
 BTN_PADY = 4  # 버튼·선택창 높이를 맞추는 세로 여백
 # 내장 이미지가 없는 페이지(벡터/텍스트)의 렌더 스케일. 1.0 = 72 DPI
 BASE_SCALE = 8  # 576 DPI
@@ -1249,8 +1252,20 @@ class PDFLevelPreviewApp:
         toolbar.pack(side=tk.TOP, fill=tk.X)
 
         # 버튼 사이를 띄운다 (TOOLBAR_BTN_GAP)
+        # [저장] [다른 이름으로 저장]: 툴바 맨 왼쪽 (사용자 요청. 오른쪽 칸 아래 고정 줄에 있다가 옮김). 차이는 툴팁
+        save_btn = tk.Button(toolbar, text="저장 (Ctrl+S)", command=self.save_pdf, cursor="hand2", font=UI_FONT,
+                             bg=SAVE_BTN_BG, fg="white", activebackground=SAVE_BTN_ACTIVE, activeforeground="white")
+        save_btn.pack(side=tk.LEFT, padx=(6, 0))
+        saveas_btn = tk.Button(toolbar, text="다른 이름으로 저장", command=self.save_edited_pdf, cursor="hand2",
+                               font=UI_FONT, bg=SAVEAS_BTN_BG, fg="white", activebackground=SAVEAS_BTN_ACTIVE,
+                               activeforeground="white")
+        saveas_btn.pack(side=tk.LEFT, padx=(TOOLBAR_BTN_GAP, 0))
+        _add_tooltip(save_btn, "Ctrl+S · 숨김 저장: 원본에 덮어쓰고 창을 닫습니다.\n"
+                               "가린 부분·지운 페이지 데이터가 남아 용량은 그대로입니다.")
+        _add_tooltip(saveas_btn, "Ctrl+Shift+S · 보이는 그대로 굳힘: 가린 부분·지운 페이지를 지워\n"
+                                 "용량이 줄고 되돌릴 수 없습니다. 저장한 뒤 창을 닫습니다.")
         tk.Button(toolbar, text="문자 읽기", command=self.read_text_on_screen, cursor="hand2",
-                  font=UI_FONT).pack(side=tk.LEFT, padx=(6, 0))
+                  font=UI_FONT).pack(side=tk.LEFT, padx=(TOOLBAR_BTN_GAP * 2, 0))  # 저장 묶음과 띄운다
         tk.Button(toolbar, text="로마자 표기", command=self.set_roman_labels, cursor="hand2",
                   font=UI_FONT).pack(side=tk.LEFT, padx=(TOOLBAR_BTN_GAP, 0))
         tk.Button(toolbar, text="표지 넣기", command=self.open_cover_dialog, cursor="hand2",
@@ -1419,25 +1434,6 @@ class PDFLevelPreviewApp:
         """오른쪽 설정 컬럼. 스크롤 캔버스 하나 안에 모든 설정을 세로로 쌓는다."""
         FNT = UI_FONT
 
-        # 맨 아래 고정 줄: PDF [저장] [다른 이름으로 저장]. 스크롤과 상관없이 늘 보인다 (일반적인 설정 창처럼).
-        # 캔버스보다 먼저 아래에 붙여 둬야 캔버스가 나머지를 채운다. 섹션 색칠(_tint)은 안 받는 기본 바탕
-        footer = tk.Frame(parent, padx=16, pady=8)
-        footer.pack(side=tk.BOTTOM, fill=tk.X)
-        ttk.Separator(parent, orient=tk.HORIZONTAL).pack(side=tk.BOTTOM, fill=tk.X)
-        footer.columnconfigure((0, 1), weight=1, uniform="half")
-        save_btn = tk.Button(footer, text="저장 (Ctrl+S)", command=self.save_pdf, pady=BTN_PADY, cursor="hand2",
-                             font=FNT, bg=SAVE_BTN_BG, fg="white", activebackground=SAVE_BTN_ACTIVE,
-                             activeforeground="white")
-        save_btn.grid(row=0, column=0, sticky="ew", padx=(0, 2))
-        saveas_btn = tk.Button(footer, text="다른 이름으로 저장", command=self.save_edited_pdf, pady=BTN_PADY,
-                               cursor="hand2", font=FNT, bg=SAVEAS_BTN_BG, fg="white",
-                               activebackground=SAVEAS_BTN_ACTIVE, activeforeground="white")
-        saveas_btn.grid(row=0, column=1, sticky="ew", padx=(2, 0))
-        _add_tooltip(save_btn, "Ctrl+S · 숨김 저장: 원본에 덮어쓰고 창을 닫습니다.\n"
-                               "가린 부분·지운 페이지 데이터가 남아 용량은 그대로입니다.")
-        _add_tooltip(saveas_btn, "Ctrl+Shift+S · 보이는 그대로 굳힘: 가린 부분·지운 페이지를 지워\n"
-                                 "용량이 줄고 되돌릴 수 없습니다. 저장한 뒤 창을 닫습니다.")
-
         canvas = tk.Canvas(parent, highlightthickness=0)
         self._settings_canvas = canvas  # 오른쪽 빈 곳을 누르면 여기로 키보드 포커스
         vscroll = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=canvas.yview)
@@ -1529,6 +1525,7 @@ class PDFLevelPreviewApp:
         self.black_var = tk.IntVar(value=0)
         self.black_entry = tk.Entry(r_black, textvariable=self.black_var, width=6, font=FNT)
         self.black_entry.pack(side=tk.LEFT, padx=6)
+        self._level_quick(r_black, self.black_var, LEVEL_BLACK_QUICK)
 
         r_white = tk.Frame(self.level_frame)
         r_white.pack(fill=tk.X, pady=(0, 12))
@@ -1536,6 +1533,7 @@ class PDFLevelPreviewApp:
         self.white_var = tk.IntVar(value=255)
         self.white_entry = tk.Entry(r_white, textvariable=self.white_var, width=6, font=FNT)
         self.white_entry.pack(side=tk.LEFT, padx=6)
+        self._level_quick(r_white, self.white_var, LEVEL_WHITE_QUICK)
 
         tk.Button(self.level_frame, text="비교옵션 추가", command=self.add_level, padx=10, pady=2,
                   cursor="hand2", font=FNT).pack(fill=tk.X)
@@ -1581,9 +1579,29 @@ class PDFLevelPreviewApp:
         # 스크롤바 자리와 테두리까지 넣는다. 사용자가 경계선을 끌어 줄이는 것은 그대로 된다(최소 400)
         inner.update_idletasks()
         border = 2 * (parent.winfo_pixels(parent["bd"]) + parent.winfo_pixels(parent["highlightthickness"]))
-        need = max(inner.winfo_reqwidth() + vscroll.winfo_reqwidth(), footer.winfo_reqwidth()) + border
+        need = inner.winfo_reqwidth() + vscroll.winfo_reqwidth() + border
         if need > SETTINGS_W:
             self._paned.paneconfigure(parent, width=need)
+
+    def _level_quick(self, row, var, values):
+        """레벨 칸 옆 빠른 값 라디오 (검은색 0·10·20·30, 흰색 190·195·200): 누르면 그 칸에 바로 넣는다.
+        칸 값이 그중 하나면 그 동그라미가 켜진다 (직접 고쳐도 따라간다)"""
+        pick = tk.StringVar(value="none")  # ""은 Tk 라디오의 중간 상태라 안 쓴다
+
+        def sync(*_):
+            try:
+                v = str(var.get())
+            except (tk.TclError, ValueError):  # 칸이 비었거나 숫자가 아님
+                v = ""
+            pick.set(v if v in values else "none")
+
+        for v in values:
+            tk.Radiobutton(row, text=v, variable=pick, value=v, command=lambda v=v: var.set(int(v)),
+                           cursor="hand2", font=UI_FONT, image=self._ind_tk['rb_off_low'],
+                           selectimage=self._ind_tk['rb_on_low'], indicatoron=False, compound=tk.RIGHT,
+                           bd=0, relief=tk.FLAT, selectcolor=self._bg_color).pack(side=tk.LEFT, padx=(8, 0))
+        var.trace_add("write", sync)
+        sync()
 
     def _section_header(self, parent, text, color, first=False):
         """오른쪽 패널을 구간으로 나누는 머리말 (편집 / 설정 파일)"""
@@ -1699,13 +1717,6 @@ class PDFLevelPreviewApp:
                            indicatoron=False, compound=tk.RIGHT, bd=0, relief=tk.FLAT,
                            selectcolor=self._bg_color).grid(row=row, column=col, sticky=tk.W,
                                                             padx=(16 if col == 6 else 8, 0), pady=2)
-        # [적용]: 자르기 칸 바로 아래 (이 구간의 확정 버튼, 파랑). Enter와 같다
-        apply_btn = tk.Button(parent, text="적용", command=self.apply_crop_range, pady=BTN_PADY,
-                              cursor="hand2", font=FNT, bg=SAVE_BTN_BG, fg="white",
-                              activebackground=SAVE_BTN_ACTIVE, activeforeground="white")
-        apply_btn.pack(fill=tk.X, pady=(8, 0))
-        _add_tooltip(apply_btn, "Enter · 칸에서 바꾼 만큼 선택한 페이지마다 더 자릅니다.\n"
-                                "[적용] 없이 다른 페이지로 가면 넣은 값은 되돌아갑니다.")
         # [검은 여백 자르기]: 선택한 페이지에서 스캐너 검은 배경 띠(직사각형)를 찾아 자른다. 자른 쪽 번호는 바로 아래
         self.band_btn = tk.Button(parent, text="검은 여백 자르기", command=self.auto_black_bands, pady=BTN_PADY,
                                   cursor="hand2", font=FNT)
@@ -1735,8 +1746,15 @@ class PDFLevelPreviewApp:
         reset_btn = tk.Button(parent, text="선택한 페이지 편집 초기화", command=self.reset_edits, pady=BTN_PADY,
                               cursor="hand2", font=FNT)
         reset_btn.pack(fill=tk.X)
-        _add_tooltip(reset_btn, "선택한 페이지의 90° 회전·기울기·자르기를 파일을 연 상태로 되돌립니다.\n"
-                                "(전에 저장해 둔 편집은 그대로)")
+        _add_tooltip(reset_btn, "선택한 페이지의 90° 회전·기울기·자르기를 처음 상태로 되돌립니다.\n"
+                                "[저장]으로 저장해 둔 편집까지 되돌립니다 (지운 페이지는 안 살림).")
+        # [적용]: 편집 구간 맨 끝 (이 구간의 확정 버튼, 파랑, 사용자 요청으로 초기화 아래). Enter와 같다
+        apply_btn = tk.Button(parent, text="적용", command=self.apply_crop_range, pady=BTN_PADY,
+                              cursor="hand2", font=FNT, bg=SAVE_BTN_BG, fg="white",
+                              activebackground=SAVE_BTN_ACTIVE, activeforeground="white")
+        apply_btn.pack(fill=tk.X, pady=(8, 0))
+        _add_tooltip(apply_btn, "Enter · 자르기 칸·[저장 크기 불러오기]를 확정합니다. 바꾼 만큼 선택한 페이지마다 더 자릅니다.\n"
+                                "[적용] 없이 다른 페이지로 가면 넣은 값은 되돌아갑니다.")
 
     def _build_crop_config(self, parent):
         """자르기 설정 (config.json의 crop_mm, 자동화 프로그램용). 편집기의 자르기와는 별개"""
@@ -4702,16 +4720,16 @@ class PDFLevelPreviewApp:
 
         # OCR 언어 (1열 세로, 중복 선택) - 스크롤은 바깥 설정 캔버스가 담당
         self.ocr_grid = tk.Frame(parent)
-        ocr_names = [
-            "한국어", "영어", "일본어",
+        ocr_names = [  # 자주 쓰는 것부터 (사용자가 정한 순서)
+            "한국어 및 영어", "영어", "일본어 및 영어",
             "중국어 간체", "중국어 번체",
             None,  # 간격
-            "한국어 및 영어", "일본어 및 영어",
-            "중국어 간체 및 영어", "중국어 번체 및 영어",
-            None,  # 간격
-            "독일어", "프랑스어", "스페인어",
             "간단한 수학 수식", "단순 화학식", "숫자",
             "Java", "C/C++",
+            None,  # 간격: 나머지 (원래 순서)
+            "한국어", "일본어",
+            "중국어 간체 및 영어", "중국어 번체 및 영어",
+            "독일어", "프랑스어", "스페인어",
         ]
         for txt in ocr_names:
             if txt is None:
