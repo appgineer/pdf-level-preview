@@ -118,16 +118,12 @@ BAND_SIZE_MIN_MM = 1.5
 BAND_SIZE_TOL_MM = 2.0
 # 설정 파일의 자르기(mm) 자리를 보여주는 선 색 (미리보기 / 썸네일)
 CFG_CROP_LINE = "#e00000"
-# 눈에 띄어야 하는 버튼/선택창 색
-SAVE_BTN_BG, SAVE_BTN_ACTIVE = "#1f6fd0", "#17559f"      # 적용 / 저장 크기 불러오기 (파랑)
-# 다른 이름으로 저장: 초록, 흰 글씨
-SAVEAS_BTN_BG, SAVEAS_BTN_ACTIVE = "#3a9d5d", "#2f7f4c"
-# 저장 (Ctrl+S): 청록, 흰 글씨. [다른 이름으로 저장](굳힘, 되돌릴 수 없음)과 헷갈리지 않게 색을 나눈다.
-# 바로 위 [적용]의 파랑·설정 저장의 보라·검은 여백의 진회색과도 다르게
-SAVE_PDF_BG, SAVE_PDF_ACTIVE = "#0f8b99", "#0b6d78"
-CFG_SAVE_BG, CFG_SAVE_ACTIVE = "#7b4fc0", "#653da8"      # 설정 저장 (보라)
-DESKEW_BTN_BG, DESKEW_BTN_ACTIVE = "#8e44ad", "#763a91"  # 자동 보정 (붉은 보라)
-BAND_BTN_BG, BAND_BTN_ACTIVE = "#333333", "#111111"      # 검은 여백 자르기 (진회색, 흰 글씨)
+# 버튼 색 원칙(일반적인 UI): 구간마다 확정 버튼만 파랑([적용]·[설정 저장]·[저장]), 되돌릴 수 없는 [다른 이름으로 저장]은
+# 주황, 나머지는 기본(회색) 버튼. 예전엔 버튼마다 색이 달라(보라·진회색·청록·초록) 무엇이 중요한지 안 보였다
+SAVE_BTN_BG, SAVE_BTN_ACTIVE = "#1f6fd0", "#17559f"      # 확정 버튼 (파랑, 흰 글씨)
+SAVEAS_BTN_BG, SAVEAS_BTN_ACTIVE = "#c0661a", "#a35514"  # 다른 이름으로 저장 (진한 주황, 흰 글씨 대비 약 4)
+# 버튼에 마우스를 올리면 이만큼(ms) 뒤 설명 상자(툴팁)를 띄운다 (_add_tooltip). 버튼 아래 설명 글 대신
+TOOLTIP_DELAY_MS = 500
 BTN_PADY = 4  # 버튼·선택창 높이를 맞추는 세로 여백
 # 내장 이미지가 없는 페이지(벡터/텍스트)의 렌더 스케일. 1.0 = 72 DPI
 BASE_SCALE = 8  # 576 DPI
@@ -155,8 +151,6 @@ CONFIG_DEFAULT = {"crop_mm": {"top": 0, "bottom": 0, "left": 0, "right": 0}, "sc
                   "is_split": False, "split_method": "none", "split_page_ranges": "", "split_size_mb": 0}
 # 자르고 남는 최소 크기 (pt, 72pt = 25.4mm)
 MIN_CROP_PT = 36
-# 미리보기에서 자르기 선을 잡을 수 있는 거리 (선 양쪽 px)
-CROP_GRAB_PX = 6
 # 썸네일: 선택된 칸 배경색(연파랑) / 드래그로 옮길 때 끼워 넣을 자리 선 색
 THUMB_SEL_BG = "#cfe0fb"
 # 미리보기·썸네일 바탕 (진회색). 흰 종이와 여백이 잘 구별된다
@@ -198,6 +192,57 @@ COVER_PREVIEW_W, COVER_PREVIEW_H = 360, 500
 COVER_HIT_FG = "#d65c5c"
 # 표지 넣기 칸마다 고를 수 있는 출처 (앞에 있는 것을 먼저 고른다: 예스24가 크고, 알라딘은 워터마크가 없다)
 COVER_SOURCES = ("예스24", "알라딘")
+
+
+def _tooltip_pos(wx, wy, wh, tw, th, right, bottom):
+    """툴팁 왼쪽 위 (x, y): 위젯(왼쪽 위 wx, wy, 높이 wh) 바로 아래. 창 아래 끝(bottom)을 넘으면 위젯 위로,
+    창 오른쪽 끝(right)을 넘으면 왼쪽으로 당긴다 (tw, th = 툴팁 크기)"""
+    x, y = wx + 8, wy + wh + 4
+    if y + th > bottom:
+        y = wy - th - 4
+    if x + tw > right:
+        x = max(0, right - tw - 4)
+    return x, y
+
+
+def _add_tooltip(widget, text):
+    """버튼에 마우스를 올리면 TOOLTIP_DELAY_MS 뒤 설명 상자를 띄운다. 벗어나거나 누르면 닫는다.
+
+    오른쪽 맨 아래 고정 줄 버튼은 위로 띄워야 해서 창 크기로 자리를 잡는다. winfo_screen*는 안 쓴다
+    (DPI 설정을 창을 만든 뒤 켜서 화면 크기가 작게 나온다)
+    """
+    state = {"after": None, "tip": None}
+
+    def hide(_=None):
+        if state["after"] is not None:
+            widget.after_cancel(state["after"])
+            state["after"] = None
+        if state["tip"] is not None:
+            state["tip"].destroy()
+            state["tip"] = None
+
+    def show():
+        state["after"] = None
+        tip = tk.Toplevel(widget)
+        tip.overrideredirect(True)
+        tip.attributes("-topmost", True)
+        tk.Label(tip, text=text, font=UI_FONT_SMALL, bg="#ffffe1", fg="#111", justify=tk.LEFT,
+                 wraplength=420, padx=8, pady=4, relief=tk.SOLID, bd=1).pack()
+        tip.update_idletasks()
+        top = widget.winfo_toplevel()
+        x, y = _tooltip_pos(widget.winfo_rootx(), widget.winfo_rooty(), widget.winfo_height(),
+                            tip.winfo_reqwidth(), tip.winfo_reqheight(),
+                            top.winfo_rootx() + top.winfo_width(), top.winfo_rooty() + top.winfo_height())
+        tip.geometry(f"+{x}+{y}")
+        state["tip"] = tip
+
+    def schedule(_=None):
+        hide()
+        state["after"] = widget.after(TOOLTIP_DELAY_MS, show)
+
+    widget.bind("<Enter>", schedule, add="+")
+    widget.bind("<Leave>", hide, add="+")
+    widget.bind("<ButtonPress>", hide, add="+")
 
 
 def _make_indicator_images():
@@ -1013,8 +1058,6 @@ class PDFLevelPreviewApp:
         self._thumb_dirty = set()   # 편집값이 바뀌어 다시 그릴 썸네일
         self._thumb_redraw_id = None
         self._edits_dirty = False
-        self._crop_drag = None  # (대상, 시작 x, 시작 y, 시작 여백)
-        self._panning = False   # 미리보기를 끌어서 화면 이동 중
         self._rotate_drag = None  # (시작 마우스 x, 시작 기울기 °)
         self._rotate_redraw_id = None
         self._rotate_drag_photo = None
@@ -1062,7 +1105,6 @@ class PDFLevelPreviewApp:
         self.split_size_mb_var = tk.IntVar(value=0)
         self.split_range_text = None
         self._config_saved = CONFIG_DEFAULT  # 마지막으로 불러오거나 저장한 config.json 값 (없으면 기본값)
-        self.crop_edit_var = tk.BooleanVar(value=False)
         # 자르기 칸 옆 [1mm]·[2mm] 라디오 ("0" = 둘 다 꺼짐. ""은 Tk 라디오의 중간 상태라 안 쓴다): 켜면 위·아래·좌·우 칸을
         # 모두 그 값으로, 켜진 것을 다시 누르면 끄고 0으로
         self.crop_quick_var = tk.StringVar(value="0")
@@ -1262,6 +1304,25 @@ class PDFLevelPreviewApp:
         """오른쪽 설정 컬럼. 스크롤 캔버스 하나 안에 모든 설정을 세로로 쌓는다."""
         FNT = UI_FONT
 
+        # 맨 아래 고정 줄: PDF [저장] [다른 이름으로 저장]. 스크롤과 상관없이 늘 보인다 (일반적인 설정 창처럼).
+        # 캔버스보다 먼저 아래에 붙여 둬야 캔버스가 나머지를 채운다. 섹션 색칠(_tint)은 안 받는 기본 바탕
+        footer = tk.Frame(parent, padx=16, pady=8)
+        footer.pack(side=tk.BOTTOM, fill=tk.X)
+        ttk.Separator(parent, orient=tk.HORIZONTAL).pack(side=tk.BOTTOM, fill=tk.X)
+        footer.columnconfigure((0, 1), weight=1, uniform="half")
+        save_btn = tk.Button(footer, text="저장 (Ctrl+S)", command=self.save_pdf, pady=BTN_PADY, cursor="hand2",
+                             font=FNT, bg=SAVE_BTN_BG, fg="white", activebackground=SAVE_BTN_ACTIVE,
+                             activeforeground="white")
+        save_btn.grid(row=0, column=0, sticky="ew", padx=(0, 2))
+        saveas_btn = tk.Button(footer, text="다른 이름으로 저장", command=self.save_edited_pdf, pady=BTN_PADY,
+                               cursor="hand2", font=FNT, bg=SAVEAS_BTN_BG, fg="white",
+                               activebackground=SAVEAS_BTN_ACTIVE, activeforeground="white")
+        saveas_btn.grid(row=0, column=1, sticky="ew", padx=(2, 0))
+        _add_tooltip(save_btn, "Ctrl+S · 숨김 저장: 원본에 덮어쓰고 창을 닫습니다.\n"
+                               "가린 부분·지운 페이지 데이터가 남아 용량은 그대로입니다.")
+        _add_tooltip(saveas_btn, "Ctrl+Shift+S · 보이는 그대로 굳힘: 가린 부분·지운 페이지를 지워\n"
+                                 "용량이 줄고 되돌릴 수 없습니다. 저장한 뒤 창을 닫습니다.")
+
         canvas = tk.Canvas(parent, highlightthickness=0)
         self._settings_canvas = canvas  # 오른쪽 빈 곳을 누르면 여기로 키보드 포커스
         vscroll = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=canvas.yview)
@@ -1405,7 +1466,7 @@ class PDFLevelPreviewApp:
         # 스크롤바 자리와 테두리까지 넣는다. 사용자가 경계선을 끌어 줄이는 것은 그대로 된다(최소 400)
         inner.update_idletasks()
         border = 2 * (parent.winfo_pixels(parent["bd"]) + parent.winfo_pixels(parent["highlightthickness"]))
-        need = inner.winfo_reqwidth() + vscroll.winfo_reqwidth() + border
+        need = max(inner.winfo_reqwidth() + vscroll.winfo_reqwidth(), footer.winfo_reqwidth()) + border
         if need > SETTINGS_W:
             self._paned.paneconfigure(parent, width=need)
 
@@ -1463,7 +1524,7 @@ class PDFLevelPreviewApp:
         # 그 아래 한 줄: ◯ 가로 ◯ 세로 = [자동 보정]이 볼 글줄 방향 (가로쓰기 기본, 창을 열 때마다 가로),
         # 바로 오른쪽 남는 폭 전체에 [자동 보정] (선택한 페이지마다 글줄을 보고 기울기를 넣는다)
         deskew_row = tk.Frame(parent)
-        deskew_row.pack(fill=tk.X, pady=(16, 12))  # 위를 띄워 회전 줄과, 아래를 띄워 자르기 구간과 구분
+        deskew_row.pack(fill=tk.X, pady=(16, 0))  # 위를 띄워 회전 줄과 구분 (아래는 구분선)
         deskew_row.columnconfigure(2, weight=1)
         self.deskew_dir_var = tk.StringVar(value="가로")
         for col, text in enumerate(("가로", "세로")):
@@ -1472,22 +1533,19 @@ class PDFLevelPreviewApp:
                            indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
                            selectcolor=self._bg_color).grid(row=0, column=col, sticky="w", padx=(0, 12))
         self.deskew_btn = tk.Button(deskew_row, text="자동 보정", command=self.auto_deskew, pady=BTN_PADY,
-                                    cursor="hand2", font=FNT, bg=DESKEW_BTN_BG, fg="white",
-                                    activebackground=DESKEW_BTN_ACTIVE, activeforeground="white")
+                                    cursor="hand2", font=FNT)
         self.deskew_btn.grid(row=0, column=2, sticky="ew")
+        _add_tooltip(self.deskew_btn, "선택한 페이지마다 글줄을 보고 기울기를 맞춥니다 (가로/세로 글줄).\n"
+                                      f"{DESKEW_MAX}°를 넘게 기운 페이지는 그대로 두고 빨간 테두리로 알립니다.")
         self._auto_row = deskew_row  # 1° 넘은 쪽 번호 목록이 이 줄 바로 아래에 붙는다
         # 자동 보정 때 DESKEW_MAX°를 넘게 기운 쪽 번호 (있을 때만 이 자리에 보인다, _show_skew_flags)
         self._skew_flag_frame = tk.Frame(parent)
+        ttk.Separator(parent, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=(12, 4))  # 회전 묶음 | 자르기 묶음
 
-        # 자르기 여백 (mm, 화면 기준). 제목 줄 오른쪽에 "선 편집"
+        # 자르기 여백 (mm, 화면 기준). 미리보기는 늘 잘린 결과(저장될 모양)로 보인다
         crop_head = tk.Frame(parent)
         crop_head.pack(fill=tk.X, pady=(8, 0))
         tk.Label(crop_head, text="자르기 (mm)", font=FNT).pack(side=tk.LEFT)
-        tk.Checkbutton(crop_head, text="선 편집", variable=self.crop_edit_var,
-                       command=self._on_crop_edit_toggle, cursor="hand2", font=FNT,
-                       image=self._ind_tk['cb_off'], selectimage=self._ind_tk['cb_on'],
-                       indicatoron=False, compound=tk.LEFT, bd=0, relief=tk.FLAT,
-                       selectcolor=self._bg_color).pack(side=tk.RIGHT)
         grid = tk.Frame(parent)
         grid.pack(anchor=tk.W)
         self.crop_vars = {}
@@ -1526,45 +1584,44 @@ class PDFLevelPreviewApp:
                            indicatoron=False, compound=tk.RIGHT, bd=0, relief=tk.FLAT,
                            selectcolor=self._bg_color).grid(row=row, column=col, sticky=tk.W,
                                                             padx=(16 if col == 6 else 8, 0), pady=2)
+        # [적용]: 자르기 칸 바로 아래 (이 구간의 확정 버튼, 파랑). Enter와 같다
+        apply_btn = tk.Button(parent, text="적용", command=self.apply_crop_range, pady=BTN_PADY,
+                              cursor="hand2", font=FNT, bg=SAVE_BTN_BG, fg="white",
+                              activebackground=SAVE_BTN_ACTIVE, activeforeground="white")
+        apply_btn.pack(fill=tk.X, pady=(8, 0))
+        _add_tooltip(apply_btn, "Enter · 칸에서 바꾼 만큼 선택한 페이지마다 더 자릅니다.\n"
+                                "[적용] 없이 다른 페이지로 가면 넣은 값은 되돌아갑니다.")
         # [검은 여백 자르기]: 선택한 페이지에서 스캐너 검은 배경 띠(직사각형)를 찾아 자른다. 자른 쪽 번호는 바로 아래
         self.band_btn = tk.Button(parent, text="검은 여백 자르기", command=self.auto_black_bands, pady=BTN_PADY,
-                                  cursor="hand2", font=FNT, bg=BAND_BTN_BG, fg="white",
-                                  activebackground=BAND_BTN_ACTIVE, activeforeground="white")
+                                  cursor="hand2", font=FNT)
         self.band_btn.pack(fill=tk.X, pady=(14, 0))  # 위를 띄워 자르기 칸과 구분
+        _add_tooltip(self.band_btn, "선택한 페이지에서 스캐너 검은 배경을 찾아 보통 크기까지 자릅니다.\n"
+                                    "자른 페이지는 썸네일에 초록 테두리로 알립니다. [적용] 없이 바로 확정.")
         self._band_flag_frame = tk.Frame(parent)  # 자른 쪽 번호 (있을 때만 보인다, _show_band_flags)
-        # [현재 크기 저장] [저장 크기 불러오기] 한 줄 (같은 너비 두 칸), 저장한 크기는 그 아래 한 줄
+        # [현재 크기 저장] [저장 크기 불러오기] 한 줄 (같은 너비 두 칸), 저장한 크기는 그 아래 한 줄.
+        # 불러오기는 저장한 크기가 생기기 전에는 흐리게(save_crop_size가 켠다)
         size_row = tk.Frame(parent)
         size_row.pack(fill=tk.X, pady=(4, 0))
         size_row.columnconfigure((0, 1), weight=1, uniform="half")
-        tk.Button(size_row, text="현재 크기 저장", command=self.save_crop_size, pady=BTN_PADY,
-                  cursor="hand2", font=FNT).grid(row=0, column=0, sticky="ew", padx=(0, 2))
-        tk.Button(size_row, text="저장 크기 불러오기", command=self.crop_to_saved_size, pady=BTN_PADY,
-                  cursor="hand2", font=FNT, bg=SAVE_BTN_BG, fg="white",
-                  activebackground=SAVE_BTN_ACTIVE, activeforeground="white"
-                  ).grid(row=0, column=1, sticky="ew", padx=(2, 0))
+        save_size_btn = tk.Button(size_row, text="현재 크기 저장", command=self.save_crop_size, pady=BTN_PADY,
+                                  cursor="hand2", font=FNT)
+        save_size_btn.grid(row=0, column=0, sticky="ew", padx=(0, 2))
+        self.load_size_btn = tk.Button(size_row, text="저장 크기 불러오기", command=self.crop_to_saved_size,
+                                       pady=BTN_PADY, cursor="hand2", font=FNT,
+                                       state=tk.NORMAL if self._saved_crop_box else tk.DISABLED)
+        self.load_size_btn.grid(row=0, column=1, sticky="ew", padx=(2, 0))
+        _add_tooltip(save_size_btn, "지금 페이지의 자른 크기와 위치(위·좌)를 기억합니다.")
+        _add_tooltip(self.load_size_btn, "기억한 크기로 지금 페이지를 자릅니다. [적용]을 눌러야 확정.")
         self.saved_size_label = tk.Label(parent, text="", font=UI_FONT_SMALL, fg="#666", anchor=tk.W)
         self.saved_size_label.pack(fill=tk.X)
-        apply_row = tk.Frame(parent)
-        apply_row.pack(fill=tk.X, pady=(4, 0))
-        tk.Button(apply_row, text="초기화", command=self.reset_edits, pady=BTN_PADY,
-                  cursor="hand2", font=FNT).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
-        tk.Button(apply_row, text="적용", command=self.apply_crop_range, pady=BTN_PADY,
-                  cursor="hand2", font=FNT, bg=SAVE_BTN_BG, fg="white",
-                  activebackground=SAVE_BTN_ACTIVE, activeforeground="white"
-                  ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0))
 
-        # [저장] = 숨김(원본에 덮어씀), [다른 이름으로 저장] = 보이는 그대로 굳힘. 아래에 차이를 짧게 적어 둔다
-        for i, (text, cmd, note, bg, active) in enumerate((
-                ("저장 (Ctrl+S)", self.save_pdf, "숨김 저장: 가린 부분·지운 페이지 데이터가 남아 용량 그대로",
-                 SAVE_PDF_BG, SAVE_PDF_ACTIVE),
-                ("다른 이름으로 저장 (Ctrl+Shift+S)", self.save_edited_pdf,
-                 "보이는 그대로 굳힘: 가린 부분·지운 페이지를 지워 용량이 줄고 되돌릴 수 없음",
-                 SAVEAS_BTN_BG, SAVEAS_BTN_ACTIVE))):
-            tk.Button(parent, text=text, command=cmd, padx=12, pady=BTN_PADY, cursor="hand2", font=FNT,
-                      bg=bg, fg="white", activebackground=active,
-                      activeforeground="white").pack(fill=tk.X, pady=(28 if i == 0 else 12, 0))
-            tk.Label(parent, text=note, font=UI_FONT_SMALL, fg="#666", anchor=tk.W, justify=tk.LEFT,
-                     wraplength=440).pack(fill=tk.X, pady=(2, 0))
+        # 맨 끝: 선택한 페이지의 이번 편집(90° 회전·기울기·자르기)을 모두 되돌린다
+        ttk.Separator(parent, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=(12, 8))
+        reset_btn = tk.Button(parent, text="선택한 페이지 편집 초기화", command=self.reset_edits, pady=BTN_PADY,
+                              cursor="hand2", font=FNT)
+        reset_btn.pack(fill=tk.X)
+        _add_tooltip(reset_btn, "선택한 페이지의 90° 회전·기울기·자르기를 파일을 연 상태로 되돌립니다.\n"
+                                "(전에 저장해 둔 편집은 그대로)")
 
     def _build_crop_config(self, parent):
         """자르기 설정 (config.json의 crop_mm, 자동화 프로그램용). 편집기의 자르기와는 별개"""
@@ -2429,11 +2486,6 @@ class PDFLevelPreviewApp:
             self._sel_anchor = page_idx
         self.current_page = page_idx
         self._update_page_label()
-        if self.crop_edit_var.get():
-            # 다른 페이지는 저장될 모양(잘린 결과)으로 본다. 다시 만지면 선 편집이 켜진다
-            self.crop_edit_var.set(False)
-            self.preview_canvas.config(cursor="")
-            self._draw_crop_overlay()
         self._draw_selection()
         self._sync_edit_panel()
         self.update_preview()
@@ -3033,7 +3085,7 @@ class PDFLevelPreviewApp:
         """
         cw = max(1, self.preview_canvas.winfo_width() - PREVIEW_PAD * 2)
         ch = max(1, self.preview_canvas.winfo_height() - PREVIEW_PAD * 2)
-        if self.pdf_doc is not None and not self.crop_edit_var.get():
+        if self.pdf_doc is not None:
             top, bottom, left, right = self._page_edit(self.current_page)["crop"]
             if top or bottom or left or right:
                 w, h = self._page_disp_size(self.current_page)
@@ -3210,7 +3262,6 @@ class PDFLevelPreviewApp:
         self._img_clip = (x0, y0, x0 + iw, y0 + ih)
         # 좌표 계산은 자르기 전 전체 이미지 기준이라, 잘라낸 만큼 원점을 왼쪽 위로 옮겨 둔다
         self._img_origin = (x0 - cut[0], y0 - cut[1]) if cut else (x0, y0)
-        self._draw_crop_overlay()
         self._draw_cfg_crop_lines()
         self._draw_rotate_grid()
         # 그사이 각도가 더 바뀌었으면(←/→ 연타, 드래그 중) 예전 각도 화면으로 튀지 않게 바로 덮는다
@@ -3225,75 +3276,25 @@ class PDFLevelPreviewApp:
             self._draw_preview()
 
     def _on_drag_start(self, event):
-        self._crop_drag = None
+        """미리보기: 페이지 위를 끌면 기울기 회전 (둘레 회색 바탕은 아무것도 안 한다).
+        예전의 "선 편집"(자르기 선·박스를 끌기)은 사용자 요청으로 없앴다. 자르기는 칸 숫자로만 넣는다"""
         self._rotate_drag = None
-        self._panning = False
         self.preview_canvas.focus_set()  # 입력칸에서 포커스를 빼야 ←/→가 회전으로 간다
-        if self._rotate_drag_on():
-            if self._on_page(event):
-                self._start_rotate_drag(event)
-            return
-        target = self._crop_hit(event)  # 여기까지 오면 "선 편집" 중
-        if target:
-            self._crop_drag = (target, self.preview_canvas.canvasx(event.x),
-                               self.preview_canvas.canvasy(event.y),
-                               self._page_edit(self.current_page)["crop"])
-            return
-        if not self._on_page(event):
-            return  # 둘레 회색 바탕은 아무것도 안 한다
-        self._panning = True
-        self.preview_canvas.scan_mark(event.x, event.y)
+        if self._on_page(event):
+            self._start_rotate_drag(event)
 
     def _on_drag_move(self, event):
         if self._rotate_drag is not None:
             self._rotate_drag_move(event)
-            return
-        if self._crop_drag is None:
-            if self._panning:
-                self.preview_canvas.scan_dragto(event.x, event.y, gain=1)
-            return
-        res = self._crop_canvas_rect()
-        if res is None:
-            return
-        _, s = res
-        target, sx, sy, (top, bottom, left, right) = self._crop_drag
-        mx = self.preview_canvas.canvasx(event.x)
-        my = self.preview_canvas.canvasy(event.y)
-        w, h = self._page_disp_size(self.current_page)
-        if target == "move":
-            # 크기는 그대로, 페이지 밖으로는 못 나가게
-            dx = max(-left, min(right, (mx - sx) / s))
-            dy = max(-top, min(bottom, (my - sy) / s))
-            margins = [top + dy, bottom - dy, left + dx, right - dx]
-        else:
-            margins = [top, bottom, left, right]
-            i = CROP_SIDES.index(target)
-            # 변은 마우스 위치로 바로 옮긴다. 선에서 조금 떨어진 곳을 잡아도 선이 포인터 밑으로 따라온다
-            ox, oy = self._img_origin
-            px, py = (mx - ox) / s, (my - oy) / s  # 페이지 왼쪽 위 기준 pt
-            d = {"top": py, "bottom": h - py, "left": px, "right": w - px}[target]
-            opposite = margins[i ^ 1]  # 위<->아래, 좌<->우
-            span = h if target in ("top", "bottom") else w
-            margins[i] = max(0.0, min(span - MIN_CROP_PT - opposite, d))
-        self._set_page_edit(self.current_page, crop=_clamp_margins(margins, w, h))
-        self._sync_edit_panel()
-        self._draw_crop_overlay()
 
     def _on_drag_end(self, event):
-        self._crop_drag = None
         if self._rotate_drag is not None:
             self._end_rotate_drag()
         if self._thumb_dirty:
             self._schedule_thumb_redraw()  # 끄는 동안 미뤄 둔 썸네일
 
     def _on_preview_hover(self, event):
-        cursor = ""
-        if self._rotate_drag_on():
-            cursor = "exchange" if self._on_page(event) else ""
-        elif self.crop_edit_var.get():
-            cursor = {"top": "sb_v_double_arrow", "bottom": "sb_v_double_arrow",
-                      "left": "sb_h_double_arrow", "right": "sb_h_double_arrow",
-                      "move": "fleur"}.get(self._crop_hit(event), "")
+        cursor = "exchange" if self._on_page(event) else ""  # 페이지 위 = 끌어서 회전
         if self.preview_canvas.cget("cursor") != cursor:
             self.preview_canvas.config(cursor=cursor)
 
@@ -3358,7 +3359,7 @@ class PDFLevelPreviewApp:
     def _redraw_dirty_thumbs(self):
         """편집값이 바뀐 페이지의 썸네일을 다시 그린다. 드래그 중이면 놓을 때까지 미룬다"""
         self._thumb_redraw_id = None
-        if self._crop_drag is not None or self._rotate_drag is not None:
+        if self._rotate_drag is not None:
             return  # _on_drag_end가 다시 예약한다
         dirty, self._thumb_dirty = self._thumb_dirty, set()
         drawn = [idx for idx in dirty if idx in self._drawn_pages]
@@ -3480,7 +3481,6 @@ class PDFLevelPreviewApp:
         for p in procs:
             p.start()
         self._deskew_procs = procs
-        self._set_drag_mode("rotate")  # 선 편집을 끄고 돌린 결과를 보여 준다
         self._poll_deskew(procs, res_q, label, len(jobs), [0, 0, 0], vertical)
 
     def _poll_deskew(self, procs, res_q, label, total, count, vertical=False):
@@ -3602,7 +3602,6 @@ class PDFLevelPreviewApp:
         for p in procs:
             p.start()
         self._band_procs = procs
-        self._set_drag_mode("rotate")  # 선 편집을 끄고 잘린 결과를 보여 준다
         self._poll_bands(procs, res_q, label, len(jobs), [0, 0], ref)
 
     def _poll_bands(self, procs, res_q, label, total, count, ref):
@@ -3729,7 +3728,6 @@ class PDFLevelPreviewApp:
         # 칸은 합계(파일에 이미 들어간 기울기 + 이번 편집). 파일은 이미 돌아가 있으니 차이만 더 돌린다
         self._set_page_edit(self.current_page, angle=round(angle - self._saved_angle(self.current_page), 2) + 0.0)
         self._ops_done.add("angle")
-        self._set_drag_mode("rotate")  # 각도를 입력하면 미리보기를 끌어서 돌릴 수 있게
         self._schedule_quick_rotation()  # 바로 임시 화면을 띄우고
         self._on_var_change()  # 정식 미리보기는 레벨 입력처럼 잠깐 뒤에 갱신
 
@@ -3747,6 +3745,8 @@ class PDFLevelPreviewApp:
                 self.crop_vars[side].set(value)
         finally:
             self._crop_quick_setting = False
+        if self.pdf_doc is not None:
+            self._refresh_preview()  # 네 칸을 다 바꾼 뒤 한 번만 잘린 결과로
 
     def _sync_crop_quick(self):
         """네 칸이 모두 0.5·1·1.5·2 중 하나로 같으면 그 라디오를 켜고 아니면 모두 끈다 (칸을 직접 고치거나 페이지를 옮겼을 때)"""
@@ -3773,7 +3773,7 @@ class PDFLevelPreviewApp:
 
     def _nudge_angle_key(self, event, delta):
         """입력칸 밖 ←/→·↑/↓ 회전은 가운데(미리보기) 구간에 키보드가 있을 때만"""
-        if not self._rotate_drag_on() or self._region_of(event.widget) != "center":
+        if self._region_of(event.widget) != "center":
             return None
         return self._nudge_angle(delta)
 
@@ -3785,10 +3785,6 @@ class PDFLevelPreviewApp:
         cx = self.preview_canvas.canvasx(event.x)
         cy = self.preview_canvas.canvasy(event.y)
         return x0 <= cx <= x1 and y0 <= cy <= y1
-
-    def _rotate_drag_on(self):
-        """미리보기를 끌어서 회전하는지: "선 편집"이 꺼져 있을 때 (선 편집 중에는 선 드래그). 격자 보기와 무관"""
-        return not self.crop_edit_var.get()
 
     def _on_grid_toggle(self):
         self.preview_canvas.config(cursor="")
@@ -3898,28 +3894,11 @@ class PDFLevelPreviewApp:
         self._set_page_edit(self.current_page, crop=_clamp_margins(margins, w, h))
         if not self._crop_quick_setting:
             self._sync_crop_quick()
-        self._set_drag_mode("crop")  # 여백을 입력하면 선을 끌어서 맞출 수 있게
-        self._draw_crop_overlay()
-
-    def _set_drag_mode(self, mode):
-        """미리보기 드래그 용도: "crop" = 선 편집, "rotate" = 드래그 회전(선 편집 끔). 격자 보기는 건드리지 않는다"""
-        was_edit = self.crop_edit_var.get()
-        self.crop_edit_var.set(mode == "crop")
-        self.preview_canvas.config(cursor="")
-        if was_edit != (mode == "crop"):
-            self._refresh_preview()  # 선 화면 ↔ 잘린 결과
-        self._draw_rotate_grid()
-
-    def _on_crop_edit_toggle(self):
-        self.preview_canvas.config(cursor="")
-        self._refresh_preview()  # 켜면 자르기 전 전체 화면 + 선, 끄면 잘린 결과
+            self._refresh_preview()  # 잘린 결과로 바로 (맞춤 보기면 남는 크기에 맞춰 다시 렌더)
 
     def _preview_cut_box(self):
-        """미리보기에서 남길 픽셀 영역 (l, t, r, b). "선 편집"이 꺼져 있으면 항상 저장될 모양대로 자른다.
-
-        선 편집 중이거나 자르기가 없으면 None (전체 페이지).
-        """
-        if self.crop_edit_var.get() or self._shown_key is None or self.pdf_doc is None:
+        """미리보기에서 남길 픽셀 영역 (l, t, r, b). 미리보기는 늘 저장될 모양대로 자른다. 자르기가 없으면 None"""
+        if self._shown_key is None or self.pdf_doc is None:
             return None
         # 화면 이미지의 페이지 (렌더 대기 중이면 현재 페이지와 다를 수 있다)
         page = self._uid_index(self._shown_key[0])
@@ -3960,8 +3939,6 @@ class PDFLevelPreviewApp:
         self._pending_fit_uid = None  # [저장 크기 불러오기]의 박스도 이제 확정
         self._ops_done.add("crop")  # 저장할 때 실제로 잘린 페이지가 있을 때만 적힌다
         self._sync_edit_panel()  # 확정했으니 칸은 다시 0부터
-        self.crop_edit_var.set(False)  # 선 편집이 꺼지면 잘린 결과가 보인다
-        self.preview_canvas.config(cursor="")
         self._refresh_preview()
         # 무엇을 얼마나 더했는지 (0.1mm 단위, 바꾼 변만)
         moved = [f"{name} {round(_pt_to_mm(d), 1):+g}" for name, d in zip(("위", "아래", "좌", "우"), delta)
@@ -4026,6 +4003,7 @@ class PDFLevelPreviewApp:
         w, h = self._page_disp_size(self.current_page)
         top, bottom, left, right = self._page_edit(self.current_page)["crop"]
         self._saved_crop_box = (top, left, w - left - right, h - top - bottom)
+        self.load_size_btn.config(state=tk.NORMAL)
         sw, sh = self._saved_crop_box[2:]
         self.saved_size_label.config(
             text=f"저장한 크기: {_pt_to_mm(sw):.1f} × {_pt_to_mm(sh):.1f} mm "
@@ -4055,9 +4033,8 @@ class PDFLevelPreviewApp:
         self._selected = {self.current_page}
         self._sel_anchor = self.current_page
         self._draw_selection()
-        self._set_drag_mode("crop")
         self._sync_edit_panel()
-        self._draw_crop_overlay()
+        self._refresh_preview()  # 맞춘 크기로 잘린 결과
 
     def _discard_unapplied_crop(self):
         """보던 페이지에서 [적용]하지 않은 자르기(숫자 입력·선 끌기·[저장 크기 불러오기])를 입력 전 값으로 되돌린다.
@@ -4087,48 +4064,6 @@ class PDFLevelPreviewApp:
         ox, oy = self._img_origin
         top, bottom, left, right = e["crop"]
         return (ox + left * s, oy + top * s, ox + (w - right) * s, oy + (h - bottom) * s), s
-
-    def _crop_hit(self, event):
-        """마우스 아래의 자르기 대상: 변 이름, 박스 안쪽이면 "move", 없으면 None"""
-        res = self._crop_canvas_rect()
-        if res is None:
-            return None
-        (x0, y0, x1, y1), _ = res
-        cx = self.preview_canvas.canvasx(event.x)
-        cy = self.preview_canvas.canvasy(event.y)
-        g = CROP_GRAB_PX
-        if not (x0 - g <= cx <= x1 + g and y0 - g <= cy <= y1 + g):
-            return None
-        if abs(cy - y0) <= g:
-            return "top"
-        if abs(cy - y1) <= g:
-            return "bottom"
-        if abs(cx - x0) <= g:
-            return "left"
-        if abs(cx - x1) <= g:
-            return "right"
-        return "move"
-
-    def _draw_crop_overlay(self):
-        """자르기 선: 잘릴 영역은 어둡게, 남는 영역은 파란 선. 태그 "crop"만 지우고 다시 그린다"""
-        canvas = self.preview_canvas
-        canvas.delete("crop")
-        if not self.crop_edit_var.get():
-            return  # 선 편집이 아니면 잘린 결과가 보이므로 선은 필요 없다
-        res = self._crop_canvas_rect()
-        if res is None:
-            return
-        # 자르기가 없는 페이지도 테두리에 선을 그려 바로 잡아당길 수 있게 한다
-        (x0, y0, x1, y1), _ = res
-        ox, oy = self._img_origin
-        ix1 = ox + self.current_img.width
-        iy1 = oy + self.current_img.height
-        shade = dict(fill="black", stipple="gray50", outline="", tags="crop")
-        canvas.create_rectangle(ox, oy, ix1, y0, **shade)   # 위
-        canvas.create_rectangle(ox, y1, ix1, iy1, **shade)  # 아래
-        canvas.create_rectangle(ox, y0, x0, y1, **shade)    # 좌
-        canvas.create_rectangle(x1, y0, ix1, y1, **shade)   # 우
-        canvas.create_rectangle(x0, y0, x1, y1, outline="#1e90ff", width=2, tags="crop")
 
     def read_text_on_screen(self):
         """[문자 읽기]: PowerToys 텍스트 추출기 단축키 Win+Shift+T를 대신 눌러, 화면에서 끌어 고른 곳의 글자를 읽게 한다.
@@ -4419,12 +4354,8 @@ class PDFLevelPreviewApp:
 
         self.split_detail_frame = tk.Frame(parent)
 
-        self._split_bottom = tk.Frame(parent)
+        self._split_bottom = tk.Frame(parent)  # 분할 칸(범위·크기)이 이 앞에 붙는다
         self._split_bottom.pack(fill=tk.X)
-        tk.Button(self._split_bottom, text="설정 저장", command=self._save_config,
-                  padx=12, pady=BTN_PADY, cursor="hand2", font=FNT,
-                  bg=CFG_SAVE_BG, fg="white", activebackground=CFG_SAVE_ACTIVE,
-                  activeforeground="white").pack(fill=tk.X, pady=(12, 0))
 
         self._toggle_split_detail()
 
@@ -4468,6 +4399,12 @@ class PDFLevelPreviewApp:
         # 목록 끝(C/C++) 아래 여백. 목록은 항상 이 위에 붙인다
         self._ocr_bottom_pad = tk.Frame(parent, height=16)
         self._ocr_bottom_pad.pack(fill=tk.X)
+        # [설정 저장]: 이 구간 맨 끝 (확정 버튼, 파랑). 예전엔 분할 아래·OCR 위 중간에 있었다
+        cfg_btn = tk.Button(parent, text="설정 저장", command=self._save_config, pady=BTN_PADY, cursor="hand2",
+                            font=FNT, bg=SAVE_BTN_BG, fg="white", activebackground=SAVE_BTN_ACTIVE,
+                            activeforeground="white")
+        cfg_btn.pack(fill=tk.X)
+        _add_tooltip(cfg_btn, "이 구간 값을 PDF 폴더의 config.json에 저장합니다 (자동화 프로그램이 읽음).")
 
         # 초기 상태: 안함이므로 언어 목록 숨김
         if self.ocr_enabled_var.get():
