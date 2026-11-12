@@ -1173,6 +1173,7 @@ class PDFLevelPreviewApp:
         self._thumb_redraw_id = None
         self._edits_dirty = False
         self._rotate_drag = None  # (시작 마우스 x, 시작 기울기 °, 같이 돌릴 페이지들)
+        self._fit_drag = None  # [저장 크기 불러오기] 박스 옮기기: (시작 캔버스 x, y, 시작 여백 pt)
         self._rotate_redraw_id = None
         self._rotate_drag_photo = None
         self._syncing_edit = False  # 코드에서 편집 입력칸을 채우는 중 (되먹임 방지)
@@ -3401,29 +3402,57 @@ class PDFLevelPreviewApp:
 
     def _on_drag_start(self, event):
         """미리보기: 페이지 위를 끌면 기울기 회전 (둘레 회색 바탕은 아무것도 안 한다).
-        예전의 "선 편집"(자르기 선·박스를 끌기)은 사용자 요청으로 없앴다. 자르기는 칸 숫자로만 넣는다"""
+        [저장 크기 불러오기]로 놓은 박스가 [적용] 전이면 대신 그 박스를 끌어 옮긴다 (크기는 그대로).
+        예전의 "선 편집"(자르기 선·박스를 마음대로 끌기)은 사용자 요청으로 없앴다"""
         self._rotate_drag = None
+        self._fit_drag = None
         self.preview_canvas.focus_set()  # 입력칸에서 포커스를 빼야 ←/→가 회전으로 간다
-        if self._on_page(event) and not self._fit_pending():
-            self._start_rotate_drag(event)
+        if not self._on_page(event):
+            return
+        if self._fit_pending():
+            if self._crop_canvas_rect() is not None:  # 렌더 대기 중이 아니면
+                self._fit_drag = (self.preview_canvas.canvasx(event.x), self.preview_canvas.canvasy(event.y),
+                                  list(self._page_edit(self.current_page)["crop"]))
+            return
+        self._start_rotate_drag(event)
 
     def _fit_pending(self):
-        """보고 있는 페이지에 [저장 크기 불러오기]로 놓은 박스가 [적용] 전인지. 그동안은 미리보기 끌기·←→ 회전을 막는다
-        (불러온 영역을 보는 중에 실수로 돌아가지 않게, 사용자 요청). 회전 칸에 직접 넣는 것은 된다"""
+        """보고 있는 페이지에 [저장 크기 불러오기]로 놓은 박스가 [적용] 전인지. 그동안은 미리보기를 끌면 회전 대신
+        박스를 옮기고, ←→ 회전은 막는다 (불러온 영역을 맞추다 실수로 돌아가지 않게, 사용자 요청). 회전 칸에 직접 넣는 것은 된다"""
         return self._pending_fit_uid is not None and self._pending_fit_uid == self._cur_uid()
+
+    def _fit_drag_move(self, event):
+        """[저장 크기 불러오기] 박스를 끈 만큼 옮긴다. 크기는 그대로, 페이지 밖으로는 못 나간다"""
+        res = self._crop_canvas_rect()
+        if res is None:
+            return
+        _, s = res  # 화면 px / pt
+        sx, sy, (top, bottom, left, right) = self._fit_drag
+        dx = max(-left, min(right, (self.preview_canvas.canvasx(event.x) - sx) / s))
+        dy = max(-top, min(bottom, (self.preview_canvas.canvasy(event.y) - sy) / s))
+        crop = [top + dy, bottom - dy, left + dx, right - dx]
+        self._set_page_edit(self.current_page, crop=crop)  # 다음 불러오기도 이 위치를 이어받는다 (_last_fit_pos)
+        self._crop_field_base = list(crop)  # 칸은 옮긴 박스에서 0부터 (불러온 박스처럼)
+        self._sync_edit_panel()
+        self._draw_crop_overlay()
 
     def _on_drag_move(self, event):
         if self._rotate_drag is not None:
             self._rotate_drag_move(event)
+        elif self._fit_drag is not None:
+            self._fit_drag_move(event)
 
     def _on_drag_end(self, event):
+        self._fit_drag = None
         if self._rotate_drag is not None:
             self._end_rotate_drag()
         if self._thumb_dirty:
             self._schedule_thumb_redraw()  # 끄는 동안 미뤄 둔 썸네일
 
     def _on_preview_hover(self, event):
-        cursor = "exchange" if self._on_page(event) and not self._fit_pending() else ""  # 페이지 위 = 끌어서 회전
+        cursor = ""
+        if self._on_page(event):  # 페이지 위 = 끌어서 회전, [저장 크기 불러오기] [적용] 전이면 끌어서 박스 옮기기
+            cursor = "fleur" if self._fit_pending() else "exchange"
         if self.preview_canvas.cget("cursor") != cursor:
             self.preview_canvas.config(cursor=cursor)
 
