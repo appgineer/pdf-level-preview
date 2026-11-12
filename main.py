@@ -76,6 +76,8 @@ SECTION_LINE_W = 2
 # 드래그 회전: 마우스를 좌우로 이 픽셀만큼 끌 때마다 0.1°씩 (오른쪽으로 = 오른쪽/시계방향).
 # 값이 작을수록 빨리 돈다 (2 = 1°에 20px)
 ROTATE_DRAG_PX = 2
+# [저장 크기 불러오기] 박스를 [적용] 전에 미리보기 구간 방향키로 옮기는 한 번 거리 (mm)
+FIT_NUDGE_MM = 0.1
 # 드래그 회전 중 미리보기에 겹쳐 그리는 바둑판 격자 (화면 px 간격, 색). 글줄이 격자와 나란하면 수평
 ROTATE_GRID_PX = 20
 ROTATE_GRID_COLOR = "#00a0e0"
@@ -1549,7 +1551,8 @@ class PDFLevelPreviewApp:
         self.white_var.trace_add("write", self._on_var_change)
         # 분할 범위 입력칸(Text)의 줄바꿈 Enter와 편집/자르기 설정 입력칸의 Enter는 레벨 추가로 보내지 않는다
         self.root.bind("<Return>", self._on_return)
-        # "선 편집"이 꺼져 있으면 입력칸 밖에서도 ←/→·↑/↓로 0.1°씩 돌린다 (→ ↑ = 오른쪽, 입력칸 안에서는 글자 커서 이동)
+        # 입력칸 밖 가운데 구간에서 ←/→·↑/↓로 0.1°씩 돌린다 (→ ↑ = 오른쪽, 입력칸 안에서는 글자 커서 이동).
+        # [저장 크기 불러오기] [적용] 전이면 대신 박스를 0.1mm씩 옮긴다 (_nudge_angle_key)
         self.root.bind("<Left>",  lambda e: self._nudge_angle_key(e, -0.1))
         self.root.bind("<Right>", lambda e: self._nudge_angle_key(e, +0.1))
         self.root.bind("<Down>",  lambda e: self._nudge_angle_key(e, -0.1))
@@ -3331,14 +3334,21 @@ class PDFLevelPreviewApp:
         return self._pending_fit_uid is not None and self._pending_fit_uid == self._cur_uid()
 
     def _fit_drag_move(self, event):
-        """[저장 크기 불러오기] 박스를 끈 만큼 옮긴다. 크기는 그대로, 페이지 밖으로는 못 나간다"""
+        """[저장 크기 불러오기] 박스를 끈 만큼 옮긴다"""
         res = self._crop_canvas_rect()
         if res is None:
             return
         _, s = res  # 화면 px / pt
-        sx, sy, (top, bottom, left, right) = self._fit_drag
-        dx = max(-left, min(right, (self.preview_canvas.canvasx(event.x) - sx) / s))
-        dy = max(-top, min(bottom, (self.preview_canvas.canvasy(event.y) - sy) / s))
+        sx, sy, base = self._fit_drag
+        self._move_fit_box(base, (self.preview_canvas.canvasx(event.x) - sx) / s,
+                           (self.preview_canvas.canvasy(event.y) - sy) / s)
+
+    def _move_fit_box(self, base, dx, dy):
+        """[저장 크기 불러오기] 박스(여백 base [위, 아래, 좌, 우] pt)를 오른쪽 dx·아래 dy pt 옮긴다.
+        크기는 그대로, 페이지 밖으로는 못 나간다 (마우스 끌기·방향키)"""
+        top, bottom, left, right = base
+        dx = max(-left, min(right, dx))
+        dy = max(-top, min(bottom, dy))
         crop = [top + dy, bottom - dy, left + dx, right - dx]
         self._set_page_edit(self.current_page, crop=crop)  # 다음 불러오기도 이 위치를 이어받는다 (_last_fit_pos)
         self._crop_field_base = list(crop)  # 칸은 옮긴 박스에서 0부터 (불러온 박스처럼)
@@ -3905,9 +3915,16 @@ class PDFLevelPreviewApp:
         return "break"
 
     def _nudge_angle_key(self, event, delta):
-        """입력칸 밖 ←/→·↑/↓ 회전은 가운데(미리보기) 구간에 키보드가 있을 때만"""
-        if self._region_of(event.widget) != "center" or self._fit_pending():
+        """입력칸 밖 ←/→·↑/↓ 회전은 가운데(미리보기) 구간에 키보드가 있을 때만.
+        [저장 크기 불러오기] 박스가 [적용] 전이면 회전 대신 박스를 그 방향으로 FIT_NUDGE_MM씩 옮긴다 (사용자 요청)"""
+        if self._region_of(event.widget) != "center":
             return None
+        if self._fit_pending():
+            step = _mm_to_pt(FIT_NUDGE_MM)
+            move = {"Left": (-step, 0), "Right": (step, 0), "Up": (0, -step), "Down": (0, step)}.get(event.keysym)
+            if move is not None:
+                self._move_fit_box(self._page_edit(self.current_page)["crop"], *move)
+            return "break"
         return self._nudge_angle(delta)
 
     def _on_page(self, event):
@@ -4232,6 +4249,7 @@ class PDFLevelPreviewApp:
         self._draw_selection()
         self._sync_edit_panel()
         self._refresh_preview()  # 페이지 전체 위에 불러온 영역 표시, [적용]을 눌러야 잘린 모양
+        self.preview_canvas.focus_set()  # 바로 방향키로 박스를 옮기고 Enter로 [적용]하게 키보드를 미리보기로
 
     def _discard_unapplied_crop(self):
         """보던 페이지에서 [적용]하지 않은 자르기(숫자 입력·선 끌기·[저장 크기 불러오기])를 입력 전 값으로 되돌린다.
